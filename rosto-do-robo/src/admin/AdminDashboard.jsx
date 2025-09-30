@@ -1,3 +1,4 @@
+// rosto-do-robo/src/admin/AdminDashboard.jsx
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { adminGet, adminPost, adminPut, clearAdminKey } from "./adminApi";
