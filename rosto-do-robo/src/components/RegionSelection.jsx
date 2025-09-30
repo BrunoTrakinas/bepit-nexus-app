@@ -19,7 +19,7 @@ export default function RegionSelection({ onRegionSelect, theme }) {
       color: theme.text,
       textAlign: 'center'
     }}>
-      <img src="/logo-bepit.png" alt="Logo BEPIT Nexus" style={{ width: '150px', marginBottom: '40px' }} />
+      <img src="/https://i.postimg.cc/8cx8ZVtL/bepit-logo.jpg" alt="Logo BEPIT Nexus" style={{ width: '150px', marginBottom: '40px' }} />
       <h1 style={{ marginBottom: '10px' }}>Bem-vindo ao BEPIT Nexus</h1>
       <p style={{ marginBottom: '40px', color: '#888' }}>Selecione sua região para começar</p>
       
