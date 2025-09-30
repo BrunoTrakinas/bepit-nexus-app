@@ -1,0 +1,33 @@
+# Configuração de Build COMPLETA
+# Isto diz ao Netlify para trabalhar apenas dentro da pasta 'rosto-do-robo'
+[build]
+  base    = "rosto-do-robo"
+  command = "npm run build"
+  publish = "rosto-do-robo/dist"
+
+# Redirecionamento da API para o seu backend no Render
+[[redirects]]
+  from = "/api/*"
+  to = "https://bepit-nexus-backend.onrender.com/api/:splat" # URL CORRETO
+  status = 200
+  force = true
+
+# Redirecionamento da página de Admin para o seu backend no Render
+# (Se o seu admin for uma página HTML servida pelo backend, isso pode ajudar)
+[[redirects]]
+  from = "/admin"
+  to = "https://bepit-nexus-backend.onrender.com/admin" # URL CORRETO
+  status = 200
+  force = true
+[[redirects]]
+  from = "/admin/*"
+  to = "https://bepit-nexus-backend.onrender.com/admin/:splat" # URL CORRETO
+  status = 200
+  force = true
+
+# Regra de fallback para o React (Single Page App)
+# IMPORTANTE: Esta deve ser a ÚLTIMA regra de redirecionamento.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
