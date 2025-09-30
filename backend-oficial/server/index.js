@@ -807,7 +807,62 @@ aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChave
     return resposta.status(500).json({ error: "Erro interno." });
   }
 });
+// Atualizar parceiro/dica por ID
+aplicacaoExpress.put("/api/admin/parceiros/:id", exigirChaveDeAdministrador, async (requisicao, resposta) => {
+  try {
+    const { id } = requisicao.params;
+    const body = requisicao.body || {};
 
+    // Campos permitidos para update
+    const camposPermitidos = [
+      "nome",
+      "categoria",
+      "descricao",
+      "beneficio_bepit",
+      "endereco",
+      "contato",
+      "tags",
+      "horario_funcionamento",
+      "faixa_preco",
+      "fotos",
+      "fotos_parceiros",
+      "ativo"
+    ];
+
+    const patch = {};
+    for (const k of camposPermitidos) {
+      if (k in body) {
+        patch[k] = body[k];
+      }
+    }
+
+    // Normaliza fotos/fotos_parceiros
+    if (Array.isArray(patch.fotos) && !Array.isArray(patch.fotos_parceiros)) {
+      patch.fotos_parceiros = patch.fotos;
+    }
+
+    const { data, error } = await supabase
+      .from("parceiros")
+      .update(patch)
+      .eq("id", id)
+      .select("*")
+      .single();
+
+    if (error) {
+      console.error("[PUT /api/admin/parceiros/:id] Supabase erro:", error);
+      return resposta.status(500).json({ error: "Erro ao atualizar parceiro/dica." });
+    }
+
+    if (!data) {
+      return resposta.status(404).json({ error: "Registro não encontrado." });
+    }
+
+    return resposta.json({ ok: true, data });
+  } catch (erro) {
+    console.error("[PUT /api/admin/parceiros/:id] Erro:", erro);
+    return resposta.status(500).json({ error: "Erro interno." });
+  }
+});
 aplicacaoExpress.post("/api/admin/regioes", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
     const { nome, slug, ativo = true } = requisicao.body || {};
