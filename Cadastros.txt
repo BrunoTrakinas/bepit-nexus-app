@@ -1,0 +1,261 @@
+Ótimas perguntas! Vamos direto ao ponto, bem organizadinho.
+
+# O que cadastrar em cada tabela
+
+Use **só o Supabase (Table Editor ou SQL)** para cadastrar/ativar. O backend que te passei já funciona lendo do banco — não precisa mexer em código para “ativar” uma região nova.
+
+**Tabelas principais:**
+
+* **`regioes`** → cada região macro (ex.: *Região dos Lagos*, *Costa Verde*, *Região Serrana*, *Gramado/Canela*).
+* **`cidades`** → cidades que pertencem a uma região (Cabo Frio, Búzios, Paraty…).
+* **`parceiros`** → tanto **parceiros** quanto **dicas** (campo `tipo` = `'PARCEIRO'` ou `'DICA'`).
+  Cada linha **pertence a uma cidade** via `cidade_id`.
+
+**Histórico/analytics (já prontos no esquema):**
+
+* `conversas`, `interacoes` → histórico do chat.
+* `buscas_texto`, `eventos_analytics`, `parceiro_views` → base para métricas.
+
+---
+
+# Posso cadastrar direto nas tabelas?
+
+Sim. Você pode usar o **Table Editor** do Supabase ou rodar **SQL**.
+Aqui vão **comandos prontos** (cole no SQL Editor).
+
+## 1) Criar/ativar uma REGIÃO
+
+```sql
+-- Ativar/Inserir a região (com slug único)
+insert into public.regioes (nome, slug)
+values ('Região dos Lagos', 'regiao-dos-lagos')
+on conflict (slug) do nothing;
+
+-- Conferir
+select * from public.regioes order by nome;
+```
+
+## 2) Criar as CIDADES da região
+
+```sql
+-- Troque 'regiao-dos-lagos' pelo slug da sua região
+insert into public.cidades (regiao_id, nome, slug)
+select id, 'Búzios', 'buzios' from public.regioes where slug='regiao-dos-lagos'
+on conflict do nothing;
+
+insert into public.cidades (regiao_id, nome, slug)
+select id, 'Cabo Frio', 'cabo-frio' from public.regioes where slug='regiao-dos-lagos'
+on conflict do nothing;
+
+insert into public.cidades (regiao_id, nome, slug)
+select id, 'Arraial do Cabo', 'arraial-do-cabo' from public.regioes where slug='regiao-dos-lagos'
+on conflict do nothing;
+
+select r.nome as regiao, c.*
+from public.cidades c
+join public.regioes r on r.id=c.regiao_id
+order by r.nome, c.nome;
+```
+
+## 3) Cadastrar um PARCEIRO (ou DICA)
+
+> `tipo` controla se é **parceiro** (`'PARCEIRO'`) ou **dica** (`'DICA'`).
+
+```sql
+-- Exemplo: parceiro em Búzios
+insert into public.parceiros
+(cidade_id, tipo, nome, categoria, descricao, beneficio_bepit, endereco, contato, tags, horario_funcionamento, faixa_preco, fotos, ativo)
+select c.id, 'PARCEIRO', 'Churrascaria do Mar', 'restaurante',
+       'Carnes e frutos do mar', '10% off no almoço',
+       'Orla Bardot, 123', '(22) 99999-0000',
+       '["churrascaria","restaurante","carne"]'::jsonb,
+       '12:00-23:00', '$$',
+       '["https://exemplo.com/foto1.jpg"]'::jsonb,
+       true
+from public.cidades c
+where c.slug='buzios' and c.regiao_id = (select id from public.regioes where slug='regiao-dos-lagos')
+returning *;
+
+-- Exemplo: DICA em Arraial do Cabo
+insert into public.parceiros
+(cidade_id, tipo, nome, categoria, descricao, endereco, tags, fotos, ativo)
+select c.id, 'DICA', 'Praia do Forno', 'praia',
+       'Trilha leve e praia linda', 'Trilha da Praia do Forno',
+       '["praia","trilha","mirante"]'::jsonb,
+       '["https://exemplo.com/praia.jpg"]'::jsonb,
+       true
+from public.cidades c
+where c.slug='arraial-do-cabo' and c.regiao_id = (select id from public.regioes where slug='regiao-dos-lagos')
+returning *;
+```
+
+> Repare nos campos: **nome, descrição, categoria, benefício, endereço, contato, tags (json), horário, faixa de preço, fotos (json), tipo, cidade_id** — tudo o que você pediu.
+
+---
+
+# Como “ativar” / “desativar” regiões e cidades?
+
+Duas ótimas opções (sem mexer em código):
+
+### Opção A — ativar = “existe no banco”
+
+* **Ativar**: inserir a região + cidades (como nos SQL acima).
+* **Desativar**: apagar ou manter sem cidades/parceiros (a rota retorna vazio, sem erro).
+
+### Opção B — usar um campo `ativo` (toggle on/off)
+
+Se quiser ligar/desligar sem apagar:
+
+```sql
+-- Adicionar coluna 'ativo' (se ainda não tiver)
+alter table public.regioes add column if not exists ativo boolean not null default true;
+alter table public.cidades add column if not exists ativo boolean not null default true;
+alter table public.parceiros add column if not exists ativo boolean not null default true;
+
+-- Desativar temporariamente uma região
+update public.regioes set ativo=false where slug='costa-verde';
+
+-- Ativar de volta
+update public.regioes set ativo=true where slug='costa-verde';
+```
+
+> O backend que te passei já filtra `parceiros.ativo = true`.
+> Se você quiser também filtrar **regiões/cidades ativas** no backend ou no front, é só usar esse campo em SELECTs.
+
+### “Deixar comentado com //”
+
+Isso é útil em **scripts SQL** de seed (no seu bloco de migração):
+
+* Mantenha as *inserts* das novas regiões/cidades **comentadas** (`--`).
+* Quando quiser ativar, **tire o `--`** e rode o bloco.
+* **No backend** não precisa comentar nada; ele apenas consulta o banco.
+
+---
+
+# Preciso mexer no código para cada nova região?
+
+**Não.**
+O backend foi escrito para receber `/:regiaoSlug` e buscar **dinamicamente** no banco.
+O único ponto fora do backend é o **front (pré-página)**: se seus cards de regiões forem **estáticos**, você vai querer adicionar o card novo. Se quiser **dinamizar**, pode:
+
+* Expor um endpoint no backend para listar regiões/cidades ativas; **ou**
+* Consultar direto do front no Supabase (com `SUPABASE_ANON_KEY`) apenas `regioes` e `cidades` com `ativo=true`.
+
+Se quiser, te mando os **endpoints de listagem pública** prontos (bem curtinhos).
+
+---
+
+# Painel de reports na Supabase (simples e rápido)
+
+Você já tem as tabelas de métricas. Há 3 jeitos práticos:
+
+### 1) **Supabase Studio → Charts**
+
+* Vá em **“SQL Editor”** ou **“Table Editor”** e crie **Views** com agregações (exemplos abaixo).
+* Em **“Reports/Charts”** (se disponível), crie gráficos em cima dessas Views.
+
+### 2) **Conectar um BI** (recomendado p/ “pro”)
+
+* Metabase (gratuito), Grafana, Retool, Power BI, etc.
+* Conecte no Postgres do Supabase (credenciais em Project Settings → Database).
+* Monte dashboards arrastando e soltando.
+
+### 3) **Dash interno no seu front**
+
+* Faça endpoints como `/api/admin/metrics/...` que retornem os agregados e pinte gráficos (Recharts, Chart.js).
+
+## Views úteis (cole no SQL Editor)
+
+### a) Parceiros mais vistos
+
+```sql
+create or replace view public.vw_parceiro_performance as
+select
+  p.id,
+  p.nome,
+  p.tipo,
+  p.categoria,
+  c.nome as cidade,
+  r.nome as regiao,
+  coalesce(v.views_total, 0) as views_total,
+  v.last_view_at
+from public.parceiros p
+join public.cidades c on c.id = p.cidade_id
+join public.regioes r on r.id = c.regiao_id
+left join public.parceiro_views v on v.parceiro_id = p.id;
+```
+
+### b) Top pesquisas (últimos 30 dias)
+
+```sql
+create or replace view public.vw_buscas_30d as
+select
+  date_trunc('day', b.ts) as dia,
+  r.nome as regiao,
+  c.nome as cidade,
+  count(*) as total_buscas
+from public.buscas_texto b
+left join public.regioes r on r.id = b.regiao_id
+left join public.cidades c on c.id = b.cidade_id
+where b.ts >= now() - interval '30 days'
+group by 1,2,3
+order by 1 desc;
+```
+
+### c) Interações por região/cidade (últimos 30 dias)
+
+```sql
+create or replace view public.vw_interacoes_30d as
+select
+  date_trunc('day', i.created_at) as dia,
+  r.nome as regiao,
+  c.nome as cidade,
+  count(*) as total_interacoes
+from public.interacoes i
+join public.regioes r on r.id = i.regiao_id
+left join public.conversas conv on conv.id = i.conversation_id
+left join public.cidades c on c.id::text = (conv.parceiro_em_foco->>'cidade_id') -- tentativa de puxar a cidade do foco, se salva no JSON
+where i.created_at >= now() - interval '30 days'
+group by 1,2,3
+order by 1 desc;
+```
+
+> Se quiser algo mais preciso na cidade da interação, podemos salvar `cidade_id` diretamente em `interacoes` quando tiver parceiro em foco. É um ajuste pequeno no backend.
+
+### d) Eventos (search / partner_view / feedback)
+
+```sql
+create or replace view public.vw_eventos_7d as
+select
+  date_trunc('hour', e.ts) as hora,
+  e.tipo_evento,
+  r.nome as regiao,
+  c.nome as cidade,
+  count(*) as total
+from public.eventos_analytics e
+left join public.regioes r on r.id = e.regiao_id
+left join public.cidades c on c.id = e.cidade_id
+where e.ts >= now() - interval '7 days'
+group by 1,2,3,4
+order by 1 desc;
+```
+
+Com essas **views**, você consegue montar gráficos de:
+
+* **Top parceiros por views**
+* **Busca por dia/região/cidade**
+* **Interações por dia**
+* **Eventos por hora/tipo**
+
+---
+
+# Dicas finais
+
+* **Slug**: sempre minúsculo, sem acentos, com `-` (ex.: `regiao-dos-lagos`).
+* **Ativar** uma região nova = **inserir** a região + cidades. (Ou `ativo=true`).
+  **Não precisa** mexer no código do backend.
+* **Parceiro** em cidade X e Y = **dois registros**, cada um com seu `cidade_id`.
+* **Dica** = use `tipo='DICA'` e uma `categoria` (ex.: “praia”, “trilha”, “mirante”).
+* **Métricas**: já estão sendo gravadas; crie **views** e use **Charts** (ou Metabase).
+
+Se quiser, me diga: **qual próxima região e cidades** você quer ativar, que eu te mando o **bloco SQL prontinho** para colar e já cadastrar.
