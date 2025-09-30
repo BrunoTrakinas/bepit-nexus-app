@@ -1,4 +1,4 @@
-/// src/components/RegionSelection.jsx
+// src/components/RegionSelection.jsx
 import React from "react";
 import { Link } from 'react-router-dom';
 
@@ -7,9 +7,7 @@ const regioes = [
 ];
 
 export default function RegionSelection({ theme }) {
-  // O theme aqui pode estar undefined se não for passado pelo App.jsx,
-  // então adicionamos valores padrão para evitar quebras.
-  const colors = theme || { background: '#fff', text: '#222', inputBg: '#f0f0f0', headerBg: '#f8f8f8' };
+  const colors = theme || { background: '#fff', text: '#222' };
 
   return (
     <div style={{
@@ -23,13 +21,20 @@ export default function RegionSelection({ theme }) {
       backgroundColor: colors.background,
       color: colors.text,
     }}>
-      {/* CORREÇÃO DO LOGO AQUI */}
       <img src="https://i.postimg.cc/mD8q5fJb/bepit-logo.png" alt="Logo BEPIT Nexus" style={{ width: '150px', marginBottom: '40px' }} />
       
-      <h1 style={{ marginBottom: '10px', fontSize: '2.5rem', fontWeight: '700' }}>
+      <h1 style={{ 
+        marginBottom: '10px', 
+        fontSize: '2.5rem',
+        fontWeight: '700'
+      }}>
         Bem-vindo ao BEPIT Nexus
       </h1>
-      <p style={{ marginBottom: '40px', fontSize: '1.25rem', color: '#555' }}>
+      <p style={{ 
+        marginBottom: '40px', 
+        fontSize: '1.25rem',
+        color: '#555'
+      }}>
         Selecione sua região para começar
       </p>
       
