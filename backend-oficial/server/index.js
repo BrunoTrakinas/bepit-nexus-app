@@ -1,15 +1,11 @@
 // ============================================================================
-// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.2
-// - Stack/Imports: ESM, Supabase, GoogleGenerativeAI
-// - v3.2 (polimento final):
-//   FIX 1: photoLinks -> extrai fotosDosParceiros do parceirosSugeridos
-//   FIX 2: refatoração switch com função auxiliar lidarComNovaBusca(...)
-//   FIX 3: seleção de parceiro por índice/nome (encontrarParceiroNaLista(...))
-//   FIX 4: remoção da rota /api/conversation/preference (frontend sem botões)
-//   FIX 5: prompts mais tolerantes a typos/abreviações e regra de pedir esclarecimentos
-// - REMOVIDO: Function Calling, loop while, tools em generateContent,
-//             construirInstrucaoDeSistema, rota /api/conversation/preference
-// - MANTIDO: ferramentas RAG/rota/preferência (uso interno), histórico, admin, feedback, CORS, RAW_MODE
+// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.2.1
+// - Ajustes desta versão:
+//   A) ADD: POST /api/auth/login (login por "chave" ADMIN_API_KEY) para alinhar com o frontend
+//   B) ADD: GET  /api/health (além de /health) para smoke tests via proxy Netlify
+//   C) KEEP: POST /api/admin/login (username/password) — compat. retro
+//   D) KEEP: rotas /api/chat, /api/feedback, /api/admin/*, CORS, histórico, RAG helpers
+//   E) Nenhuma mudança de contrato nas rotas existentes
 // ============================================================================
 
 import "dotenv/config";
@@ -24,15 +20,18 @@ import { supabase } from "../lib/supabaseClient.js";
 const aplicacaoExpress = express();
 const portaDoServidor = process.env.PORT || 3002;
 
-aplicacaoExpress.use(express.json({ limit: "1mb" }));
+aplicacaoExpress.use(express.json({ limit: "2mb" })); // um pouco mais folgado
 
 // --------------------------------- CORS ------------------------------------
 function origemPermitida(origem) {
-  if (!origem) return true; // curl/Postman
+  if (!origem) return true; // curl/Postman/health
   try {
     const url = new URL(origem);
+    // dev/local
     if (url.hostname === "localhost") return true;
+    // seu domínio do Netlify (com ou sem hífen); endsWith cobre variações
     if (url.host === "bepitnexus.netlify.app") return true;
+    if (url.host === "bepit-nexus.netlify.app") return true;
     if (url.host.endsWith(".netlify.app")) return true;
     return false;
   } catch {
@@ -44,7 +43,9 @@ aplicacaoExpress.use(
   cors({
     origin: (origin, callback) =>
       origemPermitida(origin) ? callback(null, true) : callback(new Error("CORS: origem não permitida.")),
-    credentials: true
+    credentials: true,
+    allowedHeaders: ["Content-Type", "x-admin-key", "authorization"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
 );
 aplicacaoExpress.options("*", cors());
@@ -58,7 +59,7 @@ const candidatosDeModeloGemini = [
   "gemini-1.5-pro-latest",
   "gemini-1.5-flash-latest",
   "gemini-1.5-pro",
-  "gemini-pro"
+  "gemini-pro",
 ].filter(Boolean);
 
 let modeloGeminiEmUso = null;
@@ -110,7 +111,7 @@ const coordenadasFallback = {
   "buzios": { lat: -22.7469, lng: -41.8817 },
   "búzios": { lat: -22.7469, lng: -41.8817 },
   "sao pedro da aldeia": { lat: -22.8427, lng: -42.1026 },
-  "são pedro da aldeia": { lat: -22.8427, lng: -42.1026 }
+  "são pedro da aldeia": { lat: -22.8427, lng: -42.1026 },
 };
 
 function obterCoordenadasPorCidadeOuTexto(texto, listaDeCidades) {
@@ -277,10 +278,15 @@ async function ferramentaDefinirPreferenciaDeIndicacao({ idDaConversa, argumento
 }
 
 // ============================================================================
-// HEALTHCHECK
+// HEALTHCHECKS
 // ============================================================================
-aplicacaoExpress.get("/health", (req, res) => {
+aplicacaoExpress.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) });
+});
+
+// útil para testar via Netlify proxy (/api/health → Render)
+aplicacaoExpress.get("/api/health", (_req, res) => {
+  res.status(200).json({ ok: true, scope: "api", message: "BEPIT Nexus API ok", port: String(portaDoServidor) });
 });
 
 // ============================================================================
@@ -333,7 +339,7 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
     `[Contexto de Parceiros]: ${contextoParceiros}`,
     `[Histórico da Conversa]:\n${historicoTexto}`,
     `[Região]: ${regiaoNome}`,
-    `[Pergunta do Usuário]: "${pergunta}"`
+    `[Pergunta do Usuário]: "${pergunta}"`,
   ].join("\n");
 
   const modelo = await obterModeloGemini();
@@ -351,7 +357,7 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
     "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
     `[Histórico da Conversa]:\n${historicoTexto}`,
-    `[Pergunta do Usuário]: "${pergunta}"`
+    `[Pergunta do Usuário]: "${pergunta}"`,
   ].join("\n");
 
   const modelo = await obterModeloGemini();
@@ -406,7 +412,7 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
     regiao,
     cidadesAtivas,
-    argumentosDaFerramenta: entidades
+    argumentosDaFerramenta: entidades,
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
@@ -466,7 +472,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           ultima_pergunta_usuario: null,
           ultima_resposta_ia: null,
           preferencia_indicacao: null,
-          topico_atual: null
+          topico_atual: null,
         });
       } catch { /* não falha o fluxo */ }
     }
@@ -486,7 +492,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       const historicoGemini = await construirHistoricoParaGemini(idDaConversa, 12);
 
       const respostaGemini = await modelo.generateContent({
-        contents: [...historicoGemini, { role: "user", parts: [{ text: textoDoUsuario }] }]
+        contents: [...historicoGemini, { role: "user", parts: [{ text: textoDoUsuario }] }],
       });
       const textoLivre = (respostaGemini?.response?.text?.() || "").trim() || "…";
 
@@ -499,7 +505,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
             conversation_id: idDaConversa,
             pergunta_usuario: textoDoUsuario,
             resposta_ia: textoLivre,
-            parceiros_sugeridos: []
+            parceiros_sugeridos: [],
           })
           .select("id").single();
         idDaInteracao = novaInteracao?.id || null;
@@ -510,7 +516,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
         reply: textoLivre,
         interactionId: idDaInteracao,
         photoLinks: fotosDosParceiros,
-        conversationId: idDaConversa
+        conversationId: idDaConversa,
       });
     }
 
@@ -542,7 +548,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
             conversation_id: idDaConversa,
             pergunta_usuario: textoDoUsuario,
             resposta_ia: respostaCurta,
-            parceiros_sugeridos: [parceiroSelecionado]
+            parceiros_sugeridos: [parceiroSelecionado],
           })
           .select("id")
           .single();
@@ -558,7 +564,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
         photoLinks: fotosDosParceiros,
         conversationId: idDaConversa,
         intent: "follow_up_parceiro",
-        partners: [parceiroSelecionado]
+        partners: [parceiroSelecionado],
       });
     }
 
@@ -573,7 +579,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           historicoGemini,
           regiao,
           cidadesAtivas,
-          idDaConversa
+          idDaConversa,
         });
         respostaFinal = resultado.respostaFinal;
         parceirosSugeridos = resultado.parceirosSugeridos;
@@ -591,7 +597,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
             historicoGemini,
             regiao,
             cidadesAtivas,
-            idDaConversa
+            idDaConversa,
           });
           respostaFinal = resultado.respostaFinal;
           parceirosSugeridos = resultado.parceirosSugeridos;
@@ -632,7 +638,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           conversation_id: idDaConversa,
           pergunta_usuario: textoDoUsuario,
           resposta_ia: respostaFinal,
-          parceiros_sugeridos: parceirosSugeridos
+          parceiros_sugeridos: parceirosSugeridos,
         })
         .select("id")
         .single();
@@ -650,7 +656,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       photoLinks: fotosDosParceiros,
       conversationId: idDaConversa,
       intent,
-      partners: parceirosSugeridos
+      partners: parceirosSugeridos,
     });
   } catch (erro) {
     console.error("[/api/chat/:slugDaRegiao] Erro:", erro);
@@ -679,7 +685,7 @@ aplicacaoExpress.post("/api/feedback", async (requisicao, resposta) => {
     try {
       await supabase.from("eventos_analytics").insert({
         tipo_evento: "feedback",
-        payload: { interactionId, feedback }
+        payload: { interactionId, feedback },
       });
     } catch { /* segue */ }
 
@@ -691,7 +697,27 @@ aplicacaoExpress.post("/api/feedback", async (requisicao, resposta) => {
 });
 
 // ============================================================================
-// ADMIN (mantido)
+// AUTH (NOVO para casar com o frontend que usa "key")
+// ============================================================================
+aplicacaoExpress.post("/api/auth/login", async (req, res) => {
+  try {
+    const { key } = req.body || {};
+    if (!key || typeof key !== "string") {
+      return res.status(400).json({ error: "missing_key" });
+    }
+    const ADMIN_API_KEY = process.env.ADMIN_API_KEY || "";
+    if (ADMIN_API_KEY && key === ADMIN_API_KEY) {
+      return res.status(200).json({ ok: true });
+    }
+    return res.status(401).json({ error: "invalid_key" });
+  } catch (erro) {
+    console.error("[/api/auth/login] Erro:", erro);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+// ============================================================================
+// ADMIN (mantido) — fluxo user/pass continua disponível
 // ============================================================================
 aplicacaoExpress.post("/api/admin/login", async (requisicao, resposta) => {
   try {
@@ -710,7 +736,7 @@ aplicacaoExpress.post("/api/admin/login", async (requisicao, resposta) => {
 
 function exigirChaveDeAdministrador(requisicao, resposta, proximo) {
   const chave = requisicao.headers["x-admin-key"];
-  if (!chave || chave !== process.env.ADMIN_API_KEY) {
+  if (!chave || chave !== (process.env.ADMIN_API_KEY || "")) {
     return resposta.status(401).json({ error: "Chave administrativa inválida ou ausente." });
   }
   proximo();
@@ -742,7 +768,7 @@ aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async 
       horario_funcionamento: restante.horario_funcionamento || null,
       faixa_preco: restante.faixa_preco || null,
       fotos_parceiros: Array.isArray(restante.fotos_parceiros) ? restante.fotos_parceiros : (Array.isArray(restante.fotos) ? restante.fotos : null),
-      ativo: restante.ativo !== false
+      ativo: restante.ativo !== false,
     };
 
     const { data, error } = await supabase.from("parceiros").insert(novoRegistro).select("*").single();
@@ -890,7 +916,8 @@ aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, a
       .filter((reg) => {
         const info = mapaParceiroPorId.get(reg.parceiro_id);
         if (!info) return false;
-        return cidade ? info.cidade_id === cidade.id : listaDeIdsDeCidades.includes(info.cidade_id);
+        const cidadesOk = cidade ? info.cidade_id === cidade.id : listaDeIdsDeCidades.includes(info.cidade_id);
+        return cidadesOk;
       })
       .slice(0, 5)
       .map((reg) => {
@@ -900,7 +927,7 @@ aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, a
           nome: info?.nome || "—",
           categoria: info?.categoria || "—",
           views_total: reg.views_total,
-          last_view_at: reg.last_view_at
+          last_view_at: reg.last_view_at,
         };
       });
 
@@ -910,7 +937,7 @@ aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, a
       total_parceiros_ativos: (parceirosAtivos || []).length,
       total_buscas: totalDeBuscas,
       total_interacoes: totalDeInteracoes,
-      top5_parceiros_por_views: topCincoPorViews
+      top5_parceiros_por_views: topCincoPorViews,
     });
   } catch (erro) {
     console.error("[/api/admin/metrics/summary] Erro:", erro);
@@ -928,7 +955,7 @@ aplicacaoExpress.get("/api/admin/logs", exigirChaveDeAdministrador, async (requi
       conversationId,
       since,
       until,
-      limit
+      limit,
     } = requisicao.query;
 
     let limite = Number(limit || 50);
@@ -996,5 +1023,5 @@ aplicacaoExpress.get("/api/admin/logs", exigirChaveDeAdministrador, async (requi
 
 // ------------------------ INICIAR SERVIDOR ----------------------------------
 aplicacaoExpress.listen(portaDoServidor, () => {
-  console.log(`✅ BEPIT Nexus (Orquestrador v3.2) rodando em http://localhost:${portaDoServidor}`);
+  console.log(`✅ BEPIT Nexus (Orquestrador v3.2.1) rodando em http://localhost:${portaDoServidor}`);
 });
