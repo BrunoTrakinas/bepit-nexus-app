@@ -1,17 +1,28 @@
+# Manual de Instruções Final para o Netlify
+
+# 1. Instruções de "Construção" do Site
 [build]
   base    = "rosto-do-robo"
   command = "npm run build"
   publish = "dist"
 
-# Redireciona APENAS as chamadas de API para o backend no Render.
+# 2. Regras de Redirecionamento (Lidas de cima para baixo)
+
+# Regra para a API:
 [[redirects]]
   from = "/api/*"
   to   = "https://bepit-nexus-backend.onrender.com/api/:splat"
   status = 200
   force = true
 
-# Regra final para o React. QUALQUER outra rota (incluindo /admin)
-# carrega o app principal.
+# Regra para o Admin:
+[[redirects]]
+  from = "/admin/*"
+  to   = "https://bepit-nexus-backend.onrender.com/admin/:splat"
+  status = 200
+  force = true
+
+# Regra Final para o React:
 [[redirects]]
   from = "/*"
   to   = "/index.html"
