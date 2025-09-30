@@ -1,12 +1,13 @@
 // src/components/ChatPage.jsx
 import React, { useEffect, useRef, useState } from "react";
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import SuggestionButtons from "./SuggestionButtons.jsx";
 
 export default function ChatPage({ theme, onToggleTheme }) {
-  // 1. A MUDANÇA PRINCIPAL: Pegamos o 'regiaoSlug' direto da URL.
   const { regiaoSlug } = useParams(); 
-  
+  const navigate = useNavigate(); // Hook para navegação
+
+  // ... (todo o resto do seu código useState, useEffect, enviarMensagem, etc. continua igual) ...
   const [conversationId, setConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [photos, setPhotos] = useState([]);
@@ -23,30 +24,25 @@ export default function ChatPage({ theme, onToggleTheme }) {
   async function enviarMensagem(textoManual) {
     const texto = (textoManual ?? input).trim();
     if (!texto || loading) return;
-
     const novaMsgUser = { role: "user", text: texto };
     setMessages(prev => [...prev, novaMsgUser]);
     setInput("");
     setLoading(true);
-    setPhotos([]); // Melhoria: Limpa fotos antigas ao enviar nova mensagem
-
+    setPhotos([]);
     try {
       const resp = await fetch(`/api/chat/${encodeURIComponent(regiaoSlug)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: texto, conversationId })
       });
-
       if (!resp.ok) {
         const erro = await resp.json().catch(() => ({}));
         throw new Error(erro?.error || `Falha HTTP ${resp.status}`);
       }
-
       const data = await resp.json();
       if (!conversationId && data?.conversationId) {
         setConversationId(data.conversationId);
       }
-
       setMessages(prev => [...prev, { role: "assistant", text: data?.reply || "..." }]);
       setPhotos(Array.isArray(data?.photoLinks) ? data.photoLinks : []);
     } catch (e) {
@@ -64,13 +60,10 @@ export default function ChatPage({ theme, onToggleTheme }) {
   }
 
   function onSuggestionClick(texto) {
-    // A função original já estava correta, mas deixei explícito
-    // que ao clicar na sugestão, o texto vai para o input e já envia.
     setInput(texto);
     enviarMensagem(texto);
   }
 
-  // Função para formatar o slug para um nome legível (ex: regiao-dos-lagos -> Região dos Lagos)
   const formatSlug = (slug) => {
     return slug.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
   };
@@ -78,6 +71,10 @@ export default function ChatPage({ theme, onToggleTheme }) {
   return (
     <div style={{ display: "grid", gridTemplateRows: "auto 1fr auto", height: "100vh", overflow: "hidden", backgroundColor: theme.background, color: theme.text }}>
       <header style={{ padding: 12, borderBottom: `1px solid ${theme.inputBg}`, display: "flex", gap: 12, alignItems: "center", backgroundColor: theme.headerBg }}>
+        {/* BOTÃO "SAIR" ADICIONADO AQUI */}
+        <button onClick={() => navigate('/')} style={{ background: 'none', border: `1px solid ${theme.inputBg}`, color: theme.text, padding: '6px 10px', borderRadius: '6px', cursor: 'pointer' }}>
+          &larr; Trocar Região
+        </button>
         <div style={{ fontWeight: 700 }}>BEPIT Nexus</div>
         <div style={{ marginLeft: "auto" }}>
           <button onClick={onToggleTheme} style={{ background: 'none', border: `1px solid ${theme.inputBg}`, color: theme.text, padding: '6px 10px', borderRadius: '6px', cursor: 'pointer' }}>
@@ -86,6 +83,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
         </div>
       </header>
 
+       {/* O resto do seu código (main, footer, etc.) continua igual */}
       <main style={{ position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <SuggestionButtons onSuggestionClick={onSuggestionClick} isLoading={loading} theme={theme} />
         <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: 12, display: 'flex', flexDirection: 'column' }}>
@@ -98,7 +96,6 @@ export default function ChatPage({ theme, onToggleTheme }) {
                 maxWidth: '80%',
                 alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
             }}>
-              {/* Melhoria: Cor do texto se adapta ao tema */}
               <div style={{ fontSize: 12, color: theme.text, opacity: 0.7, fontWeight: 'bold', marginBottom: '4px' }}>{m.role === "user" ? "Você" : "BEPIT"}</div>
               <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
             </div>
@@ -121,7 +118,6 @@ export default function ChatPage({ theme, onToggleTheme }) {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={onEnterEnviar}
-            // Melhoria: Placeholder dinâmico
             placeholder={`Pergunte sobre a ${formatSlug(regiaoSlug || "")}...`}
             rows={2}
             style={{ resize: "none", padding: 10, borderRadius: 8, border: `1px solid ${theme.inputBg}`, backgroundColor: theme.inputBg, color: theme.text }}
