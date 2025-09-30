@@ -3,7 +3,7 @@
 [build]
   base    = "rosto-do-robo"
   command = "npm run build"
-  publish = "rosto-do-robo/dist"
+  publish = "dist"
 
 # Redirecionamento da API para o seu backend no Render
 [[redirects]]
