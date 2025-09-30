@@ -1,12 +1,18 @@
 // F:\uber-chat-mvp\rosto-do-robo\src\admin\AdminLogin.jsx
 
+// 1. IMPORTS: Adicionamos o 'useNavigate' para navegar sem recarregar a página
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { adminGet, setAdminKey } from "./adminApi";
 
-export default function AdminLogin() {
+// 2. ASSINATURA: A função agora recebe 'onLoginSuccess' do App.jsx
+export default function AdminLogin({ onLoginSuccess }) {
   const [key, setKey] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  
+  // 3. NAVEGAÇÃO: Preparamos o hook de navegação do React
+  const navigate = useNavigate();
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -20,15 +26,15 @@ export default function AdminLogin() {
 
     setIsLoading(true);
     try {
-      // Valida a chave chamando uma rota protegida leve
-      // O adminApi injeta o header X-Admin-Key automaticamente depois que salvarmos a chave
       setAdminKey(trimmed);
       await adminGet("/api/admin/logs?limit=1");
 
-      // Se chegou aqui, a chave funcionou
-      window.location.href = "/admin/dashboard";
+      // 4. A GRANDE MUDANÇA: Substituímos o window.location.href
+      // Se chegou aqui, a chave funcionou. Agora avisamos o App.jsx e navegamos.
+      onLoginSuccess(trimmed); // Avisa o componente pai que o login foi um sucesso
+      navigate("/admin");      // Navega para o painel principal do admin sem recarregar a página
+
     } catch (error) {
-      // Se falhar, removemos a chave salva para evitar ficar “presa” errada
       setAdminKey("");
       const msg = error?.message || "Falha ao validar a chave.";
       setErrorMsg(msg);
@@ -37,11 +43,12 @@ export default function AdminLogin() {
     }
   }
 
+  // O seu JSX (a parte visual) continua exatamente o mesmo, sem nenhuma alteração.
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900 p-4">
       <div className="bg-white dark:bg-gray-800 w-full max-w-sm rounded-xl shadow p-6">
         <div className="text-center mb-4">
-          <img src="/bepit-logo.png" alt="BEPIT" className="mx-auto h-16 w-16" />
+          <img src="https://i.postimg.cc/mD8q5fJb/bepit-logo.png" alt="BEPIT" className="mx-auto h-16 w-16" />
           <h1 className="text-xl font-bold mt-2 text-gray-900 dark:text-gray-100">
             Painel do Administrador
           </h1>
