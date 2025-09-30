@@ -1,17 +1,18 @@
 // F:\uber-chat-mvp\rosto-do-robo\src\admin\AdminDashboard.jsx
 import React, { useEffect, useState } from "react";
-import { adminGet, adminPost, adminPut, clearAdminKey, getAdminKey } from "./adminApi";
+import { useNavigate } from "react-router-dom";
+import { adminGet, adminPost, adminPut, clearAdminKey } from "./adminApi";
 
 // ---------------- Abas do topo ----------------
-function Tabs({ tab, setTab }) {
+function Tabs({ tab, setTab, navigate }) {
   const items = ["cadastro", "alterar", "inclusoes", "metricas", "logs"];
   return (
-    <div className="flex gap-2 border-b pb-2">
+    <div className="flex flex-wrap gap-2 border-b pb-2">
       {items.map((t) => (
         <button
           key={t}
           onClick={() => setTab(t)}
-          className={`px-3 py-1 rounded-md ${tab === t ? "bg-blue-600 text-white" : "bg-gray-200"}`}
+          className={`px-3 py-1 rounded-md text-sm md:text-base ${tab === t ? "bg-blue-600 text-white" : "bg-gray-200"}`}
         >
           {t.toUpperCase()}
         </button>
@@ -20,9 +21,9 @@ function Tabs({ tab, setTab }) {
       <button
         onClick={() => {
           clearAdminKey();
-          window.location.href = "/admin";
+          navigate("/admin/login");
         }}
-        className="px-3 py-1 rounded-md bg-red-500 text-white"
+        className="px-3 py-1 rounded-md bg-red-500 text-white text-sm md:text-base"
       >
         Sair
       </button>
@@ -72,9 +73,8 @@ function AbaCadastro() {
           : null,
         horario_funcionamento: form.horario_funcionamento || null,
         faixa_preco: form.faixa_preco || null,
-        // Compatibilidade: enviamos nos dois nomes
-        fotos: fotosArray,                  // backend atual usa este
-        fotos_parceiros: fotosArray,        // caso o backend já tenha migrado
+        fotos: fotosArray,
+        fotos_parceiros: fotosArray,
         ativo: Boolean(form.ativo)
       };
 
@@ -164,7 +164,6 @@ function AbaAlterar() {
       const data = await adminGet(`/api/admin/parceiros/${filtro.regiaoSlug}/${filtro.cidadeSlug}`);
       const arr = Array.isArray(data?.data) ? data.data : [];
 
-      // Compatibilidade de fotos ao carregar
       const normalizado = arr.map((p) => ({
         ...p,
         fotos_parceiros: Array.isArray(p.fotos_parceiros)
@@ -182,8 +181,7 @@ function AbaAlterar() {
   };
 
   useEffect(() => {
-    // opcional: auto-carregar
-    // carregar();
+    // carregar(); // Descomente para carregar automaticamente ao abrir a aba
   }, []);
 
   const salvarEdicao = async () => {
@@ -200,17 +198,15 @@ function AbaAlterar() {
         tags: Array.isArray(selecionado.tags) ? selecionado.tags : null,
         horario_funcionamento: selecionado.horario_funcionamento || null,
         faixa_preco: selecionado.faixa_preco || null,
-        // compatibilidade de fotos
         fotos: Array.isArray(selecionado.fotos_parceiros) ? selecionado.fotos_parceiros : null,
         fotos_parceiros: Array.isArray(selecionado.fotos_parceiros) ? selecionado.fotos_parceiros : null,
         ativo: selecionado.ativo !== false
       };
 
-      // ATENÇÃO: precisa existir a rota PUT no backend:
       await adminPut(`/api/admin/parceiros/${selecionado.id}`, body);
       setMsg("Alterado com sucesso!");
     } catch (e) {
-      setMsg("Erro ao salvar: " + e.message + " (verifique se a rota PUT já foi criada no backend)");
+      setMsg("Erro ao salvar: " + e.message);
     }
   };
 
@@ -342,7 +338,6 @@ function AbaAlterar() {
             <button onClick={salvarEdicao} className="bg-green-600 text-white px-4 py-2 rounded-md">
               Salvar alterações
             </button>
-            <div className="text-sm text-gray-600">{msg}</div>
           </div>
         )}
       </div>
@@ -364,7 +359,6 @@ function AbaInclusoes() {
   const criarRegiao = async () => {
     try {
       setReg((r) => ({ ...r, msg: "Salvando..." }));
-      // precisa existir POST /api/admin/regioes no backend
       await adminPost("/api/admin/regioes", {
         nome: reg.nome,
         slug: reg.slug,
@@ -372,17 +366,13 @@ function AbaInclusoes() {
       });
       setReg((r) => ({ ...r, msg: "Região criada!" }));
     } catch (e) {
-      setReg((r) => ({
-        ...r,
-        msg: "Erro: " + e.message + " (crie a rota /api/admin/regioes no backend)"
-      }));
+      setReg((r) => ({ ...r, msg: "Erro: " + e.message }));
     }
   };
 
   const criarCidade = async () => {
     try {
       setCid((s) => ({ ...s, msg: "Salvando..." }));
-      // precisa existir POST /api/admin/cidades no backend
       await adminPost("/api/admin/cidades", {
         regiaoSlug: cid.regiaoSlug,
         nome: cid.nome,
@@ -391,10 +381,7 @@ function AbaInclusoes() {
       });
       setCid((s) => ({ ...s, msg: "Cidade criada!" }));
     } catch (e) {
-      setCid((s) => ({
-        ...s,
-        msg: "Erro: " + e.message + " (crie a rota /api/admin/cidades no backend)"
-      }));
+      setCid((s) => ({ ...s, msg: "Erro: " + e.message }));
     }
   };
 
@@ -531,7 +518,7 @@ function AbaMetricas() {
 
 // ------------- Logs -------------
 function AbaLogs() {
-  const [tipo, setTipo] = useState(""); // "search" | "partner_view" | "feedback"
+  const [tipo, setTipo] = useState("");
   const [limit, setLimit] = useState(50);
   const [lista, setLista] = useState([]);
   const [msg, setMsg] = useState("");
@@ -547,7 +534,7 @@ function AbaLogs() {
       setLista(Array.isArray(data?.data) ? data.data : []);
       setMsg("");
     } catch (e) {
-      setMsg("Erro: " + e.message + " (confira se a rota GET /api/admin/logs existe no backend)");
+      setMsg("Erro: " + e.message);
     }
   };
 
@@ -594,26 +581,23 @@ function AbaLogs() {
 // ------------- Componente principal -------------
 export default function AdminDashboard() {
   const [tab, setTab] = useState("cadastro");
-
-  // Protege a rota do painel: sem admin key, volta para login
-  useEffect(() => {
-    const key = getAdminKey();
-    if (!key) {
-      window.location.href = "/admin";
-    }
-  }, []);
+  const navigate = useNavigate();
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
       <div className="max-w-5xl mx-auto p-4">
-        <div className="flex items-center gap-3 mb-4">
-          <img src="/bepit-logo.png" alt="BEPIT" className="h-10 w-10" />
+        <div className="flex items-center gap-4 mb-4">
+          <img
+            src="https://i.postimg.cc/mD8q5fJb/bepit-logo.png"
+            alt="Logo BEPIT"
+            className="h-12 w-12"
+          />
           <h1 className="text-2xl font-bold">Painel do Administrador</h1>
         </div>
 
-        <Tabs tab={tab} setTab={setTab} />
+        <Tabs tab={tab} setTab={setTab} navigate={navigate} />
 
-        <div className="bg-white rounded-md shadow p-4 mt-3">
+        <div className="bg-white dark:bg-gray-800 rounded-md shadow p-4 mt-3">
           {tab === "cadastro" && <AbaCadastro />}
           {tab === "alterar" && <AbaAlterar />}
           {tab === "inclusoes" && <AbaInclusoes />}
