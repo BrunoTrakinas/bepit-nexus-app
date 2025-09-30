@@ -1,4 +1,3 @@
-// F:\uber-chat-mvp\rosto-do-robo\src\admin\AdminDashboard.jsx
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { adminGet, adminPost, adminPut, clearAdminKey } from "./adminApi";
@@ -578,7 +577,6 @@ function AbaLogs() {
   );
 }
 
-
 // ------------- Componente principal -------------
 export default function AdminDashboard() {
   const [tab, setTab] = useState("cadastro");
@@ -589,7 +587,7 @@ export default function AdminDashboard() {
       <div className="max-w-5xl mx-auto p-4">
         <div className="flex items-center gap-4 mb-4">
           <img
-            src="https://i.postimg.cc/mD8q5fJb/bepit-logo.png"
+            src="/bepit-logo.png"
             alt="Logo BEPIT"
             className="h-12 w-12"
           />
