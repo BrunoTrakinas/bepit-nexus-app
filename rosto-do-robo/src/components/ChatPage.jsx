@@ -1,13 +1,11 @@
-// src/components/ChatPage.jsx
 import React, { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from 'react-router-dom';
 import SuggestionButtons from "./SuggestionButtons.jsx";
 
 export default function ChatPage({ theme, onToggleTheme }) {
   const { regiaoSlug } = useParams(); 
-  const navigate = useNavigate(); // Hook para navegação
+  const navigate = useNavigate();
 
-  // ... (todo o resto do seu código useState, useEffect, enviarMensagem, etc. continua igual) ...
   const [conversationId, setConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [photos, setPhotos] = useState([]);
@@ -22,6 +20,10 @@ export default function ChatPage({ theme, onToggleTheme }) {
   }, [messages, photos]);
 
   async function enviarMensagem(textoManual) {
+    if (!regiaoSlug) {
+      setMessages(prev => [...prev, { role: "assistant", text: "Região não informada. Volte e selecione uma região." }]);
+      return;
+    }
     const texto = (textoManual ?? input).trim();
     if (!texto || loading) return;
     const novaMsgUser = { role: "user", text: texto };
@@ -71,7 +73,6 @@ export default function ChatPage({ theme, onToggleTheme }) {
   return (
     <div style={{ display: "grid", gridTemplateRows: "auto 1fr auto", height: "100vh", overflow: "hidden", backgroundColor: theme.background, color: theme.text }}>
       <header style={{ padding: 12, borderBottom: `1px solid ${theme.inputBg}`, display: "flex", gap: 12, alignItems: "center", backgroundColor: theme.headerBg }}>
-        {/* BOTÃO "SAIR" ADICIONADO AQUI */}
         <button onClick={() => navigate('/')} style={{ background: 'none', border: `1px solid ${theme.inputBg}`, color: theme.text, padding: '6px 10px', borderRadius: '6px', cursor: 'pointer' }}>
           &larr; Trocar Região
         </button>
@@ -83,7 +84,6 @@ export default function ChatPage({ theme, onToggleTheme }) {
         </div>
       </header>
 
-       {/* O resto do seu código (main, footer, etc.) continua igual */}
       <main style={{ position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <SuggestionButtons onSuggestionClick={onSuggestionClick} isLoading={loading} theme={theme} />
         <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: 12, display: 'flex', flexDirection: 'column' }}>
