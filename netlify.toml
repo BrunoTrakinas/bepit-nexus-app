@@ -1,32 +1,17 @@
-# Manual de Instruções Final para o Netlify (v.Final)
-
-# 1. Instruções de "Construção" do Site
 [build]
   base    = "rosto-do-robo"
   command = "npm run build"
   publish = "dist"
 
-# 2. Regras de Redirecionamento (Lidas de cima para baixo)
-
-# Regra para a API:
-# Qualquer chamada para /api/... deve ser enviada para o backend no Render.
+# Redireciona APENAS as chamadas de API para o backend no Render.
 [[redirects]]
   from = "/api/*"
   to   = "https://bepit-nexus-backend.onrender.com/api/:splat"
   status = 200
   force = true
 
-# Regra para o Admin:
-# Qualquer chamada para /admin/... deve ser enviada para o backend.
-[[redirects]]
-  from = "/admin/*"
-  to   = "https://bepit-nexus-backend.onrender.com/admin/:splat"
-  status = 200
-  force = true
-
-# Regra Final para o React:
-# Qualquer outra coisa que não combine com as regras acima,
-# deve mostrar a página principal do chat (index.html).
+# Regra final para o React. QUALQUER outra rota (incluindo /admin)
+# carrega o app principal.
 [[redirects]]
   from = "/*"
   to   = "/index.html"

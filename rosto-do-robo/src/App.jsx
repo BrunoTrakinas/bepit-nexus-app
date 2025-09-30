@@ -1,44 +1,22 @@
 // src/App.jsx
-import React, { useState } from "react";
-import RegionSelection from "./components/RegionSelection";
-import ChatPage from "./components/ChatPage";
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import RegionSelection from './components/RegionSelection';
+import ChatPage from './components/ChatPage';
+import AdminPortal from './admin/AdminPortal'; // Verifique se este é o seu componente principal do admin
 
-// Cores para os temas
-const themes = {
-  light: {
-    background: "#fff",
-    text: "#222",
-    headerBg: "#f8f8f8",
-    inputBg: "#f0f0f0",
-    assistantBubble: "#e9e9eb",
-  },
-  dark: {
-    background: "#121212",
-    text: "#e0e0e0",
-    headerBg: "#1e1e1e",
-    inputBg: "#2a2a2a",
-    assistantBubble: "#2c2c2e",
-  }
-};
-
-export default function App() {
-  const [regiaoSlug, setRegiaoSlug] = useState(null);
-  const [theme, setTheme] = useState("light");
-
-  function handleRegionSelect(slug) {
-    setRegiaoSlug(slug);
-  }
-
-  function toggleTheme() {
-    setTheme(currentTheme => (currentTheme === "light" ? "dark" : "light"));
-  }
-
-  // Define as cores atuais com base no tema selecionado
-  const currentTheme = themes[theme];
-
-  if (!regiaoSlug) {
-    return <RegionSelection onRegionSelect={handleRegionSelect} theme={currentTheme} />;
-  }
-
-  return <ChatPage regiaoSlug={regiaoSlug} theme={currentTheme} onToggleTheme={toggleTheme} />;
+function App() {
+  // O App agora apenas define as rotas do site.
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<RegionSelection />} />
+        <Route path="/chat/:regiaoSlug" element={<ChatPage />} />
+        <Route path="/admin" element={<AdminPortal />} />
+        {/* Adicione outras rotas do admin se necessário, ex: <Route path="/admin/dashboard" ... /> */}
+      </Routes>
+    </Router>
+  );
 }
+
+export default App;
