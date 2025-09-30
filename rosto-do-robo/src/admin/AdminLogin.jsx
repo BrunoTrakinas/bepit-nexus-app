@@ -9,7 +9,6 @@ export default function AdminLogin({ onLoginSuccess }) {
   const [errorMsg, setErrorMsg] = useState("");
   const navigate = useNavigate();
 
-  // A função handleSubmit agora lida apenas com o envio do formulário
   async function handleSubmit(event) {
     event.preventDefault();
     setErrorMsg("");
@@ -38,7 +37,6 @@ export default function AdminLogin({ onLoginSuccess }) {
     <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900 p-4">
       <div className="bg-white dark:bg-gray-800 w-full max-w-sm rounded-xl shadow p-6">
         <div className="text-center mb-4">
-          {/* 1. LOGO ADICIONADO AQUI */}
           <img src="https://i.postimg.cc/mD8q5fJb/bepit-logo.png" alt="BEPIT" className="mx-auto h-16 w-16" />
           <h1 className="text-xl font-bold mt-2 text-gray-900 dark:text-gray-100">
             Painel do Administrador

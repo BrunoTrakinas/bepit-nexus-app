@@ -181,7 +181,7 @@ function AbaAlterar() {
   };
 
   useEffect(() => {
-    // carregar(); // Descomente para carregar automaticamente ao abrir a aba
+    // carregar(); // Descomente para carregar automaticamente
   }, []);
 
   const salvarEdicao = async () => {
@@ -577,6 +577,7 @@ function AbaLogs() {
     </div>
   );
 }
+
 
 // ------------- Componente principal -------------
 export default function AdminDashboard() {
