@@ -1,55 +1,62 @@
-// backend-oficial/lib/supabaseClient.js
-// Cliente Supabase para uso no BACKEND (Node.js)
-// - Prioriza a Service Role Key (SUPABASE_SERVICE_ROLE ou SUPABASE_SERVICE_KEY)
-// - Permite fallback controlado para Anon Key SOMENTE se ALLOW_ANON_BACKEND=1
-// - Não persiste sessão (server side)
+// ============================================================================
+// Supabase Client (backend)
+// - Usa SEMPRE a Service Role Key (chave secreta do servidor).
+// - NUNCA use a anon key no backend (risco de permissão e RLS).
+// - Aceita vários nomes de env para a Service Role por conveniência.
+// ============================================================================
 
 import { createClient } from "@supabase/supabase-js";
 
+// URL do seu projeto Supabase (ex.: https://abcdefg.supabase.co)
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
 
-// Tente ler a Service Role Key em nomes comuns
-const SERVICE_KEY =
+// Procuramos a Service Role Key em várias chaves de ambiente comuns:
+const SUPABASE_SERVICE_KEY =
   (process.env.SUPABASE_SERVICE_ROLE || "").trim() ||
-  (process.env.SUPABASE_SERVICE_KEY || "").trim();
+  (process.env.SUPABASE_SERVICE_KEY || "").trim() ||
+  (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim() ||
+  (process.env.SUPABASE_SERVICE || "").trim();
 
-// (Opcional) Fallback com anon key (NÃO recomendado em produção)
-const ALLOW_ANON_BACKEND = process.env.ALLOW_ANON_BACKEND === "1";
-const ANON_KEY = (process.env.SUPABASE_ANON_KEY || "").trim();
+// Se quiser DESENVOLVER localmente usando anon key temporariamente,
+// descomente o bloco abaixo e defina ALLOW_ANON_ON_BACKEND=1 (NÃO use em produção).
+// const ALLOW_ANON_ON_BACKEND = process.env.ALLOW_ANON_ON_BACKEND === "1";
+// if (!SUPABASE_SERVICE_KEY && ALLOW_ANON_ON_BACKEND) {
+//   console.warn("[Supabase] ATENÇÃO: usando VITE_SUPABASE_ANON_KEY no BACKEND (somente dev).");
+//   // Em dev local, o Vite costuma expor essa env (não use isso no Render).
+//   const maybeAnon = (process.env.VITE_SUPABASE_ANON_KEY || "").trim();
+//   if (maybeAnon) {
+//     process.env.__USING_ANON_ON_BACKEND = "1";
+//   }
+// }
 
 if (!SUPABASE_URL) {
   throw new Error("[Supabase] SUPABASE_URL não definido no ambiente.");
 }
 
-let SUPABASE_KEY_IN_USE = null;
-let MODE = null;
-
-if (SERVICE_KEY) {
-  SUPABASE_KEY_IN_USE = SERVICE_KEY;
-  MODE = "service_role";
-  console.log("[Supabase] Usando Service Role Key.");
-} else if (ALLOW_ANON_BACKEND && ANON_KEY) {
-  SUPABASE_KEY_IN_USE = ANON_KEY;
-  MODE = "anon_fallback";
-  console.warn(
-    "[Supabase] ALLOW_ANON_BACKEND=1 — usando ANON KEY no backend (apenas para testes; não recomendado em produção)."
-  );
-} else {
-  // Sem service key e sem fallback permitido → erro explícito
+if (!SUPABASE_SERVICE_KEY) {
+  // Erro proposital para te forçar a configurar a Service Role no Render
   throw new Error(
     "[Supabase] SUPABASE_SERVICE_ROLE/SUPABASE_SERVICE_KEY não definido no ambiente (evite usar a anon key no backend)."
   );
 }
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY_IN_USE, {
+// Cria o client com a Service Role Key
+export const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: {
-    persistSession: false,
     autoRefreshToken: false,
-    detectSessionInUrl: false,
+    persistSession: false,
+    detectSessionInUrl: false
   },
   global: {
     headers: {
-      "X-Client-Info": `bepit-backend/3.3 (${MODE})`,
-    },
-  },
+      "X-Client-Info": "bepit-backend/3.3.1"
+    }
+  }
 });
+
+// (Opcional) Helper para testar a conexão diretamente
+export async function pingDb() {
+  const { data, error } = await supabase.from("regioes").select("id").limit(1);
+  if (error) throw error;
+  return Array.isArray(data) ? data.length : 0;
+}
