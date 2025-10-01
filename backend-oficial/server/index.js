@@ -409,7 +409,7 @@ aplicacaoExpress.get("/api/diag/cidades/:regiaoSlug", async (req, res) => {
 
     const { data: cidades, error: erroCidades } = await supabase
       .from("cidades")
-      .select("id, nome, slug, lat, lng, ativo, regiao_id")
+      .select("id, nome, slug, ativo, regiao_id")
       .eq("regiao_id", regiao.id);
 
     if (erroCidades) {
@@ -623,7 +623,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
     try {
       const { data: cidades, error: erroCidades } = await supabase
         .from("cidades")
-        .select("id, nome, slug, lat, lng, ativo")
+        .select("id, nome, slug, ativo")
         .eq("regiao_id", regiao.id);
 
       if (erroCidades) {
