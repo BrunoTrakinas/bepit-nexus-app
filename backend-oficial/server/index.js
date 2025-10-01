@@ -1,11 +1,12 @@
 // ============================================================================
-// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.2.1
+// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.2.2
 // - Ajustes desta versão:
-//   A) ADD: POST /api/auth/login (login por "chave" ADMIN_API_KEY) para alinhar com o frontend
-//   B) ADD: GET  /api/health (além de /health) para smoke tests via proxy Netlify
-//   C) KEEP: POST /api/admin/login (username/password) — compat. retro
-//   D) KEEP: rotas /api/chat, /api/feedback, /api/admin/*, CORS, histórico, RAG helpers
-//   E) Nenhuma mudança de contrato nas rotas existentes
+//   A) ADD: GET /api/health/db (diagnóstico Supabase e dados básicos)
+//   B) ADD: PUT /api/admin/parceiros/:id (edição de parceiro/dica) — alinha com AdminDashboard.jsx
+//   C) KEEP: POST /api/auth/login (login por "chave" ADMIN_API_KEY)
+//   D) KEEP: GET /api/health e /health
+//   E) KEEP: /api/chat, /api/feedback, /api/admin/*
+//   F) CORS: allowedHeaders e methods ampliados
 // ============================================================================
 
 import "dotenv/config";
@@ -20,7 +21,7 @@ import { supabase } from "../lib/supabaseClient.js";
 const aplicacaoExpress = express();
 const portaDoServidor = process.env.PORT || 3002;
 
-aplicacaoExpress.use(express.json({ limit: "2mb" })); // um pouco mais folgado
+aplicacaoExpress.use(express.json({ limit: "2mb" }));
 
 // --------------------------------- CORS ------------------------------------
 function origemPermitida(origem) {
@@ -29,7 +30,7 @@ function origemPermitida(origem) {
     const url = new URL(origem);
     // dev/local
     if (url.hostname === "localhost") return true;
-    // seu domínio do Netlify (com ou sem hífen); endsWith cobre variações
+    // domínios Netlify
     if (url.host === "bepitnexus.netlify.app") return true;
     if (url.host === "bepit-nexus.netlify.app") return true;
     if (url.host.endsWith(".netlify.app")) return true;
@@ -92,7 +93,9 @@ function normalizarTexto(texto) {
     .trim();
 }
 
-function converterGrausParaRadianos(valorEmGraus) { return (valorEmGraus * Math.PI) / 180; }
+function converterGrausParaRadianos(valorEmGraus) {
+  return (valorEmGraus * Math.PI) / 180;
+}
 
 function calcularDistanciaHaversineEmKm(coordenadaA, coordenadaB) {
   const raioDaTerraKm = 6371;
@@ -100,7 +103,9 @@ function calcularDistanciaHaversineEmKm(coordenadaA, coordenadaB) {
   const diferencaLng = converterGrausParaRadianos(coordenadaB.lng - coordenadaA.lng);
   const lat1Rad = converterGrausParaRadianos(coordenadaA.lat);
   const lat2Rad = converterGrausParaRadianos(coordenadaB.lat);
-  const h = Math.sin(diferencaLat / 2) ** 2 + Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(diferencaLng / 2) ** 2;
+  const h =
+    Math.sin(diferencaLat / 2) ** 2 +
+    Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(diferencaLng / 2) ** 2;
   return 2 * raioDaTerraKm * Math.asin(Math.sqrt(h));
 }
 
@@ -117,9 +122,13 @@ const coordenadasFallback = {
 function obterCoordenadasPorCidadeOuTexto(texto, listaDeCidades) {
   const chave = normalizarTexto(texto);
   const candidatoNaBase = (listaDeCidades || []).find(
-    c => normalizarTexto(c.nome) === chave || normalizarTexto(c.slug) === chave
+    (c) => normalizarTexto(c.nome) === chave || normalizarTexto(c.slug) === chave
   );
-  if (candidatoNaBase && typeof candidatoNaBase.lat === "number" && typeof candidatoNaBase.lng === "number") {
+  if (
+    candidatoNaBase &&
+    typeof candidatoNaBase.lat === "number" &&
+    typeof candidatoNaBase.lng === "number"
+  ) {
     return { lat: candidatoNaBase.lat, lng: candidatoNaBase.lng, fonte: "db" };
   }
   const candidatoFallback = coordenadasFallback[chave];
@@ -136,7 +145,7 @@ async function construirHistoricoParaGemini(idDaConversa, limiteDeTrocas = 12) {
       .eq("conversation_id", idDaConversa)
       .order("created_at", { ascending: true });
     if (error) throw error;
-    const todasAsInteracoes = (data || []);
+    const todasAsInteracoes = data || [];
     const ultimasInteracoes = todasAsInteracoes.slice(-limiteDeTrocas);
 
     const historicoGemini = [];
@@ -158,7 +167,7 @@ async function construirHistoricoParaGemini(idDaConversa, limiteDeTrocas = 12) {
 function historicoParaTextoSimples(historicoContents) {
   try {
     return (historicoContents || [])
-      .map(bloco => {
+      .map((bloco) => {
         const role = bloco?.role || "user";
         const text = (bloco?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
         return `- ${role}: ${text}`;
@@ -175,22 +184,28 @@ async function ferramentaBuscarParceirosOuDicas({ regiao, cidadesAtivas, argumen
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
   const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
 
-  const cidadesValidas = (cidadesAtivas || []);
-  let listaDeIdsDeCidadesParaFiltro = cidadesValidas.map(c => c.id);
+  const cidadesValidas = cidadesAtivas || [];
+  let listaDeIdsDeCidadesParaFiltro = cidadesValidas.map((c) => c.id);
   if (cidadeProcurada) {
     const alvo = cidadesValidas.find(
-      c => normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) || normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
+      (c) =>
+        normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) ||
+        normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
     );
     if (alvo) listaDeIdsDeCidadesParaFiltro = [alvo.id];
   }
 
   let construtorDeConsulta = supabase
     .from("parceiros")
-    .select("id, tipo, nome, categoria, descricao, endereco, contato, beneficio_bepit, faixa_preco, fotos_parceiros, cidade_id, tags, ativo")
+    .select(
+      "id, tipo, nome, categoria, descricao, endereco, contato, beneficio_bepit, faixa_preco, fotos_parceiros, cidade_id, tags, ativo"
+    )
     .eq("ativo", true)
     .in("cidade_id", listaDeIdsDeCidadesParaFiltro);
 
-  if (categoriaProcurada) construtorDeConsulta = construtorDeConsulta.ilike("categoria", `%${categoriaProcurada}%`);
+  if (categoriaProcurada) {
+    construtorDeConsulta = construtorDeConsulta.ilike("categoria", `%${categoriaProcurada}%`);
+  }
 
   const { data: registrosBase, error } = await construtorDeConsulta;
   if (error) throw error;
@@ -201,8 +216,15 @@ async function ferramentaBuscarParceirosOuDicas({ regiao, cidadesAtivas, argumen
     itens = itens.filter((parc) => {
       const nomeNormalizado = normalizarTexto(parc.nome);
       const categoriaNormalizada = normalizarTexto(parc.categoria || "");
-      const listaDeTags = Array.isArray(parc.tags) ? parc.tags.map((x) => normalizarTexto(String(x))) : [];
-      return termosNormalizados.some((termo) => nomeNormalizado.includes(termo) || categoriaNormalizada.includes(termo) || listaDeTags.includes(termo));
+      const listaDeTags = Array.isArray(parc.tags)
+        ? parc.tags.map((x) => normalizarTexto(String(x)))
+        : [];
+      return termosNormalizados.some(
+        (termo) =>
+          nomeNormalizado.includes(termo) ||
+          categoriaNormalizada.includes(termo) ||
+          listaDeTags.includes(termo)
+      );
     });
   }
 
@@ -223,8 +245,8 @@ async function ferramentaBuscarParceirosOuDicas({ regiao, cidadesAtivas, argumen
       beneficio_bepit: p.beneficio_bepit,
       faixa_preco: p.faixa_preco,
       fotos_parceiros: Array.isArray(p.fotos_parceiros) ? p.fotos_parceiros : [],
-      cidade_id: p.cidade_id
-    }))
+      cidade_id: p.cidade_id,
+    })),
   };
 }
 
@@ -236,12 +258,16 @@ async function ferramentaObterRotaOuDistanciaAproximada({ argumentosDaFerramenta
   }
 
   const coordenadasOrigem = obterCoordenadasPorCidadeOuTexto(origem, cidadesAtivas);
-  const coordenadasDestino = obterCoordenadasPorCidadeOuTexto(destino, cidadesAtivas) ||
-                             obterCoordenadasPorCidadeOuTexto("cabo frio", cidadesAtivas);
+  const coordenadasDestino =
+    obterCoordenadasPorCidadeOuTexto(destino, cidadesAtivas) ||
+    obterCoordenadasPorCidadeOuTexto("cabo frio", cidadesAtivas);
   if (!coordenadasOrigem || !coordenadasDestino) {
     return { ok: false, error: "Coordenadas não disponíveis para origem ou destino informados." };
   }
-  const distanciaEmLinhaRetaKm = calcularDistanciaHaversineEmKm(coordenadasOrigem, coordenadasDestino);
+  const distanciaEmLinhaRetaKm = calcularDistanciaHaversineEmKm(
+    coordenadasOrigem,
+    coordenadasDestino
+  );
   const distanciaRodoviariaAproximadaKm = Math.round(distanciaEmLinhaRetaKm * 1.2);
   const tempoMinimoHoras = Math.round(distanciaRodoviariaAproximadaKm / 70);
   const tempoMaximoHoras = Math.round(distanciaRodoviariaAproximadaKm / 55);
@@ -254,14 +280,14 @@ async function ferramentaObterRotaOuDistanciaAproximada({ argumentosDaFerramenta
     hours_range: [tempoMinimoHoras, tempoMaximoHoras],
     notes: [
       "Estimativa por aproximação (linha reta + 20%). Utilize Waze/Maps para trânsito em tempo real.",
-      "Em alta temporada, sair cedo ajuda a evitar congestionamento na Via Lagos (RJ-124)."
-    ]
+      "Em alta temporada, sair cedo ajuda a evitar congestionamento na Via Lagos (RJ-124).",
+    ],
   };
 }
 
 async function ferramentaDefinirPreferenciaDeIndicacao({ idDaConversa, argumentosDaFerramenta }) {
   const preferencia = String(argumentosDaFerramenta?.preference || "").toLowerCase();
-  const topico = (argumentosDaFerramenta?.topic || null);
+  const topico = argumentosDaFerramenta?.topic || null;
   if (!["locais", "generico"].includes(preferencia)) {
     return { ok: false, error: "O campo 'preference' deve ser 'locais' ou 'generico'." };
   }
@@ -281,12 +307,69 @@ async function ferramentaDefinirPreferenciaDeIndicacao({ idDaConversa, argumento
 // HEALTHCHECKS
 // ============================================================================
 aplicacaoExpress.get("/health", (_req, res) => {
-  res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) });
+  res.status(200).json({
+    ok: true,
+    message: "Servidor BEPIT Nexus online",
+    port: String(portaDoServidor),
+  });
 });
 
-// útil para testar via Netlify proxy (/api/health → Render)
 aplicacaoExpress.get("/api/health", (_req, res) => {
-  res.status(200).json({ ok: true, scope: "api", message: "BEPIT Nexus API ok", port: String(portaDoServidor) });
+  res.status(200).json({
+    ok: true,
+    scope: "api",
+    message: "BEPIT Nexus API ok",
+    port: String(portaDoServidor),
+  });
+});
+
+// diagnóstico de banco: contagens e exemplo de slugs
+aplicacaoExpress.get("/api/health/db", async (_req, res) => {
+  try {
+    const { data: regioes, error: errReg } = await supabase
+      .from("regioes")
+      .select("id, slug, ativo");
+    if (errReg) throw new Error(`Falha ao consultar 'regioes': ${errReg.message}`);
+
+    let regiaoDosLagos = null;
+    if (Array.isArray(regioes)) {
+      regiaoDosLagos = regioes.find((r) => r.slug === "regiao-dos-lagos") || null;
+    }
+
+    let cidades = [];
+    if (regiaoDosLagos) {
+      const { data: cidadesData, error: errCid } = await supabase
+        .from("cidades")
+        .select("id, nome, slug, ativo, regiao_id")
+        .eq("regiao_id", regiaoDosLagos.id);
+      if (errCid) throw new Error(`Falha ao consultar 'cidades': ${errCid.message}`);
+      cidades = Array.isArray(cidadesData) ? cidadesData : [];
+    }
+
+    res.json({
+      ok: true,
+      env: {
+        has_SUPABASE_URL: Boolean(process.env.SUPABASE_URL),
+        has_SUPABASE_SERVICE_ROLE_KEY: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+      },
+      counts: {
+        regioes: Array.isArray(regioes) ? regioes.length : 0,
+        cidades_total: cidades.length,
+      },
+      sample: {
+        regiao_slug: regiaoDosLagos ? regiaoDosLagos.slug : null,
+        cidades: cidades.map((c) => ({
+          id: c.id,
+          nome: c.nome,
+          slug: c.slug,
+          ativo: c.ativo,
+        })),
+      },
+    });
+  } catch (e) {
+    console.error("[/api/health/db] Erro:", e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || "Erro interno ao consultar banco." });
+  }
 });
 
 // ============================================================================
@@ -297,9 +380,17 @@ async function analisarIntencaoDoUsuario(textoDoUsuario) {
 Frase: "${textoDoUsuario}"`;
 
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  const resp = await modelo.generateContent({
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+  });
   const text = (resp?.response?.text() || "").trim().toLowerCase();
-  const classes = new Set(["busca_parceiro", "follow_up_parceiro", "pergunta_geral", "mudanca_contexto", "small_talk"]);
+  const classes = new Set([
+    "busca_parceiro",
+    "follow_up_parceiro",
+    "pergunta_geral",
+    "mudanca_contexto",
+    "small_talk",
+  ]);
   return classes.has(text) ? text : "pergunta_geral";
 }
 
@@ -314,13 +405,21 @@ Responda apenas com JSON.
 Frase: "${texto}"`;
 
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  const resp = await modelo.generateContent({
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+  });
   const raw = (resp?.response?.text() || "").trim();
   try {
     const parsed = JSON.parse(raw);
-    const category = typeof parsed.category === "string" && parsed.category.trim() ? parsed.category.trim() : null;
-    const city = typeof parsed.city === "string" && parsed.city.trim() ? parsed.city.trim() : null;
-    const terms = Array.isArray(parsed.terms) ? parsed.terms.filter(t => typeof t === "string" && t.trim()).map(t => t.trim()) : [];
+    const category =
+      typeof parsed.category === "string" && parsed.category.trim()
+        ? parsed.category.trim()
+        : null;
+    const city =
+      typeof parsed.city === "string" && parsed.city.trim() ? parsed.city.trim() : null;
+    const terms = Array.isArray(parsed.terms)
+      ? parsed.terms.filter((t) => typeof t === "string" && t.trim()).map((t) => t.trim())
+      : [];
     return { category, city, terms };
   } catch {
     return { category: null, city: null, terms: [] };
@@ -343,7 +442,9 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   ].join("\n");
 
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  const resp = await modelo.generateContent({
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+  });
   return (resp?.response?.text() || "").trim();
 }
 
@@ -361,7 +462,9 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
   ].join("\n");
 
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  const resp = await modelo.generateContent({
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+  });
   return (resp?.response?.text() || "").trim();
 }
 
@@ -378,7 +481,17 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
       }
     }
 
-    const ordinais = ["primeiro", "segundo", "terceiro", "quarto", "quinto", "sexto", "sétimo", "setimo", "oitavo"];
+    const ordinais = [
+      "primeiro",
+      "segundo",
+      "terceiro",
+      "quarto",
+      "quinto",
+      "sexto",
+      "sétimo",
+      "setimo",
+      "oitavo",
+    ];
     for (let i = 0; i < ordinais.length; i++) {
       if (texto.includes(ordinais[i])) {
         const pos = i + 1;
@@ -393,7 +506,7 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
       if (nome && texto.includes(nome)) return p;
       const tokens = (nome || "").split(/\s+/).filter(Boolean);
       if (tokens.length > 0) {
-        const acertos = tokens.filter(t => texto.includes(t)).length;
+        const acertos = tokens.filter((t) => texto.includes(t)).length;
         if (acertos >= Math.max(1, Math.ceil(tokens.length * 0.6))) {
           return p;
         }
@@ -406,7 +519,13 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
   }
 }
 
-async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa }) {
+async function lidarComNovaBusca({
+  textoDoUsuario,
+  historicoGemini,
+  regiao,
+  cidadesAtivas,
+  idDaConversa,
+}) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
 
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
@@ -417,14 +536,25 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
     const parceirosSugeridos = resultadoBusca.items || [];
-    const respostaFinal = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, parceirosSugeridos, regiao?.nome);
+    const respostaFinal = await gerarRespostaComParceiros(
+      textoDoUsuario,
+      historicoGemini,
+      parceirosSugeridos,
+      regiao?.nome
+    );
 
     try {
       await supabase
         .from("conversas")
-        .update({ parceiros_sugeridos: parceirosSugeridos, parceiro_em_foco: null, topico_atual: entidades?.category || null })
+        .update({
+          parceiros_sugeridos: parceirosSugeridos,
+          parceiro_em_foco: null,
+          topico_atual: entidades?.category || null,
+        })
         .eq("id", idDaConversa);
-    } catch { /* segue */ }
+    } catch {
+      /* segue */
+    }
 
     return { respostaFinal, parceirosSugeridos };
   } else {
@@ -442,7 +572,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
     let { message: textoDoUsuario, conversationId: idDaConversa } = requisicao.body || {};
 
     if (!textoDoUsuario || typeof textoDoUsuario !== "string" || !textoDoUsuario.trim()) {
-      return resposta.status(400).json({ error: "O campo 'message' é obrigatório e deve ser uma string não vazia." });
+      return resposta
+        .status(400)
+        .json({ error: "O campo 'message' é obrigatório e deve ser uma string não vazia." });
     }
     textoDoUsuario = textoDoUsuario.trim();
 
@@ -451,15 +583,21 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       .select("id, nome, slug, ativo")
       .eq("slug", slugDaRegiao)
       .single();
-    if (erroRegiao || !regiao) return resposta.status(404).json({ error: "Região não encontrada." });
-    if (regiao.ativo === false) return resposta.status(403).json({ error: "Região desativada." });
+    if (erroRegiao || !regiao) {
+      return resposta.status(404).json({ error: "Região não encontrada." });
+    }
+    if (regiao.ativo === false) {
+      return resposta.status(403).json({ error: "Região desativada." });
+    }
 
     const { data: cidades, error: erroCidades } = await supabase
       .from("cidades")
       .select("id, nome, slug, lat, lng, ativo")
       .eq("regiao_id", regiao.id);
-    if (erroCidades) return resposta.status(500).json({ error: "Erro ao carregar cidades." });
-    const cidadesAtivas = (cidades || []).filter(c => c.ativo !== false);
+    if (erroCidades) {
+      return resposta.status(500).json({ error: "Erro ao carregar cidades." });
+    }
+    const cidadesAtivas = (cidades || []).filter((c) => c.ativo !== false);
 
     if (!idDaConversa || typeof idDaConversa !== "string" || !idDaConversa.trim()) {
       idDaConversa = randomUUID();
@@ -474,7 +612,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           preferencia_indicacao: null,
           topico_atual: null,
         });
-      } catch { /* não falha o fluxo */ }
+      } catch {
+        /* não falha o fluxo */
+      }
     }
 
     let conversaAtual = null;
@@ -485,7 +625,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
         .eq("id", idDaConversa)
         .maybeSingle();
       conversaAtual = conv || null;
-    } catch { /* segue */ }
+    } catch {
+      /* segue */
+    }
 
     if (modoCruSemRegrasAtivo) {
       const modelo = await obterModeloGemini();
@@ -507,9 +649,12 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
             resposta_ia: textoLivre,
             parceiros_sugeridos: [],
           })
-          .select("id").single();
+          .select("id")
+          .single();
         idDaInteracao = novaInteracao?.id || null;
-      } catch { /* segue */ }
+      } catch {
+        /* segue */
+      }
 
       const fotosDosParceiros = [];
       return resposta.status(200).json({
@@ -522,7 +667,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
 
     const historicoGemini = await construirHistoricoParaGemini(idDaConversa, 12);
 
-    const candidatosDaConversa = Array.isArray(conversaAtual?.parceiros_sugeridos) ? conversaAtual.parceiros_sugeridos : [];
+    const candidatosDaConversa = Array.isArray(conversaAtual?.parceiros_sugeridos)
+      ? conversaAtual.parceiros_sugeridos
+      : [];
     const parceiroSelecionado = encontrarParceiroNaLista(textoDoUsuario, candidatosDaConversa);
     if (parceiroSelecionado) {
       try {
@@ -530,7 +677,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           .from("conversas")
           .update({ parceiro_em_foco: parceiroSelecionado, parceiros_sugeridos: candidatosDaConversa })
           .eq("id", idDaConversa);
-      } catch { /* segue */ }
+      } catch {
+        /* segue */
+      }
 
       const respostaCurta = await gerarRespostaComParceiros(
         textoDoUsuario,
@@ -557,7 +706,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
         console.warn("[INTERACOES] Falha ao salvar interação (seleção):", erro?.message || erro);
       }
 
-      const fotosDosParceiros = [parceiroSelecionado].flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
+      const fotosDosParceiros = [parceiroSelecionado]
+        .flatMap((p) => p?.fotos_parceiros || [])
+        .filter(Boolean);
       return resposta.status(200).json({
         reply: respostaCurta,
         interactionId: idDaInteracaoSalvaSel,
@@ -589,7 +740,12 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       case "follow_up_parceiro": {
         const parceiroEmFoco = conversaAtual?.parceiro_em_foco || null;
         if (parceiroEmFoco) {
-          respostaFinal = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, [parceiroEmFoco], regiao?.nome);
+          respostaFinal = await gerarRespostaComParceiros(
+            textoDoUsuario,
+            historicoGemini,
+            [parceiroEmFoco],
+            regiao?.nome
+          );
           parceirosSugeridos = [parceiroEmFoco];
         } else {
           const resultado = await lidarComNovaBusca({
@@ -610,12 +766,15 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
         respostaFinal = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
         try {
           await supabase.from("conversas").update({ parceiro_em_foco: null }).eq("id", idDaConversa);
-        } catch { /* segue */ }
+        } catch {
+          /* segue */
+        }
         break;
       }
 
       case "small_talk": {
-        respostaFinal = "Olá! Sou o BEPIT, seu concierge na Região dos Lagos. O que você gostaria de fazer hoje?";
+        respostaFinal =
+          "Olá! Sou o BEPIT, seu concierge na Região dos Lagos. O que você gostaria de fazer hoje?";
         break;
       }
 
@@ -626,7 +785,8 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
     }
 
     if (!respostaFinal) {
-      respostaFinal = "Posso ajudar com roteiros, transporte, passeios, praias e onde comer. O que você gostaria de saber?";
+      respostaFinal =
+        "Posso ajudar com roteiros, transporte, passeios, praias e onde comer. O que você gostaria de saber?";
     }
 
     let idDaInteracaoSalva = null;
@@ -648,7 +808,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       console.warn("[INTERACOES] Falha ao salvar interação:", erro?.message || erro);
     }
 
-    const fotosDosParceiros = (parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
+    const fotosDosParceiros = (parceirosSugeridos || [])
+      .flatMap((p) => p?.fotos_parceiros || [])
+      .filter(Boolean);
 
     return resposta.status(200).json({
       reply: respostaFinal,
@@ -687,7 +849,9 @@ aplicacaoExpress.post("/api/feedback", async (requisicao, resposta) => {
         tipo_evento: "feedback",
         payload: { interactionId, feedback },
       });
-    } catch { /* segue */ }
+    } catch {
+      /* segue */
+    }
 
     resposta.json({ success: true });
   } catch (erro) {
@@ -697,7 +861,7 @@ aplicacaoExpress.post("/api/feedback", async (requisicao, resposta) => {
 });
 
 // ============================================================================
-// AUTH (NOVO para casar com o frontend que usa "key")
+// AUTH (LOGIN POR CHAVE ADMIN_API_KEY)
 // ============================================================================
 aplicacaoExpress.post("/api/auth/login", async (req, res) => {
   try {
@@ -725,7 +889,9 @@ aplicacaoExpress.post("/api/admin/login", async (requisicao, resposta) => {
     const usuarioValido = username && username === process.env.ADMIN_USER;
     const senhaValida = password && password === process.env.ADMIN_PASS;
 
-    if (!usuarioValido || !senhaValida) return resposta.status(401).json({ error: "Credenciais inválidas." });
+    if (!usuarioValido || !senhaValida) {
+      return resposta.status(401).json({ error: "Credenciais inválidas." });
+    }
 
     return resposta.json({ ok: true, adminKey: process.env.ADMIN_API_KEY });
   } catch (erro) {
@@ -735,6 +901,7 @@ aplicacaoExpress.post("/api/admin/login", async (requisicao, resposta) => {
 });
 
 function exigirChaveDeAdministrador(requisicao, resposta, proximo) {
+  // No Node/Express, req.headers são normalizados em minúsculo
   const chave = requisicao.headers["x-admin-key"];
   if (!chave || chave !== (process.env.ADMIN_API_KEY || "")) {
     return resposta.status(401).json({ error: "Chave administrativa inválida ou ausente." });
@@ -742,341 +909,421 @@ function exigirChaveDeAdministrador(requisicao, resposta, proximo) {
   proximo();
 }
 
-aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const corpo = requisicao.body || {};
-    const { regiaoSlug, cidadeSlug, ...restante } = corpo;
+// Criar parceiro/dica
+aplicacaoExpress.post(
+  "/api/admin/parceiros",
+  exigirChaveDeAdministrador,
+  async (requisicao, resposta) => {
+    try {
+      const corpo = requisicao.body || {};
+      const { regiaoSlug, cidadeSlug, ...restante } = corpo;
 
-    const { data: regiao, error: erroReg } = await supabase
-      .from("regioes").select("id").eq("slug", regiaoSlug).single();
-    if (erroReg || !regiao) return resposta.status(400).json({ error: "regiaoSlug inválido." });
-
-    const { data: cidade, error: erroCid } = await supabase
-      .from("cidades").select("id").eq("regiao_id", regiao.id).eq("slug", cidadeSlug).single();
-    if (erroCid || !cidade) return resposta.status(400).json({ error: "cidadeSlug inválido." });
-
-    const novoRegistro = {
-      cidade_id: cidade.id,
-      tipo: restante.tipo || "PARCEIRO",
-      nome: restante.nome,
-      descricao: restante.descricao || null,
-      categoria: restante.categoria || null,
-      beneficio_bepit: restante.beneficio_bepit || null,
-      endereco: restante.endereco || null,
-      contato: restante.contato || null,
-      tags: Array.isArray(restante.tags) ? restante.tags : null,
-      horario_funcionamento: restante.horario_funcionamento || null,
-      faixa_preco: restante.faixa_preco || null,
-      fotos_parceiros: Array.isArray(restante.fotos_parceiros) ? restante.fotos_parceiros : (Array.isArray(restante.fotos) ? restante.fotos : null),
-      ativo: restante.ativo !== false,
-    };
-
-    const { data, error } = await supabase.from("parceiros").insert(novoRegistro).select("*").single();
-    if (error) {
-      console.error("[/api/admin/parceiros] Insert Erro:", error);
-      return resposta.status(500).json({ error: "Erro ao criar parceiro/dica." });
-    }
-
-    return resposta.status(200).json({ ok: true, data });
-  } catch (erro) {
-    console.error("[/api/admin/parceiros] Erro:", erro);
-    return resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-
-aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const { regiaoSlug, cidadeSlug } = requisicao.params;
-
-    const { data: regiao, error: erroReg } = await supabase.from("regioes").select("id").eq("slug", regiaoSlug).single();
-    if (erroReg || !regiao) return resposta.status(400).json({ error: "regiaoSlug inválido." });
-
-    const { data: cidade, error: erroCid } = await supabase
-      .from("cidades").select("id").eq("regiao_id", regiao.id).eq("slug", cidadeSlug).single();
-    if (erroCid || !cidade) return resposta.status(400).json({ error: "cidadeSlug inválido." });
-
-    const { data, error } = await supabase.from("parceiros").select("*").eq("cidade_id", cidade.id).order("nome");
-    if (error) {
-      console.error("[/api/admin/parceiros list] Erro:", error);
-      return resposta.status(500).json({ error: "Erro ao listar parceiros/dicas." });
-    }
-
-    return resposta.status(200).json({ data });
-  } catch (erro) {
-    console.error("[/api/admin/parceiros list] Erro:", erro);
-    return resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-// Atualizar parceiro/dica por ID
-aplicacaoExpress.put("/api/admin/parceiros/:id", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const { id } = requisicao.params;
-    const body = requisicao.body || {};
-
-    // Campos permitidos para update
-    const camposPermitidos = [
-      "nome",
-      "categoria",
-      "descricao",
-      "beneficio_bepit",
-      "endereco",
-      "contato",
-      "tags",
-      "horario_funcionamento",
-      "faixa_preco",
-      "fotos",
-      "fotos_parceiros",
-      "ativo"
-    ];
-
-    const patch = {};
-    for (const k of camposPermitidos) {
-      if (k in body) {
-        patch[k] = body[k];
-      }
-    }
-
-    // Normaliza fotos/fotos_parceiros
-    if (Array.isArray(patch.fotos) && !Array.isArray(patch.fotos_parceiros)) {
-      patch.fotos_parceiros = patch.fotos;
-    }
-
-    const { data, error } = await supabase
-      .from("parceiros")
-      .update(patch)
-      .eq("id", id)
-      .select("*")
-      .single();
-
-    if (error) {
-      console.error("[PUT /api/admin/parceiros/:id] Supabase erro:", error);
-      return resposta.status(500).json({ error: "Erro ao atualizar parceiro/dica." });
-    }
-
-    if (!data) {
-      return resposta.status(404).json({ error: "Registro não encontrado." });
-    }
-
-    return resposta.json({ ok: true, data });
-  } catch (erro) {
-    console.error("[PUT /api/admin/parceiros/:id] Erro:", erro);
-    return resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-aplicacaoExpress.post("/api/admin/regioes", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const { nome, slug, ativo = true } = requisicao.body || {};
-    if (!nome || !slug) return resposta.status(400).json({ error: "Campos 'nome' e 'slug' são obrigatórios." });
-
-    const { data, error } = await supabase.from("regioes").insert({ nome, slug, ativo: Boolean(ativo) }).select("*").single();
-    if (error) {
-      console.error("[/api/admin/regioes] Insert Erro:", error);
-      return resposta.status(500).json({ error: "Erro ao criar região." });
-    }
-
-    resposta.json({ ok: true, data });
-  } catch (erro) {
-    console.error("[/api/admin/regioes] Erro:", erro);
-    resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-
-aplicacaoExpress.post("/api/admin/cidades", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const { regiaoSlug, nome, slug, ativo = true, lat = null, lng = null } = requisicao.body || {};
-    if (!regiaoSlug || !nome || !slug) return resposta.status(400).json({ error: "Campos 'regiaoSlug', 'nome' e 'slug' são obrigatórios." });
-
-    const { data: regiao, error: erroReg } = await supabase.from("regioes").select("id").eq("slug", regiaoSlug).single();
-    if (erroReg || !regiao) return resposta.status(400).json({ error: "regiaoSlug inválido." });
-
-    const { data, error } = await supabase
-      .from("cidades")
-      .insert({ regiao_id: regiao.id, nome, slug, ativo: Boolean(ativo), lat: lat === null ? null : Number(lat), lng: lng === null ? null : Number(lng) })
-      .select("*")
-      .single();
-    if (error) {
-      console.error("[/api/admin/cidades] Insert Erro:", error);
-      return resposta.status(500).json({ error: "Erro ao criar cidade." });
-    }
-
-    resposta.json({ ok: true, data });
-  } catch (erro) {
-    console.error("[/api/admin/cidades] Erro:", erro);
-    resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-
-aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const { regiaoSlug, cidadeSlug } = requisicao.query;
-    if (!regiaoSlug) return resposta.status(400).json({ error: "O parâmetro 'regiaoSlug' é obrigatório." });
-
-    const { data: regiao, error: erroReg } = await supabase
-      .from("regioes")
-      .select("id, nome, slug")
-      .eq("slug", regiaoSlug)
-      .single();
-    if (erroReg || !regiao) return resposta.status(404).json({ error: "Região não encontrada." });
-
-    const { data: cidades, error: erroCid } = await supabase
-      .from("cidades")
-      .select("id, nome, slug")
-      .eq("regiao_id", regiao.id);
-    if (erroCid) return resposta.status(500).json({ error: "Erro ao carregar cidades." });
-
-    let cidade = null;
-    let listaDeIdsDeCidades = (cidades || []).map((c) => c.id);
-    if (cidadeSlug) {
-      cidade = (cidades || []).find((c) => c.slug === cidadeSlug) || null;
-      if (!cidade) return resposta.status(404).json({ error: "Cidade não encontrada nesta região." });
-      listaDeIdsDeCidades = [cidade.id];
-    }
-
-    const { data: parceirosAtivos, error: erroParc } = await supabase
-      .from("parceiros")
-      .select("id")
-      .eq("ativo", true)
-      .in("cidade_id", listaDeIdsDeCidades);
-    if (erroParc) return resposta.status(500).json({ error: "Erro ao contar parceiros." });
-
-    const { data: buscas, error: erroBus } = await supabase
-      .from("buscas_texto")
-      .select("id, cidade_id, regiao_id")
-      .eq("regiao_id", regiao.id);
-    if (erroBus) return resposta.status(500).json({ error: "Erro ao contar buscas." });
-    const totalDeBuscas = (buscas || []).filter((b) => (cidade ? b.cidade_id === cidade.id : true)).length;
-
-    const { data: interacoes, error: erroInt } = await supabase
-      .from("interacoes")
-      .select("id, regiao_id")
-      .eq("regiao_id", regiao.id);
-    if (erroInt) return resposta.status(500).json({ error: "Erro ao contar interações." });
-    const totalDeInteracoes = (interacoes || []).length;
-
-    const { data: registrosDeViews, error: erroViews } = await supabase
-      .from("parceiro_views")
-      .select("parceiro_id, views_total, last_view_at")
-      .order("views_total", { ascending: false })
-      .limit(50);
-    if (erroViews) return resposta.status(500).json({ error: "Erro ao ler views." });
-
-    const listaDeIdsDeParceiros = Array.from(new Set((registrosDeViews || []).map((v) => v.parceiro_id)));
-    const { data: informacoesDosParceiros } = await supabase
-      .from("parceiros")
-      .select("id, nome, categoria, cidade_id")
-      .in("id", listaDeIdsDeParceiros);
-
-    const mapaParceiroPorId = new Map((informacoesDosParceiros || []).map((p) => [p.id, p]));
-    const topCincoPorViews = (registrosDeViews || [])
-      .filter((reg) => {
-        const info = mapaParceiroPorId.get(reg.parceiro_id);
-        if (!info) return false;
-        const cidadesOk = cidade ? info.cidade_id === cidade.id : listaDeIdsDeCidades.includes(info.cidade_id);
-        return cidadesOk;
-      })
-      .slice(0, 5)
-      .map((reg) => {
-        const info = mapaParceiroPorId.get(reg.parceiro_id);
-        return {
-          parceiro_id: reg.parceiro_id,
-          nome: info?.nome || "—",
-          categoria: info?.categoria || "—",
-          views_total: reg.views_total,
-          last_view_at: reg.last_view_at,
-        };
-      });
-
-    return resposta.json({
-      regiao: { id: regiao.id, nome: regiao.nome, slug: regiao.slug },
-      cidade: cidade ? { id: cidade.id, nome: cidade.nome, slug: cidade.slug } : null,
-      total_parceiros_ativos: (parceirosAtivos || []).length,
-      total_buscas: totalDeBuscas,
-      total_interacoes: totalDeInteracoes,
-      top5_parceiros_por_views: topCincoPorViews,
-    });
-  } catch (erro) {
-    console.error("[/api/admin/metrics/summary] Erro:", erro);
-    resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-
-aplicacaoExpress.get("/api/admin/logs", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const {
-      tipo,
-      regiaoSlug,
-      cidadeSlug,
-      parceiroId,
-      conversationId,
-      since,
-      until,
-      limit,
-    } = requisicao.query;
-
-    let limite = Number(limit || 50);
-    if (!Number.isFinite(limite) || limite <= 0) limite = 50;
-    if (limite > 200) limite = 200;
-
-    let regiaoId = null;
-    let cidadeId = null;
-
-    if (regiaoSlug) {
       const { data: regiao, error: erroReg } = await supabase
         .from("regioes")
-        .select("id, slug")
-        .eq("slug", String(regiaoSlug))
+        .select("id")
+        .eq("slug", regiaoSlug)
         .single();
-      if (erroReg) {
-        console.error("[/api/admin/logs] Erro ao buscar região:", erroReg);
-        return resposta.status(500).json({ error: "Erro ao buscar região." });
-      }
-      if (!regiao) return resposta.status(404).json({ error: "Região não encontrada." });
-      regiaoId = regiao.id;
-    }
+      if (erroReg || !regiao) return resposta.status(400).json({ error: "regiaoSlug inválido." });
 
-    if (cidadeSlug && regiaoId) {
       const { data: cidade, error: erroCid } = await supabase
         .from("cidades")
-        .select("id, slug, regiao_id")
-        .eq("slug", String(cidadeSlug))
-        .eq("regiao_id", regiaoId)
+        .select("id")
+        .eq("regiao_id", regiao.id)
+        .eq("slug", cidadeSlug)
         .single();
-      if (erroCid) {
-        console.error("[/api/admin/logs] Erro ao buscar cidade:", erroCid);
-        return resposta.status(500).json({ error: "Erro ao buscar cidade." });
+      if (erroCid || !cidade) return resposta.status(400).json({ error: "cidadeSlug inválido." });
+
+      const novoRegistro = {
+        cidade_id: cidade.id,
+        tipo: restante.tipo || "PARCEIRO",
+        nome: restante.nome,
+        descricao: restante.descricao || null,
+        categoria: restante.categoria || null,
+        beneficio_bepit: restante.beneficio_bepit || null,
+        endereco: restante.endereco || null,
+        contato: restante.contato || null,
+        tags: Array.isArray(restante.tags) ? restante.tags : null,
+        horario_funcionamento: restante.horario_funcionamento || null,
+        faixa_preco: restante.faixa_preco || null,
+        fotos_parceiros: Array.isArray(restante.fotos_parceiros)
+          ? restante.fotos_parceiros
+          : Array.isArray(restante.fotos)
+          ? restante.fotos
+          : null,
+        ativo: restante.ativo !== false,
+      };
+
+      const { data, error } = await supabase
+        .from("parceiros")
+        .insert(novoRegistro)
+        .select("*")
+        .single();
+      if (error) {
+        console.error("[/api/admin/parceiros] Insert Erro:", error);
+        return resposta.status(500).json({ error: "Erro ao criar parceiro/dica." });
       }
-      if (!cidade) return resposta.status(404).json({ error: "Cidade não encontrada nesta região." });
-      cidadeId = cidade.id;
+
+      return resposta.status(200).json({ ok: true, data });
+    } catch (erro) {
+      console.error("[/api/admin/parceiros] Erro:", erro);
+      return resposta.status(500).json({ error: "Erro interno." });
     }
-
-    let consulta = supabase
-      .from("eventos_analytics")
-      .select("id, created_at, regiao_id, cidade_id, parceiro_id, conversation_id, tipo_evento, payload")
-      .order("created_at", { ascending: false })
-      .limit(limite);
-
-    if (tipo) consulta = consulta.eq("tipo_evento", String(tipo));
-    if (regiaoId) consulta = consulta.eq("regiao_id", regiaoId);
-    if (cidadeId) consulta = consulta.eq("cidade_id", cidadeId);
-    if (parceiroId) consulta = consulta.eq("parceiro_id", String(parceiroId));
-    if (conversationId) consulta = consulta.eq("conversation_id", String(conversationId));
-    if (since) consulta = consulta.gte("created_at", String(since));
-    if (until) consulta = consulta.lte("created_at", String(until));
-
-    const { data, error } = await consulta;
-    if (error) {
-      console.error("[/api/admin/logs] Erro Supabase:", error);
-      return resposta.status(500).json({ error: "Erro ao consultar logs." });
-    }
-
-    return resposta.json({ data });
-  } catch (erro) {
-    console.error("[/api/admin/logs] Erro inesperado:", erro);
-    return resposta.status(500).json({ error: "Erro interno." });
   }
-});
+);
+
+// **Atualizar parceiro/dica por ID** (necessário para AdminDashboard -> adminPut)
+aplicacaoExpress.put(
+  "/api/admin/parceiros/:id",
+  exigirChaveDeAdministrador,
+  async (requisicao, resposta) => {
+    try {
+      const { id } = requisicao.params;
+      const atualizacoes = requisicao.body || {};
+
+      // Normalizações simples
+      const payload = {
+        nome: atualizacoes.nome ?? null,
+        categoria: atualizacoes.categoria ?? null,
+        descricao: atualizacoes.descricao ?? null,
+        beneficio_bepit: atualizacoes.beneficio_bepit ?? null,
+        endereco: atualizacoes.endereco ?? null,
+        contato: atualizacoes.contato ?? null,
+        tags: Array.isArray(atualizacoes.tags) ? atualizacoes.tags : null,
+        horario_funcionamento: atualizacoes.horario_funcionamento ?? null,
+        faixa_preco: atualizacoes.faixa_preco ?? null,
+        fotos_parceiros: Array.isArray(atualizacoes.fotos_parceiros)
+          ? atualizacoes.fotos_parceiros
+          : Array.isArray(atualizacoes.fotos)
+          ? atualizacoes.fotos
+          : null,
+        ativo: atualizacoes.ativo !== false,
+      };
+
+      const { data, error } = await supabase
+        .from("parceiros")
+        .update(payload)
+        .eq("id", id)
+        .select("*")
+        .single();
+      if (error) {
+        console.error("[/api/admin/parceiros/:id] Update Erro:", error);
+        return resposta.status(500).json({ error: "Erro ao atualizar parceiro/dica." });
+      }
+      if (!data) {
+        return resposta.status(404).json({ error: "Parceiro/Dica não encontrado." });
+      }
+
+      return resposta.status(200).json({ ok: true, data });
+    } catch (erro) {
+      console.error("[/api/admin/parceiros/:id] Erro:", erro);
+      return resposta.status(500).json({ error: "Erro interno." });
+    }
+  }
+);
+
+// Listar parceiros/dicas por região/cidade
+aplicacaoExpress.get(
+  "/api/admin/parceiros/:regiaoSlug/:cidadeSlug",
+  exigirChaveDeAdministrador,
+  async (requisicao, resposta) => {
+    try {
+      const { regiaoSlug, cidadeSlug } = requisicao.params;
+
+      const { data: regiao, error: erroReg } = await supabase
+        .from("regioes")
+        .select("id")
+        .eq("slug", regiaoSlug)
+        .single();
+      if (erroReg || !regiao) return resposta.status(400).json({ error: "regiaoSlug inválido." });
+
+      const { data: cidade, error: erroCid } = await supabase
+        .from("cidades")
+        .select("id")
+        .eq("regiao_id", regiao.id)
+        .eq("slug", cidadeSlug)
+        .single();
+      if (erroCid || !cidade) return resposta.status(400).json({ error: "cidadeSlug inválido." });
+
+      const { data, error } = await supabase
+        .from("parceiros")
+        .select("*")
+        .eq("cidade_id", cidade.id)
+        .order("nome");
+      if (error) {
+        console.error("[/api/admin/parceiros list] Erro:", error);
+        return resposta.status(500).json({ error: "Erro ao listar parceiros/dicas." });
+      }
+
+      return resposta.status(200).json({ data });
+    } catch (erro) {
+      console.error("[/api/admin/parceiros list] Erro:", erro);
+      return resposta.status(500).json({ error: "Erro interno." });
+    }
+  }
+);
+
+// Criar região
+aplicacaoExpress.post(
+  "/api/admin/regioes",
+  exigirChaveDeAdministrador,
+  async (requisicao, resposta) => {
+    try {
+      const { nome, slug, ativo = true } = requisicao.body || {};
+      if (!nome || !slug) {
+        return resposta.status(400).json({ error: "Campos 'nome' e 'slug' são obrigatórios." });
+      }
+
+      const { data, error } = await supabase
+        .from("regioes")
+        .insert({ nome, slug, ativo: Boolean(ativo) })
+        .select("*")
+        .single();
+      if (error) {
+        console.error("[/api/admin/regioes] Insert Erro:", error);
+        return resposta.status(500).json({ error: "Erro ao criar região." });
+      }
+
+      resposta.json({ ok: true, data });
+    } catch (erro) {
+      console.error("[/api/admin/regioes] Erro:", erro);
+      resposta.status(500).json({ error: "Erro interno." });
+    }
+  }
+);
+
+// Criar cidade
+aplicacaoExpress.post(
+  "/api/admin/cidades",
+  exigirChaveDeAdministrador,
+  async (requisicao, resposta) => {
+    try {
+      const { regiaoSlug, nome, slug, ativo = true, lat = null, lng = null } = requisicao.body || {};
+      if (!regiaoSlug || !nome || !slug) {
+        return resposta
+          .status(400)
+          .json({ error: "Campos 'regiaoSlug', 'nome' e 'slug' são obrigatórios." });
+      }
+
+      const { data: regiao, error: erroReg } = await supabase
+        .from("regioes")
+        .select("id")
+        .eq("slug", regiaoSlug)
+        .single();
+      if (erroReg || !regiao) return resposta.status(400).json({ error: "regiaoSlug inválido." });
+
+      const { data, error } = await supabase
+        .from("cidades")
+        .insert({
+          regiao_id: regiao.id,
+          nome,
+          slug,
+          ativo: Boolean(ativo),
+          lat: lat === null ? null : Number(lat),
+          lng: lng === null ? null : Number(lng),
+        })
+        .select("*")
+        .single();
+      if (error) {
+        console.error("[/api/admin/cidades] Insert Erro:", error);
+        return resposta.status(500).json({ error: "Erro ao criar cidade." });
+      }
+
+      resposta.json({ ok: true, data });
+    } catch (erro) {
+      console.error("[/api/admin/cidades] Erro:", erro);
+      resposta.status(500).json({ error: "Erro interno." });
+    }
+  }
+);
+
+// Métricas
+aplicacaoExpress.get(
+  "/api/admin/metrics/summary",
+  exigirChaveDeAdministrador,
+  async (requisicao, resposta) => {
+    try {
+      const { regiaoSlug, cidadeSlug } = requisicao.query;
+      if (!regiaoSlug) {
+        return resposta.status(400).json({ error: "O parâmetro 'regiaoSlug' é obrigatório." });
+      }
+
+      const { data: regiao, error: erroReg } = await supabase
+        .from("regioes")
+        .select("id, nome, slug")
+        .eq("slug", regiaoSlug)
+        .single();
+      if (erroReg || !regiao) return resposta.status(404).json({ error: "Região não encontrada." });
+
+      const { data: cidades, error: erroCid } = await supabase
+        .from("cidades")
+        .select("id, nome, slug")
+        .eq("regiao_id", regiao.id);
+      if (erroCid) return resposta.status(500).json({ error: "Erro ao carregar cidades." });
+
+      let cidade = null;
+      let listaDeIdsDeCidades = (cidades || []).map((c) => c.id);
+      if (cidadeSlug) {
+        cidade = (cidades || []).find((c) => c.slug === cidadeSlug) || null;
+        if (!cidade) return resposta.status(404).json({ error: "Cidade não encontrada nesta região." });
+        listaDeIdsDeCidades = [cidade.id];
+      }
+
+      const { data: parceirosAtivos, error: erroParc } = await supabase
+        .from("parceiros")
+        .select("id")
+        .eq("ativo", true)
+        .in("cidade_id", listaDeIdsDeCidades);
+      if (erroParc) return resposta.status(500).json({ error: "Erro ao contar parceiros." });
+
+      const { data: buscas, error: erroBus } = await supabase
+        .from("buscas_texto")
+        .select("id, cidade_id, regiao_id")
+        .eq("regiao_id", regiao.id);
+      if (erroBus) return resposta.status(500).json({ error: "Erro ao contar buscas." });
+      const totalDeBuscas = (buscas || []).filter((b) => (cidade ? b.cidade_id === cidade.id : true))
+        .length;
+
+      const { data: interacoes, error: erroInt } = await supabase
+        .from("interacoes")
+        .select("id, regiao_id")
+        .eq("regiao_id", regiao.id);
+      if (erroInt) return resposta.status(500).json({ error: "Erro ao contar interações." });
+      const totalDeInteracoes = (interacoes || []).length;
+
+      const { data: registrosDeViews, error: erroViews } = await supabase
+        .from("parceiro_views")
+        .select("parceiro_id, views_total, last_view_at")
+        .order("views_total", { ascending: false })
+        .limit(50);
+      if (erroViews) return resposta.status(500).json({ error: "Erro ao ler views." });
+
+      const listaDeIdsDeParceiros = Array.from(
+        new Set((registrosDeViews || []).map((v) => v.parceiro_id))
+      );
+      const { data: informacoesDosParceiros } = await supabase
+        .from("parceiros")
+        .select("id, nome, categoria, cidade_id")
+        .in("id", listaDeIdsDeParceiros);
+
+      const mapaParceiroPorId = new Map((informacoesDosParceiros || []).map((p) => [p.id, p]));
+      const topCincoPorViews = (registrosDeViews || [])
+        .filter((reg) => {
+          const info = mapaParceiroPorId.get(reg.parceiro_id);
+          if (!info) return false;
+          const cidadesOk = cidade ? info.cidade_id === cidade.id : listaDeIdsDeCidades.includes(info.cidade_id);
+          return cidadesOk;
+        })
+        .slice(0, 5)
+        .map((reg) => {
+          const info = mapaParceiroPorId.get(reg.parceiro_id);
+          return {
+            parceiro_id: reg.parceiro_id,
+            nome: info?.nome || "—",
+            categoria: info?.categoria || "—",
+            views_total: reg.views_total,
+            last_view_at: reg.last_view_at,
+          };
+        });
+
+      return resposta.json({
+        regiao: { id: regiao.id, nome: regiao.nome, slug: regiao.slug },
+        cidade: cidade ? { id: cidade.id, nome: cidade.nome, slug: cidade.slug } : null,
+        total_parceiros_ativos: (parceirosAtivos || []).length,
+        total_buscas: totalDeBuscas,
+        total_interacoes: totalDeInteracoes,
+        top5_parceiros_por_views: topCincoPorViews,
+      });
+    } catch (erro) {
+      console.error("[/api/admin/metrics/summary] Erro:", erro);
+      resposta.status(500).json({ error: "Erro interno." });
+    }
+  }
+);
+
+// Logs
+aplicacaoExpress.get(
+  "/api/admin/logs",
+  exigirChaveDeAdministrador,
+  async (requisicao, resposta) => {
+    try {
+      const {
+        tipo,
+        regiaoSlug,
+        cidadeSlug,
+        parceiroId,
+        conversationId,
+        since,
+        until,
+        limit,
+      } = requisicao.query;
+
+      let limite = Number(limit || 50);
+      if (!Number.isFinite(limite) || limite <= 0) limite = 50;
+      if (limite > 200) limite = 200;
+
+      let regiaoId = null;
+      let cidadeId = null;
+
+      if (regiaoSlug) {
+        const { data: regiao, error: erroReg } = await supabase
+          .from("regioes")
+          .select("id, slug")
+          .eq("slug", String(regiaoSlug))
+          .single();
+        if (erroReg) {
+          console.error("[/api/admin/logs] Erro ao buscar região:", erroReg);
+          return resposta.status(500).json({ error: "Erro ao buscar região." });
+        }
+        if (!regiao) return resposta.status(404).json({ error: "Região não encontrada." });
+        regiaoId = regiao.id;
+      }
+
+      if (cidadeSlug && regiaoId) {
+        const { data: cidade, error: erroCid } = await supabase
+          .from("cidades")
+          .select("id, slug, regiao_id")
+          .eq("slug", String(cidadeSlug))
+          .eq("regiao_id", regiaoId)
+          .single();
+        if (erroCid) {
+          console.error("[/api/admin/logs] Erro ao buscar cidade:", erroCid);
+          return resposta.status(500).json({ error: "Erro ao buscar cidade." });
+        }
+        if (!cidade) return resposta.status(404).json({ error: "Cidade não encontrada nesta região." });
+        cidadeId = cidade.id;
+      }
+
+      let consulta = supabase
+        .from("eventos_analytics")
+        .select("id, created_at, regiao_id, cidade_id, parceiro_id, conversation_id, tipo_evento, payload")
+        .order("created_at", { ascending: false })
+        .limit(limite);
+
+      if (tipo) consulta = consulta.eq("tipo_evento", String(tipo));
+      if (regiaoId) consulta = consulta.eq("regiao_id", regiaoId);
+      if (cidadeId) consulta = consulta.eq("cidade_id", cidadeId);
+      if (parceiroId) consulta = consulta.eq("parceiro_id", String(parceiroId));
+      if (conversationId) consulta = consulta.eq("conversation_id", String(conversationId));
+      if (since) consulta = consulta.gte("created_at", String(since));
+      if (until) consulta = consulta.lte("created_at", String(until));
+
+      const { data, error } = await consulta;
+      if (error) {
+        console.error("[/api/admin/logs] Erro Supabase:", error);
+        return resposta.status(500).json({ error: "Erro ao consultar logs." });
+      }
+
+      return resposta.json({ data });
+    } catch (erro) {
+      console.error("[/api/admin/logs] Erro inesperado:", erro);
+      return resposta.status(500).json({ error: "Erro interno." });
+    }
+  }
+);
 
 // ------------------------ INICIAR SERVIDOR ----------------------------------
 aplicacaoExpress.listen(portaDoServidor, () => {
-  console.log(`✅ BEPIT Nexus (Orquestrador v3.2.1) rodando em http://localhost:${portaDoServidor}`);
+  console.log(
+    `✅ BEPIT Nexus (Orquestrador v3.2.2) rodando em http://localhost:${portaDoServidor}`
+  );
 });
