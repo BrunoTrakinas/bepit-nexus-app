@@ -1,11 +1,21 @@
 // ============================================================================
-// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.3.2
-// - ESM, Express, CORS, Supabase, GoogleGenerativeAI
-// - Inclui health checks:  GET /health, GET /api/health, GET /api/health/db
-// - Fluxo do chat com RAG helpers, histórico, RAW_MODE opcional
-// - Admin: auth por key (/api/auth/login), user/pass legacy (/api/admin/login)
-// - Admin CRUD: criar/listar/atualizar parceiros; criar regiões e cidades
-// - Métricas e logs administrativos
+// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.2.2
+// Arquivo: backend-oficial/server/index.js
+//
+// O que este arquivo contém:
+// - Configuração Express, CORS, healthchecks, diagnósticos de DB
+// - Rotas de chat, feedback, autenticação por chave e admin (CRUD essencial)
+// - Integração com Supabase e Google Generative AI (Gemini)
+// - Logs detalhados para facilitar depuração (sem dados sensíveis)
+//
+// Requisitos de ambiente (Render → Environment):
+// - SUPABASE_URL
+// - SUPABASE_SERVICE_ROLE (ou SUPABASE_SERVICE_KEY)   <-- use a service key (NÃO a anon)
+// - GEMINI_API_KEY
+// - ADMIN_API_KEY
+// - ADMIN_USER (opcional, para /api/admin/login legado)
+// - ADMIN_PASS (opcional, para /api/admin/login legado)
+// - RAW_MODE = "1" (opcional; modo livre cru sem regras de orquestração)
 // ============================================================================
 
 import "dotenv/config";
@@ -23,8 +33,8 @@ const portaDoServidor = process.env.PORT || 3002;
 aplicacaoExpress.use(express.json({ limit: "2mb" }));
 
 // --------------------------------- CORS ------------------------------------
-function origemPermitida(origem) {
-  if (!origem) return true; // curl/Postman/health
+function origemEhPermitida(origem) {
+  if (!origem) return true; // chamadas de ferramentas, curl ou Postman
   try {
     const url = new URL(origem);
     if (url.hostname === "localhost") return true;
@@ -40,7 +50,7 @@ function origemPermitida(origem) {
 aplicacaoExpress.use(
   cors({
     origin: (origin, callback) =>
-      origemPermitida(origin) ? callback(null, true) : callback(new Error("CORS: origem não permitida.")),
+      origemEhPermitida(origin) ? callback(null, true) : callback(new Error("CORS: origem não permitida.")),
     credentials: true,
     allowedHeaders: ["Content-Type", "x-admin-key", "authorization"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
@@ -49,7 +59,7 @@ aplicacaoExpress.use(
 aplicacaoExpress.options("*", cors());
 
 // ------------------------------- GEMINI -------------------------------------
-const clienteGemini = new GoogleGenerativeAI((process.env.GEMINI_API_KEY || "").trim());
+const clienteGemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 const modeloPreferidoGemini = (process.env.GEMINI_MODEL || "").trim();
 const candidatosDeModeloGemini = [
@@ -60,16 +70,18 @@ const candidatosDeModeloGemini = [
   "gemini-pro"
 ].filter(Boolean);
 
-let modeloGeminiEmUso = null;
+let nomeDoModeloGeminiSelecionado = null;
 
 async function obterModeloGemini() {
-  if (modeloGeminiEmUso) return clienteGemini.getGenerativeModel({ model: modeloGeminiEmUso });
+  if (nomeDoModeloGeminiSelecionado) {
+    return clienteGemini.getGenerativeModel({ model: nomeDoModeloGeminiSelecionado });
+  }
   let ultimoErro = null;
   for (const nomeModelo of candidatosDeModeloGemini) {
     try {
       const teste = clienteGemini.getGenerativeModel({ model: nomeModelo });
       await teste.generateContent({ contents: [{ role: "user", parts: [{ text: "ok" }] }] });
-      modeloGeminiEmUso = nomeModelo;
+      nomeDoModeloGeminiSelecionado = nomeModelo;
       console.log(`[GEMINI] Modelo selecionado: ${nomeModelo}`);
       return teste;
     } catch (erro) {
@@ -77,7 +89,7 @@ async function obterModeloGemini() {
       console.warn(`[GEMINI] Falha ao usar modelo ${nomeModelo}: ${erro?.message || erro}`);
     }
   }
-  throw ultimoErro || new Error("Nenhum modelo Gemini disponível no momento.");
+  throw ultimoErro || new Error("Nenhum modelo Gemini disponível no momento. Verifique GEMINI_API_KEY.");
 }
 
 const modoCruSemRegrasAtivo = process.env.RAW_MODE === "1";
@@ -85,8 +97,7 @@ const modoCruSemRegrasAtivo = process.env.RAW_MODE === "1";
 // ------------------------------ FUNÇÕES AUXILIARES --------------------------
 function normalizarTexto(texto) {
   return String(texto || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
 }
@@ -107,7 +118,7 @@ function calcularDistanciaHaversineEmKm(coordenadaA, coordenadaB) {
   return 2 * raioDaTerraKm * Math.asin(Math.sqrt(h));
 }
 
-// Coordenadas de fallback
+// Coordenadas de fallback (caso não haja lat/lng na base)
 const coordenadasFallback = {
   "cabo frio": { lat: -22.8894, lng: -42.0286 },
   "arraial do cabo": { lat: -22.9661, lng: -42.0271 },
@@ -119,15 +130,11 @@ const coordenadasFallback = {
 
 function obterCoordenadasPorCidadeOuTexto(texto, listaDeCidades) {
   const chave = normalizarTexto(texto);
-  const candidatoNaBase = (listaDeCidades || []).find(
-    (c) => normalizarTexto(c.nome) === chave || normalizarTexto(c.slug) === chave
+  const cidadeEncontrada = (listaDeCidades || []).find(
+    c => normalizarTexto(c.nome) === chave || normalizarTexto(c.slug) === chave
   );
-  if (
-    candidatoNaBase &&
-    typeof candidatoNaBase.lat === "number" &&
-    typeof candidatoNaBase.lng === "number"
-  ) {
-    return { lat: candidatoNaBase.lat, lng: candidatoNaBase.lng, fonte: "db" };
+  if (cidadeEncontrada && typeof cidadeEncontrada.lat === "number" && typeof cidadeEncontrada.lng === "number") {
+    return { lat: cidadeEncontrada.lat, lng: cidadeEncontrada.lng, fonte: "db" };
   }
   const candidatoFallback = coordenadasFallback[chave];
   if (candidatoFallback) return { ...candidatoFallback, fonte: "fallback" };
@@ -143,7 +150,8 @@ async function construirHistoricoParaGemini(idDaConversa, limiteDeTrocas = 12) {
       .eq("conversation_id", idDaConversa)
       .order("created_at", { ascending: true });
     if (error) throw error;
-    const todasAsInteracoes = data || [];
+
+    const todasAsInteracoes = Array.isArray(data) ? data : [];
     const ultimasInteracoes = todasAsInteracoes.slice(-limiteDeTrocas);
 
     const historicoGemini = [];
@@ -165,7 +173,7 @@ async function construirHistoricoParaGemini(idDaConversa, limiteDeTrocas = 12) {
 function historicoParaTextoSimples(historicoContents) {
   try {
     return (historicoContents || [])
-      .map((bloco) => {
+      .map(bloco => {
         const role = bloco?.role || "user";
         const text = (bloco?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
         return `- ${role}: ${text}`;
@@ -176,19 +184,18 @@ function historicoParaTextoSimples(historicoContents) {
   }
 }
 
-// Ferramentas
+// ------------------------- FERRAMENTAS DE BUSCA/ROTA ------------------------
 async function ferramentaBuscarParceirosOuDicas({ regiao, cidadesAtivas, argumentosDaFerramenta }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
-  const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms)
-    ? argumentosDaFerramenta.terms
-    : [];
+  const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
 
-  const cidadesValidas = cidadesAtivas || [];
-  let listaDeIdsDeCidadesParaFiltro = cidadesValidas.map((c) => c.id);
+  const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
+  let listaDeIdsDeCidadesParaFiltro = cidadesValidas.map(c => c.id);
+
   if (cidadeProcurada) {
     const alvo = cidadesValidas.find(
-      (c) =>
+      c =>
         normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) ||
         normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
     );
@@ -203,23 +210,25 @@ async function ferramentaBuscarParceirosOuDicas({ regiao, cidadesAtivas, argumen
     .eq("ativo", true)
     .in("cidade_id", listaDeIdsDeCidadesParaFiltro);
 
-  if (categoriaProcurada)
+  if (categoriaProcurada) {
     construtorDeConsulta = construtorDeConsulta.ilike("categoria", `%${categoriaProcurada}%`);
+  }
 
   const { data: registrosBase, error } = await construtorDeConsulta;
   if (error) throw error;
+
   let itens = Array.isArray(registrosBase) ? registrosBase : [];
 
   if (listaDeTermos.length > 0) {
-    const termosNormalizados = listaDeTermos.map((termo) => normalizarTexto(termo));
-    itens = itens.filter((parc) => {
-      const nomeNormalizado = normalizarTexto(parc.nome);
-      const categoriaNormalizada = normalizarTexto(parc.categoria || "");
-      const listaDeTags = Array.isArray(parc.tags)
-        ? parc.tags.map((x) => normalizarTexto(String(x)))
+    const termosNormalizados = listaDeTermos.map(termo => normalizarTexto(termo));
+    itens = itens.filter(parceiro => {
+      const nomeNormalizado = normalizarTexto(parceiro.nome);
+      const categoriaNormalizada = normalizarTexto(parceiro.categoria || "");
+      const listaDeTags = Array.isArray(parceiro.tags)
+        ? parceiro.tags.map(x => normalizarTexto(String(x)))
         : [];
       return termosNormalizados.some(
-        (termo) =>
+        termo =>
           nomeNormalizado.includes(termo) ||
           categoriaNormalizada.includes(termo) ||
           listaDeTags.includes(termo)
@@ -227,13 +236,14 @@ async function ferramentaBuscarParceirosOuDicas({ regiao, cidadesAtivas, argumen
     });
   }
 
+  // Ordena priorizando PARCEIRO frente a DICA (DICA vai depois)
   itens.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
   const itensLimitados = itens.slice(0, 8);
 
   return {
     ok: true,
     count: itensLimitados.length,
-    items: itensLimitados.map((p) => ({
+    items: itensLimitados.map(p => ({
       id: p.id,
       tipo: p.tipo,
       nome: p.nome,
@@ -260,9 +270,11 @@ async function ferramentaObterRotaOuDistanciaAproximada({ argumentosDaFerramenta
   const coordenadasDestino =
     obterCoordenadasPorCidadeOuTexto(destino, cidadesAtivas) ||
     obterCoordenadasPorCidadeOuTexto("cabo frio", cidadesAtivas);
+
   if (!coordenadasOrigem || !coordenadasDestino) {
     return { ok: false, error: "Coordenadas não disponíveis para origem ou destino informados." };
   }
+
   const distanciaEmLinhaRetaKm = calcularDistanciaHaversineEmKm(
     coordenadasOrigem,
     coordenadasDestino
@@ -303,102 +315,185 @@ async function ferramentaDefinirPreferenciaDeIndicacao({ idDaConversa, argumento
 }
 
 // ============================================================================
-// HEALTHCHECKS
+// HEALTHCHECKS E DIAGNÓSTICOS
 // ============================================================================
+
 aplicacaoExpress.get("/health", (_req, res) => {
-  res
-    .status(200)
-    .json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) });
+  res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) });
 });
 
 aplicacaoExpress.get("/api/health", (_req, res) => {
   res.status(200).json({ ok: true, scope: "api", message: "BEPIT Nexus API ok", port: String(portaDoServidor) });
 });
 
-// NOVO: Health do banco — use para validar se o Supabase está acessível
+// Testa conexão básica ao Supabase (consulta leve)
 aplicacaoExpress.get("/api/health/db", async (_req, res) => {
   try {
     const { data, error } = await supabase.from("regioes").select("id").limit(1);
-    if (error) throw error;
-    const temLinhas = Array.isArray(data) && data.length > 0;
-    res.status(200).json({ ok: true, db: "up", sample: { hasRows: temLinhas } });
-  } catch (err) {
-    res
-      .status(500)
-      .json({ ok: false, db: "error", message: err?.message || String(err) });
+    if (error) {
+      console.error("[/api/health/db] Supabase error:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "supabase_error",
+        internal: {
+          code: error.code || null,
+          message: error.message || String(error),
+          details: error.details || null,
+          hint: error.hint || null
+        }
+      });
+    }
+    return res.json({ ok: true, sample: Array.isArray(data) ? data : [] });
+  } catch (e) {
+    console.error("[/api/health/db] Exception:", e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// Diagnóstico: checa a região pelo slug
+aplicacaoExpress.get("/api/diag/region/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { data, error } = await supabase
+      .from("regioes")
+      .select("id, nome, slug, ativo")
+      .eq("slug", slug)
+      .single();
+
+    if (error) {
+      console.error("[/api/diag/region] Supabase error:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "supabase_error",
+        internal: {
+          code: error.code || null,
+          message: error.message || String(error),
+          details: error.details || null,
+          hint: error.hint || null
+        }
+      });
+    }
+    if (!data) return res.status(404).json({ ok: false, error: "region_not_found" });
+
+    return res.json({ ok: true, region: data });
+  } catch (e) {
+    console.error("[/api/diag/region] Exception:", e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// Diagnóstico: lista cidades por regiao.slug
+aplicacaoExpress.get("/api/diag/cidades/:regiaoSlug", async (req, res) => {
+  try {
+    const { regiaoSlug } = req.params;
+    const { data: regiao, error: erroRegiao } = await supabase
+      .from("regioes")
+      .select("id, nome, slug, ativo")
+      .eq("slug", regiaoSlug)
+      .single();
+
+    if (erroRegiao) {
+      console.error("[/api/diag/cidades] erro regiao:", erroRegiao);
+      return res.status(500).json({
+        ok: false,
+        error: "supabase_error_regiao",
+        internal: {
+          code: erroRegiao.code || null,
+          message: erroRegiao.message || String(erroRegiao),
+          details: erroRegiao.details || null,
+          hint: erroRegiao.hint || null
+        }
+      });
+    }
+    if (!regiao) return res.status(404).json({ ok: false, error: "region_not_found" });
+
+    const { data: cidades, error: erroCidades } = await supabase
+      .from("cidades")
+      .select("id, nome, slug, lat, lng, ativo, regiao_id")
+      .eq("regiao_id", regiao.id);
+
+    if (erroCidades) {
+      console.error("[/api/diag/cidades] erro cidades:", erroCidades);
+      return res.status(500).json({
+        ok: false,
+        error: "supabase_error_cidades",
+        internal: {
+          code: erroCidades.code || null,
+          message: erroCidades.message || String(erroCidades),
+          details: erroCidades.details || null,
+          hint: erroCidades.hint || null
+        }
+      });
+    }
+
+    return res.json({ ok: true, regiao, cidades: Array.isArray(cidades) ? cidades : [] });
+  } catch (e) {
+    console.error("[/api/diag/cidades] Exception:", e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 
 // ============================================================================
-// v3.x — CÉREBRO, INTENÇÃO E HELPERS
+// CÉREBRO: Classificação de intenção e geração de respostas
 // ============================================================================
+
 async function analisarIntencaoDoUsuario(textoDoUsuario) {
-  const prompt = `Sua única tarefa é analisar a frase do usuário e classificá-la em uma das seguintes categorias: 'busca_parceiro', 'follow_up_parceiro', 'pergunta_geral', 'mudanca_contexto', 'small_talk'. Responda apenas com a string da categoria.
-Frase: "${textoDoUsuario}"`;
+  const prompt =
+    `Sua única tarefa é analisar a frase do usuário e classificá-la em uma das seguintes categorias: ` +
+    `'busca_parceiro', 'follow_up_parceiro', 'pergunta_geral', 'mudanca_contexto', 'small_talk'. ` +
+    `Responda apenas com a string da categoria.\nFrase: "${textoDoUsuario}"`;
+
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
-  const text = (resp?.response?.text() || "").trim().toLowerCase();
-  const classes = new Set([
-    "busca_parceiro",
-    "follow_up_parceiro",
-    "pergunta_geral",
-    "mudanca_contexto",
-    "small_talk"
-  ]);
-  return classes.has(text) ? text : "pergunta_geral";
+  const respostaGemini = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  const textoClassificado = (respostaGemini?.response?.text() || "").trim().toLowerCase();
+  const classesValidas = new Set(["busca_parceiro", "follow_up_parceiro", "pergunta_geral", "mudanca_contexto", "small_talk"]);
+  return classesValidas.has(textoClassificado) ? textoClassificado : "pergunta_geral";
 }
 
 async function extrairEntidadesDaBusca(texto) {
-  const prompt = `Extraia entidades de busca para parceiros no formato JSON estrito (sem comentários).
-Campos: {"category": string|null, "city": string|null, "terms": string[]}
-- "category" deve ser algo como restaurante, passeio, hotel, bar, transfer, mergulho, pizzaria, etc.
-- "city" se houver menção explícita.
-- "terms" são adjetivos/necessidades: ["barato", "crianças", "vista para o mar", "pet friendly", etc]
-Seja flexível com erros de digitação e abreviações. Responda apenas com JSON.
-Frase: "${texto}"`;
+  const prompt =
+    `Extraia entidades de busca para parceiros no formato JSON estrito (sem comentários).\n` +
+    `Campos: {"category": string|null, "city": string|null, "terms": string[]}\n` +
+    `- "category" deve ser algo como restaurante, passeio, hotel, bar, transfer, mergulho, pizzaria, etc.\n` +
+    `- "city" se houver menção explícita.\n` +
+    `- "terms" são adjetivos/necessidades: ["barato", "crianças", "vista para o mar", "pet friendly", etc]\n` +
+    `Seja flexível com erros de digitação e abreviações comuns (ex: "restorante" -> "restaurante", "qd" -> "quando", "vc" -> "você").\n` +
+    `Responda apenas com JSON.\n` +
+    `Frase: "${texto}"`;
+
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
-  const raw = (resp?.response?.text() || "").trim();
+  const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  const bruto = (resp?.response?.text() || "").trim();
   try {
-    const parsed = JSON.parse(raw);
-    const category =
-      typeof parsed.category === "string" && parsed.category.trim()
-        ? parsed.category.trim()
-        : null;
-    const city =
-      typeof parsed.city === "string" && parsed.city.trim() ? parsed.city.trim() : null;
-    const terms = Array.isArray(parsed.terms)
-      ? parsed.terms.filter((t) => typeof t === "string" && t.trim()).map((t) => t.trim())
+    const parseado = JSON.parse(bruto);
+    const categoria = typeof parseado.category === "string" && parseado.category.trim() ? parseado.category.trim() : null;
+    const cidade = typeof parseado.city === "string" && parseado.city.trim() ? parseado.city.trim() : null;
+    const termos = Array.isArray(parseado.terms)
+      ? parseado.terms.filter(t => typeof t === "string" && t.trim()).map(t => t.trim())
       : [];
-    return { category, city, terms };
+    return { category: categoria, city: cidade, terms: termos };
   } catch {
     return { category: null, city: null, terms: [] };
   }
 }
 
-async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
+async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, nomeDaRegiao = "") {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
 
   const prompt = [
     "Você é o BEPIT, um concierge especialista.",
     "Responda à pergunta do usuário de forma útil, baseando-se EXCLUSIVAMENTE nas informações dos parceiros fornecidas em [Contexto].",
-    "Se a pergunta for ambígua, peça esclarecimentos de forma amigável.",
+    "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
     `[Contexto de Parceiros]: ${contextoParceiros}`,
     `[Histórico da Conversa]:\n${historicoTexto}`,
-    `[Região]: ${regiaoNome}`,
+    `[Região]: ${nomeDaRegiao}`,
     `[Pergunta do Usuário]: "${pergunta}"`
   ].join("\n");
 
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
+  const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
   return (resp?.response?.text() || "").trim();
 }
 
@@ -408,17 +503,15 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
 
   const prompt = [
     `Você é o BEPIT, um concierge amigável e conhecedor da região de ${nomeRegiao}.`,
-    "Responda de forma prestativa.",
-    "Se a pergunta for ambígua, peça esclarecimentos.",
+    "Responda à pergunta do usuário de forma prestativa, usando seu conhecimento geral.",
+    "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
     `[Histórico da Conversa]:\n${historicoTexto}`,
     `[Pergunta do Usuário]: "${pergunta}"`
   ].join("\n");
 
   const modelo = await obterModeloGemini();
-  const resp = await modelo.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
+  const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
   return (resp?.response?.text() || "").trim();
 }
 
@@ -427,41 +520,33 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
     const texto = normalizarTexto(textoDoUsuario);
     if (!Array.isArray(listaDeParceiros) || listaDeParceiros.length === 0) return null;
 
-    // Seleção por número/ordinal
+    // Seleção por ordinal numérico (1º, 2º, 3, etc.)
     const matchNumero = texto.match(/\b(\d{1,2})(?:º|o|a|\.|°)?\b/);
     if (matchNumero) {
-      const idx = Number(matchNumero[1]);
-      if (Number.isFinite(idx) && idx >= 1 && idx <= listaDeParceiros.length) {
-        return listaDeParceiros[idx - 1];
+      const indiceBase1 = Number(matchNumero[1]);
+      if (Number.isFinite(indiceBase1) && indiceBase1 >= 1 && indiceBase1 <= listaDeParceiros.length) {
+        return listaDeParceiros[indiceBase1 - 1];
       }
     }
-    const ordinais = [
-      "primeiro",
-      "segundo",
-      "terceiro",
-      "quarto",
-      "quinto",
-      "sexto",
-      "sétimo",
-      "setimo",
-      "oitavo"
-    ];
+
+    // Ordinais por extenso
+    const ordinais = ["primeiro", "segundo", "terceiro", "quarto", "quinto", "sexto", "sétimo", "setimo", "oitavo"];
     for (let i = 0; i < ordinais.length; i++) {
       if (texto.includes(ordinais[i])) {
-        const pos = i + 1;
-        if (pos >= 1 && pos <= listaDeParceiros.length) {
-          return listaDeParceiros[pos - 1];
+        const posicao = i + 1;
+        if (posicao >= 1 && posicao <= listaDeParceiros.length) {
+          return listaDeParceiros[posicao - 1];
         }
       }
     }
 
-    // Seleção por nome
+    // Nome aproximado
     for (const p of listaDeParceiros) {
-      const nome = normalizarTexto(p?.nome || "");
-      if (nome && texto.includes(nome)) return p;
-      const tokens = (nome || "").split(/\s+/).filter(Boolean);
+      const nomeNormalizado = normalizarTexto(p?.nome || "");
+      if (nomeNormalizado && texto.includes(nomeNormalizado)) return p;
+      const tokens = nomeNormalizado.split(/\s+/).filter(Boolean);
       if (tokens.length > 0) {
-        const acertos = tokens.filter((t) => texto.includes(t)).length;
+        const acertos = tokens.filter(t => texto.includes(t)).length;
         if (acertos >= Math.max(1, Math.ceil(tokens.length * 0.6))) {
           return p;
         }
@@ -501,7 +586,7 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
         })
         .eq("id", idDaConversa);
     } catch {
-      // segue o fluxo
+      // Não quebra o fluxo
     }
 
     return { respostaFinal, parceirosSugeridos };
@@ -512,7 +597,7 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
 }
 
 // ============================================================================
-// ROTA DE CHAT (ORQUESTRADOR)
+// ROTA DE CHAT (ORQUESTRADOR LÓGICO v3.2)
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) => {
   try {
@@ -520,12 +605,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
     let { message: textoDoUsuario, conversationId: idDaConversa } = requisicao.body || {};
 
     if (!textoDoUsuario || typeof textoDoUsuario !== "string" || !textoDoUsuario.trim()) {
-      return resposta
-        .status(400)
-        .json({ error: "O campo 'message' é obrigatório e deve ser uma string não vazia." });
+      return resposta.status(400).json({ error: "O campo 'message' é obrigatório e deve ser uma string não vazia." });
     }
     textoDoUsuario = textoDoUsuario.trim();
 
+    // Valida a região
     const { data: regiao, error: erroRegiao } = await supabase
       .from("regioes")
       .select("id, nome, slug, ativo")
@@ -534,13 +618,37 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
     if (erroRegiao || !regiao) return resposta.status(404).json({ error: "Região não encontrada." });
     if (regiao.ativo === false) return resposta.status(403).json({ error: "Região desativada." });
 
-    const { data: cidades, error: erroCidades } = await supabase
-      .from("cidades")
-      .select("id, nome, slug, lat, lng, ativo")
-      .eq("regiao_id", regiao.id);
-    if (erroCidades) return resposta.status(500).json({ error: "Erro ao carregar cidades." });
-    const cidadesAtivas = (cidades || []).filter((c) => c.ativo !== false);
+    // Carrega cidades com logs detalhados (para depuração)
+    let cidadesAtivas = [];
+    try {
+      const { data: cidades, error: erroCidades } = await supabase
+        .from("cidades")
+        .select("id, nome, slug, lat, lng, ativo")
+        .eq("regiao_id", regiao.id);
 
+      if (erroCidades) {
+        console.error("[/api/chat] Supabase erro (cidades):", erroCidades);
+        return resposta.status(500).json({
+          error: "Erro ao carregar cidades.",
+          internal: {
+            code: erroCidades.code || null,
+            message: erroCidades.message || String(erroCidades),
+            details: erroCidades.details || null,
+            hint: erroCidades.hint || null
+          }
+        });
+      }
+
+      cidadesAtivas = (cidades || []).filter(c => c.ativo !== false);
+    } catch (e) {
+      console.error("[/api/chat] Exceção ao carregar cidades:", e);
+      return resposta.status(500).json({
+        error: "Erro ao carregar cidades.",
+        internal: { message: e?.message || String(e) }
+      });
+    }
+
+    // Cria conversa, se necessário
     if (!idDaConversa || typeof idDaConversa !== "string" || !idDaConversa.trim()) {
       idDaConversa = randomUUID();
       try {
@@ -555,10 +663,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           topico_atual: null
         });
       } catch {
-        // segue
+        // não falha o fluxo
       }
     }
 
+    // Lê conversa atual para buscar parceiros sugeridos já guardados
     let conversaAtual = null;
     try {
       const { data: conv } = await supabase
@@ -571,6 +680,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       // segue
     }
 
+    // MODO CRU: encaminha direto para LLM
     if (modoCruSemRegrasAtivo) {
       const modelo = await obterModeloGemini();
       const historicoGemini = await construirHistoricoParaGemini(idDaConversa, 12);
@@ -607,11 +717,13 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       });
     }
 
+    // MODO ORQUESTRADO
     const historicoGemini = await construirHistoricoParaGemini(idDaConversa, 12);
 
     const candidatosDaConversa = Array.isArray(conversaAtual?.parceiros_sugeridos)
       ? conversaAtual.parceiros_sugeridos
       : [];
+
     const parceiroSelecionado = encontrarParceiroNaLista(textoDoUsuario, candidatosDaConversa);
     if (parceiroSelecionado) {
       try {
@@ -648,9 +760,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
         console.warn("[INTERACOES] Falha ao salvar interação (seleção):", erro?.message || erro);
       }
 
-      const fotosDosParceiros = [parceiroSelecionado]
-        .flatMap((p) => p?.fotos_parceiros || [])
-        .filter(Boolean);
+      const fotosDosParceiros = [parceiroSelecionado].flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
       return resposta.status(200).json({
         reply: respostaCurta,
         interactionId: idDaInteracaoSalvaSel,
@@ -715,8 +825,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       }
 
       case "small_talk": {
-        respostaFinal =
-          "Olá! Sou o BEPIT, seu concierge na Região dos Lagos. O que você gostaria de fazer hoje?";
+        respostaFinal = "Olá! Sou o BEPIT, seu concierge na Região dos Lagos. O que você gostaria de fazer hoje?";
         break;
       }
 
@@ -750,9 +859,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       console.warn("[INTERACOES] Falha ao salvar interação:", erro?.message || erro);
     }
 
-    const fotosDosParceiros = (parceirosSugeridos || [])
-      .flatMap((p) => p?.fotos_parceiros || [])
-      .filter(Boolean);
+    const fotosDosParceiros = (parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
 
     return resposta.status(200).json({
       reply: respostaFinal,
@@ -803,7 +910,7 @@ aplicacaoExpress.post("/api/feedback", async (requisicao, resposta) => {
 });
 
 // ============================================================================
-// AUTH (key) e ADMIN (legacy user/pass)
+// AUTH POR CHAVE (para casar com frontend que usa "key")
 // ============================================================================
 aplicacaoExpress.post("/api/auth/login", async (req, res) => {
   try {
@@ -811,8 +918,8 @@ aplicacaoExpress.post("/api/auth/login", async (req, res) => {
     if (!key || typeof key !== "string") {
       return res.status(400).json({ error: "missing_key" });
     }
-    const ADMIN_API_KEY = process.env.ADMIN_API_KEY || "";
-    if (ADMIN_API_KEY && key === ADMIN_API_KEY) {
+    const adminKey = process.env.ADMIN_API_KEY || "";
+    if (adminKey && key === adminKey) {
       return res.status(200).json({ ok: true });
     }
     return res.status(401).json({ error: "invalid_key" });
@@ -822,6 +929,9 @@ aplicacaoExpress.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// ============================================================================
+// ADMIN (legado + CRUD essencial)
+// ============================================================================
 aplicacaoExpress.post("/api/admin/login", async (requisicao, resposta) => {
   try {
     const { username, password } = requisicao.body || {};
@@ -845,9 +955,7 @@ function exigirChaveDeAdministrador(requisicao, resposta, proximo) {
   proximo();
 }
 
-// ============================================================================
-// ADMIN: Parceiros — criar / listar / atualizar
-// ============================================================================
+// Criação de parceiro/dica
 aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
     const corpo = requisicao.body || {};
@@ -901,6 +1009,7 @@ aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async 
   }
 });
 
+// Listagem por região/cidade
 aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
     const { regiaoSlug, cidadeSlug } = requisicao.params;
@@ -924,7 +1033,7 @@ aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChave
       .from("parceiros")
       .select("*")
       .eq("cidade_id", cidade.id)
-      .order("nome");
+      .order("nome", { ascending: true });
     if (error) {
       console.error("[/api/admin/parceiros list] Erro:", error);
       return resposta.status(500).json({ error: "Erro ao listar parceiros/dicas." });
@@ -937,41 +1046,40 @@ aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChave
   }
 });
 
-// PUT (atualizar um parceiro existente por ID)
+// Atualização de parceiro/dica (PUT) — solicitado
 aplicacaoExpress.put("/api/admin/parceiros/:id", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
     const { id } = requisicao.params;
-    const payload = requisicao.body || {};
+    const corpo = requisicao.body || {};
 
-    const atualizacao = {
-      nome: payload.nome ?? undefined,
-      descricao: payload.descricao ?? undefined,
-      categoria: payload.categoria ?? undefined,
-      beneficio_bepit: payload.beneficio_bepit ?? undefined,
-      endereco: payload.endereco ?? undefined,
-      contato: payload.contato ?? undefined,
-      tags: Array.isArray(payload.tags) ? payload.tags : undefined,
-      horario_funcionamento: payload.horario_funcionamento ?? undefined,
-      faixa_preco: payload.faixa_preco ?? undefined,
-      fotos_parceiros: Array.isArray(payload.fotos_parceiros)
-        ? payload.fotos_parceiros
-        : Array.isArray(payload.fotos)
-        ? payload.fotos
-        : undefined,
-      ativo: typeof payload.ativo === "boolean" ? payload.ativo : undefined
+    const camposParaAtualizar = {
+      nome: "nome" in corpo ? corpo.nome : undefined,
+      categoria: "categoria" in corpo ? corpo.categoria : undefined,
+      descricao: "descricao" in corpo ? corpo.descricao : undefined,
+      beneficio_bepit: "beneficio_bepit" in corpo ? corpo.beneficio_bepit : undefined,
+      endereco: "endereco" in corpo ? corpo.endereco : undefined,
+      contato: "contato" in corpo ? corpo.contato : undefined,
+      tags: "tags" in corpo ? (Array.isArray(corpo.tags) ? corpo.tags : null) : undefined,
+      horario_funcionamento:
+        "horario_funcionamento" in corpo ? corpo.horario_funcionamento : undefined,
+      faixa_preco: "faixa_preco" in corpo ? corpo.faixa_preco : undefined,
+      fotos_parceiros:
+        "fotos_parceiros" in corpo
+          ? Array.isArray(corpo.fotos_parceiros) ? corpo.fotos_parceiros : null
+          : "fotos" in corpo
+          ? Array.isArray(corpo.fotos) ? corpo.fotos : null
+          : undefined,
+      ativo: "ativo" in corpo ? corpo.ativo !== false : undefined
     };
 
-    Object.keys(atualizacao).forEach((k) => {
-      if (typeof atualizacao[k] === "undefined") delete atualizacao[k];
+    // remove undefined (não enviados) para evitar sobrescrever com null
+    Object.keys(camposParaAtualizar).forEach(chave => {
+      if (typeof camposParaAtualizar[chave] === "undefined") delete camposParaAtualizar[chave];
     });
-
-    if (Object.keys(atualizacao).length === 0) {
-      return resposta.status(400).json({ error: "Nenhum campo válido para atualizar." });
-    }
 
     const { data, error } = await supabase
       .from("parceiros")
-      .update(atualizacao)
+      .update(camposParaAtualizar)
       .eq("id", id)
       .select("*")
       .single();
@@ -983,14 +1091,12 @@ aplicacaoExpress.put("/api/admin/parceiros/:id", exigirChaveDeAdministrador, asy
 
     return resposta.status(200).json({ ok: true, data });
   } catch (erro) {
-    console.error("[/api/admin/parceiros PUT] Erro inesperado:", erro);
+    console.error("[/api/admin/parceiros PUT] Erro:", erro);
     return resposta.status(500).json({ error: "Erro interno." });
   }
 });
 
-// ============================================================================
-// ADMIN: Inclusões — Regiões e Cidades
-// ============================================================================
+// Inclusões simples de região e cidade
 aplicacaoExpress.post("/api/admin/regioes", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
     const { nome, slug, ativo = true } = requisicao.body || {};
@@ -1016,10 +1122,9 @@ aplicacaoExpress.post("/api/admin/regioes", exigirChaveDeAdministrador, async (r
 aplicacaoExpress.post("/api/admin/cidades", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
     const { regiaoSlug, nome, slug, ativo = true, lat = null, lng = null } = requisicao.body || {};
-    if (!regiaoSlug || !nome || !slug)
-      return resposta
-        .status(400)
-        .json({ error: "Campos 'regiaoSlug', 'nome' e 'slug' são obrigatórios." });
+    if (!regiaoSlug || !nome || !slug) {
+      return resposta.status(400).json({ error: "Campos 'regiaoSlug', 'nome' e 'slug' são obrigatórios." });
+    }
 
     const { data: regiao, error: erroReg } = await supabase
       .from("regioes")
@@ -1052,9 +1157,7 @@ aplicacaoExpress.post("/api/admin/cidades", exigirChaveDeAdministrador, async (r
   }
 });
 
-// ============================================================================
-// ADMIN: Métricas e Logs
-// ============================================================================
+// Métricas
 aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
     const { regiaoSlug, cidadeSlug } = requisicao.query;
@@ -1074,9 +1177,9 @@ aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, a
     if (erroCid) return resposta.status(500).json({ error: "Erro ao carregar cidades." });
 
     let cidade = null;
-    let listaDeIdsDeCidades = (cidades || []).map((c) => c.id);
+    let listaDeIdsDeCidades = (cidades || []).map(c => c.id);
     if (cidadeSlug) {
-      cidade = (cidades || []).find((c) => c.slug === cidadeSlug) || null;
+      cidade = (cidades || []).find(c => c.slug === cidadeSlug) || null;
       if (!cidade) return resposta.status(404).json({ error: "Cidade não encontrada nesta região." });
       listaDeIdsDeCidades = [cidade.id];
     }
@@ -1093,7 +1196,7 @@ aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, a
       .select("id, cidade_id, regiao_id")
       .eq("regiao_id", regiao.id);
     if (erroBus) return resposta.status(500).json({ error: "Erro ao contar buscas." });
-    const totalDeBuscas = (buscas || []).filter((b) => (cidade ? b.cidade_id === cidade.id : true)).length;
+    const totalDeBuscas = (buscas || []).filter(b => (cidade ? b.cidade_id === cidade.id : true)).length;
 
     const { data: interacoes, error: erroInt } = await supabase
       .from("interacoes")
@@ -1109,22 +1212,22 @@ aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, a
       .limit(50);
     if (erroViews) return resposta.status(500).json({ error: "Erro ao ler views." });
 
-    const listaDeIdsDeParceiros = Array.from(new Set((registrosDeViews || []).map((v) => v.parceiro_id)));
+    const listaDeIdsDeParceiros = Array.from(new Set((registrosDeViews || []).map(v => v.parceiro_id)));
     const { data: informacoesDosParceiros } = await supabase
       .from("parceiros")
       .select("id, nome, categoria, cidade_id")
       .in("id", listaDeIdsDeParceiros);
 
-    const mapaParceiroPorId = new Map((informacoesDosParceiros || []).map((p) => [p.id, p]));
+    const mapaParceiroPorId = new Map((informacoesDosParceiros || []).map(p => [p.id, p]));
     const topCincoPorViews = (registrosDeViews || [])
-      .filter((reg) => {
+      .filter(reg => {
         const info = mapaParceiroPorId.get(reg.parceiro_id);
         if (!info) return false;
-        const cidadesOk = cidade ? info.cidade_id === cidade.id : listaDeIdsDeCidades.includes(info.cidade_id);
-        return cidadesOk;
+        const pertence = cidade ? info.cidade_id === cidade.id : listaDeIdsDeCidades.includes(info.cidade_id);
+        return pertence;
       })
       .slice(0, 5)
-      .map((reg) => {
+      .map(reg => {
         const info = mapaParceiroPorId.get(reg.parceiro_id);
         return {
           parceiro_id: reg.parceiro_id,
@@ -1149,10 +1252,19 @@ aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, a
   }
 });
 
+// Logs
 aplicacaoExpress.get("/api/admin/logs", exigirChaveDeAdministrador, async (requisicao, resposta) => {
   try {
-    const { tipo, regiaoSlug, cidadeSlug, parceiroId, conversationId, since, until, limit } =
-      requisicao.query;
+    const {
+      tipo,
+      regiaoSlug,
+      cidadeSlug,
+      parceiroId,
+      conversationId,
+      since,
+      until,
+      limit
+    } = requisicao.query;
 
     let limite = Number(limit || 50);
     if (!Number.isFinite(limite) || limite <= 0) limite = 50;
@@ -1219,5 +1331,5 @@ aplicacaoExpress.get("/api/admin/logs", exigirChaveDeAdministrador, async (requi
 
 // ------------------------ INICIAR SERVIDOR ----------------------------------
 aplicacaoExpress.listen(portaDoServidor, () => {
-  console.log(`✅ BEPIT Nexus rodando em http://localhost:${portaDoServidor}`);
+  console.log(`✅ BEPIT Nexus (Orquestrador v3.2.2) rodando em http://localhost:${portaDoServidor}`);
 });
