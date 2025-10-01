@@ -1,7 +1,6 @@
-// rosto-do-robo/src/admin/AdminLogin.jsx
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { adminLoginWithKey, setAdminKey, clearAdminKey } from "./adminApi";
+import { adminLoginByKey, setAdminKey } from "./adminApi";
 
 export default function AdminLogin() {
   const [key, setKey] = useState("");
@@ -20,13 +19,12 @@ export default function AdminLogin() {
 
     setIsLoading(true);
     try {
-      // Tenta login pelo endpoint /api/auth/login
-      await adminLoginWithKey(trimmed);
+      // Valida a key no backend
+      await adminLoginByKey(trimmed);
+      // persiste localmente (redundante, mas ok)
+      setAdminKey(trimmed);
       navigate("/admin");
     } catch (error) {
-      // fallback: limpa e mostra erro
-      clearAdminKey();
-      setAdminKey("");
       const msg = error?.message || "Falha ao validar a chave.";
       setErrorMsg(msg);
     } finally {
@@ -42,31 +40,27 @@ export default function AdminLogin() {
           <h1 className="text-xl font-bold mt-2 text-gray-900 dark:text-gray-100">
             Painel do Administrador
           </h1>
-          <p className="text-sm text-gray-600 dark:text-gray-400">
-            Insira sua chave de administrador para continuar.
-          </p>
+          <p className="text-sm text-gray-600 dark:text-gray-300">Acesse com sua chave de administrador</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <label className="block">
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Chave</span>
+            <span className="text-sm font-medium">Chave</span>
             <input
               type="password"
+              className="mt-1 w-full border rounded-md px-3 py-2"
               value={key}
               onChange={(e) => setKey(e.target.value)}
-              className="mt-1 w-full border rounded-md px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-              placeholder="••••••••••••••"
+              placeholder="Cole sua chave aqui"
             />
           </label>
 
-          {errorMsg && (
-            <div className="text-red-600 text-sm">{errorMsg}</div>
-          )}
+          {errorMsg && <div className="text-sm text-red-600">{errorMsg}</div>}
 
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold py-2 rounded-md"
+            className="w-full bg-blue-600 text-white py-2 rounded-md font-semibold disabled:opacity-50"
           >
             {isLoading ? "Validando..." : "Entrar"}
           </button>

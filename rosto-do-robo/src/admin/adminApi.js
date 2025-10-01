@@ -1,80 +1,75 @@
-// rosto-do-robo/src/admin/adminApi.js
+import apiClient from "../lib/apiClient";
 
-// Base da API: se VITE_API_BASE_URL não estiver setado, usamos caminho relativo
-const BASE = import.meta.env.VITE_API_BASE_URL ? String(import.meta.env.VITE_API_BASE_URL) : "";
+// Chave guardada localmente
+const STORAGE_KEY = "adminKey";
 
-const ADMIN_KEY_STORAGE = "adminKey";
-
-// Helpers de chave
-export function setAdminKey(key) {
-  try {
-    if (key) localStorage.setItem(ADMIN_KEY_STORAGE, key);
-  } catch (_) {}
+export function setAdminKey(k) {
+  localStorage.setItem(STORAGE_KEY, k);
 }
 
 export function getAdminKey() {
-  try {
-    return localStorage.getItem(ADMIN_KEY_STORAGE) || "";
-  } catch (_) {
-    return "";
-  }
+  return localStorage.getItem(STORAGE_KEY) || "";
 }
 
 export function clearAdminKey() {
-  try {
-    localStorage.removeItem(ADMIN_KEY_STORAGE);
-  } catch (_) {}
+  localStorage.removeItem(STORAGE_KEY);
 }
 
-// Requisição base
-async function req(method, path, { body, params } = {}) {
-  const url = new URL((BASE || "") + path, window.location.origin);
-  if (params && typeof params === "object") {
-    Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    });
-  }
-
-  const headers = { "Content-Type": "application/json" };
-  const adminKey = getAdminKey();
-  if (adminKey) headers["X-Admin-Key"] = adminKey;
-
-  const resp = await fetch(url.toString().replace(url.origin, ""), {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
-
-  // tenta parsear json sempre
-  const maybeJson = await resp.json().catch(() => null);
-
-  if (!resp.ok) {
-    const msg = (maybeJson && (maybeJson.error || maybeJson.message)) || `HTTP ${resp.status}`;
+// Autenticação por chave (nova rota)
+export async function adminLoginByKey(key) {
+  const resp = await apiClient.authLoginByKey(key).catch((e) => {
+    const msg = e?.response?.data?.error || e.message;
     throw new Error(msg);
-  }
-
-  return maybeJson;
-}
-
-// Exports REST
-export function adminGet(path, params) {
-  return req("GET", path, { params });
-}
-export function adminPost(path, body) {
-  return req("POST", path, { body });
-}
-export function adminPut(path, body) {
-  return req("PUT", path, { body });
-}
-
-// Login por CHAVE (novo fluxo)
-// - chama /api/auth/login com { key }
-// - se ok, persiste em localStorage e retorna { ok: true }
-export async function adminLoginWithKey(key) {
-  const res = await req("POST", "/api/auth/login", { body: { key } });
-  if (res && res.ok) {
+  });
+  if (resp?.data?.ok) {
     setAdminKey(key);
-    return { ok: true };
+    return true;
   }
-  throw new Error(res?.error || "Falha ao logar");
+  throw new Error("invalid_key");
+}
+
+// Rotas administrativas (usam header X-Admin-Key)
+export async function adminGet(path) {
+  const key = getAdminKey();
+  const resp = await apiClient.adminLogs({}, key).catch(() => null); // apenas para validar key? não — manter genérico abaixo
+  // Implementação genérica:
+  const url = path;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { "X-Admin-Key": key },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// Versões específicas usando apiClient (preferíveis)
+export async function adminPost(path, body) {
+  const key = getAdminKey();
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Key": key },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function adminPut(path, body) {
+  const key = getAdminKey();
+  const res = await fetch(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "X-Admin-Key": key },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
