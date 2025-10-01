@@ -18,3 +18,9 @@
   from = "/*"
   to   = "/index.html"
   status = 200
+# (Opcional) Melhorar cache dos assets gerados pelo Vite
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
