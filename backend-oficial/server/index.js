@@ -9,7 +9,6 @@
 // ============================================================================
 
 import "dotenv/config";
-
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
@@ -51,7 +50,6 @@ aplicacaoExpress.use(
 aplicacaoExpress.options("*", cors());
 
 // ------------------------------- GEMINI -------------------------------------
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
 if (!process.env.GEMINI_API_KEY) {
   console.warn("[GEMINI] Variável GEMINI_API_KEY não definida. Se RAW_MODE=0, o chat pode falhar.");
@@ -59,14 +57,8 @@ if (!process.env.GEMINI_API_KEY) {
 
 const clienteGemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
-// Use SOMENTE modelos válidos na API atual (v1).
-// IDs atuais recomendados: "gemini-1.5-pro-002" e "gemini-1.5-flash-002".
-// Evite sufixo "-latest" se sua lib ainda estiver apontando para v1beta.
+// IDs recomendados e válidos na API v1 (evitar sufixo "-latest")
 const modeloPreferidoGemini = (process.env.GEMINI_MODEL || "").trim();
-
-// Ordem de tentativa:
-// 1) o que vier em GEMINI_MODEL (se definido)
-// 2) 1.5 Pro 002, depois 1.5 Pro (sem sufixo), depois 1.5 Flash 002, depois 1.5 Flash
 const candidatosDeModeloGemini = [
   modeloPreferidoGemini || null,
   "gemini-1.5-pro-002",
@@ -77,12 +69,7 @@ const candidatosDeModeloGemini = [
 
 let modeloGeminiEmUso = null;
 
-/**
- * Seleciona o primeiro modelo disponível na lista acima.
- * Faz um "ping" leve (generateContent com "ok") para validar.
- * Se nenhum funcionar, lança erro — e o chamador pode decidir como cair de pé.
- */
-export async function obterModeloGemini() {
+async function obterModeloGemini() {
   if (modeloGeminiEmUso) {
     return clienteGemini.getGenerativeModel({ model: modeloGeminiEmUso });
   }
@@ -106,7 +93,6 @@ export async function obterModeloGemini() {
       ultimoErro = erro;
       const msg = erro?.message || String(erro);
       console.warn(`[GEMINI] Falha ao usar modelo ${nomeModelo}: ${msg}`);
-      // Continua tentando os próximos candidatos
     }
   }
 
