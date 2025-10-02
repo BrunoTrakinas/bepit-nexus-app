@@ -52,33 +52,53 @@ aplicacaoExpress.options("*", cors());
 
 // ------------------------------- GEMINI -------------------------------------
 const clienteGemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// IMPORTANTE: use somente modelos válidos na API atual.
+// Evite "gemini-pro" (deprecado para generateContent).
 const modeloPreferidoGemini = (process.env.GEMINI_MODEL || "").trim();
+
+// Ordem de tentativa:
+// 1) o que vier em GEMINI_MODEL (se válido)
+// 2) 1.5 Pro / Flash (estáveis e suportados)
 const candidatosDeModeloGemini = [
   modeloPreferidoGemini || null,
-  "gemini-1.5-pro-latest",
-  "gemini-1.5-flash-latest",
   "gemini-1.5-pro",
-  "gemini-pro"
+  "gemini-1.5-flash",
+  "gemini-1.5-pro-latest",
+  "gemini-1.5-flash-latest"
 ].filter(Boolean);
 
 let modeloGeminiEmUso = null;
 
+/**
+ * Seleciona o primeiro modelo disponível na lista acima.
+ * Faz um "ping" leve (generateContent com "ok") para validar.
+ */
 async function obterModeloGemini() {
-  if (modeloGeminiEmUso) return clienteGemini.getGenerativeModel({ model: modeloGeminiEmUso });
+  if (modeloGeminiEmUso) {
+    return clienteGemini.getGenerativeModel({ model: modeloGeminiEmUso });
+  }
+
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("[GEMINI] GEMINI_API_KEY ausente no ambiente.");
+  }
+
   let ultimoErro = null;
   for (const nomeModelo of candidatosDeModeloGemini) {
     try {
-      const testeModelo = clienteGemini.getGenerativeModel({ model: nomeModelo });
-      await testeModelo.generateContent({ contents: [{ role: "user", parts: [{ text: "ok" }] }] });
+      const teste = clienteGemini.getGenerativeModel({ model: nomeModelo });
+      await teste.generateContent({ contents: [{ role: "user", parts: [{ text: "ok" }] }] });
       modeloGeminiEmUso = nomeModelo;
       console.log(`[GEMINI] Modelo selecionado: ${nomeModelo}`);
-      return testeModelo;
+      return teste;
     } catch (erro) {
       ultimoErro = erro;
       console.warn(`[GEMINI] Falha ao usar modelo ${nomeModelo}: ${erro?.message || erro}`);
     }
   }
-  throw ultimoErro || new Error("Nenhum modelo Gemini disponível no momento.");
+
+  // Se chegou aqui, nenhum candidato funcionou
+  throw ultimoErro || new Error("[GEMINI] Nenhum modelo disponível.");
 }
 
 const modoCruSemRegrasAtivo = process.env.RAW_MODE === "1";
