@@ -53,32 +53,20 @@ aplicacaoExpress.options("*", cors());
 // ------------------------------- GEMINI -------------------------------------
 const clienteGemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// IMPORTANTE: use somente modelos válidos na API atual.
-// Evite "gemini-pro" (deprecado para generateContent).
+// Use SOMENTE modelos válidos na API atual (sem "-latest")
 const modeloPreferidoGemini = (process.env.GEMINI_MODEL || "").trim();
-
-// Ordem de tentativa:
-// 1) o que vier em GEMINI_MODEL (se válido)
-// 2) 1.5 Pro / Flash (estáveis e suportados)
 const candidatosDeModeloGemini = [
   modeloPreferidoGemini || null,
   "gemini-1.5-pro",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro-latest",
-  "gemini-1.5-flash-latest"
+  "gemini-1.5-flash"
 ].filter(Boolean);
 
 let modeloGeminiEmUso = null;
 
-/**
- * Seleciona o primeiro modelo disponível na lista acima.
- * Faz um "ping" leve (generateContent com "ok") para validar.
- */
 async function obterModeloGemini() {
   if (modeloGeminiEmUso) {
     return clienteGemini.getGenerativeModel({ model: modeloGeminiEmUso });
   }
-
   if (!process.env.GEMINI_API_KEY) {
     throw new Error("[GEMINI] GEMINI_API_KEY ausente no ambiente.");
   }
@@ -87,7 +75,9 @@ async function obterModeloGemini() {
   for (const nomeModelo of candidatosDeModeloGemini) {
     try {
       const teste = clienteGemini.getGenerativeModel({ model: nomeModelo });
-      await teste.generateContent({ contents: [{ role: "user", parts: [{ text: "ok" }] }] });
+      await teste.generateContent({
+        contents: [{ role: "user", parts: [{ text: "ok" }] }]
+      });
       modeloGeminiEmUso = nomeModelo;
       console.log(`[GEMINI] Modelo selecionado: ${nomeModelo}`);
       return teste;
@@ -96,8 +86,6 @@ async function obterModeloGemini() {
       console.warn(`[GEMINI] Falha ao usar modelo ${nomeModelo}: ${erro?.message || erro}`);
     }
   }
-
-  // Se chegou aqui, nenhum candidato funcionou
   throw ultimoErro || new Error("[GEMINI] Nenhum modelo disponível.");
 }
 
