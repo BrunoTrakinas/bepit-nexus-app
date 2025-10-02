@@ -51,27 +51,48 @@ aplicacaoExpress.use(
 aplicacaoExpress.options("*", cors());
 
 // ------------------------------- GEMINI -------------------------------------
-const clienteGemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// Use SOMENTE modelos válidos na API atual (sem "-latest")
+if (!process.env.GEMINI_API_KEY) {
+  console.warn("[GEMINI] Variável GEMINI_API_KEY não definida. Se RAW_MODE=0, o chat pode falhar.");
+}
+
+const clienteGemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+// Use SOMENTE modelos válidos na API atual (v1).
+// IDs atuais recomendados: "gemini-1.5-pro-002" e "gemini-1.5-flash-002".
+// Evite sufixo "-latest" se sua lib ainda estiver apontando para v1beta.
 const modeloPreferidoGemini = (process.env.GEMINI_MODEL || "").trim();
+
+// Ordem de tentativa:
+// 1) o que vier em GEMINI_MODEL (se definido)
+// 2) 1.5 Pro 002, depois 1.5 Pro (sem sufixo), depois 1.5 Flash 002, depois 1.5 Flash
 const candidatosDeModeloGemini = [
   modeloPreferidoGemini || null,
+  "gemini-1.5-pro-002",
   "gemini-1.5-pro",
+  "gemini-1.5-flash-002",
   "gemini-1.5-flash"
 ].filter(Boolean);
 
 let modeloGeminiEmUso = null;
 
-async function obterModeloGemini() {
+/**
+ * Seleciona o primeiro modelo disponível na lista acima.
+ * Faz um "ping" leve (generateContent com "ok") para validar.
+ * Se nenhum funcionar, lança erro — e o chamador pode decidir como cair de pé.
+ */
+export async function obterModeloGemini() {
   if (modeloGeminiEmUso) {
     return clienteGemini.getGenerativeModel({ model: modeloGeminiEmUso });
   }
+
   if (!process.env.GEMINI_API_KEY) {
     throw new Error("[GEMINI] GEMINI_API_KEY ausente no ambiente.");
   }
 
   let ultimoErro = null;
+
   for (const nomeModelo of candidatosDeModeloGemini) {
     try {
       const teste = clienteGemini.getGenerativeModel({ model: nomeModelo });
@@ -83,9 +104,12 @@ async function obterModeloGemini() {
       return teste;
     } catch (erro) {
       ultimoErro = erro;
-      console.warn(`[GEMINI] Falha ao usar modelo ${nomeModelo}: ${erro?.message || erro}`);
+      const msg = erro?.message || String(erro);
+      console.warn(`[GEMINI] Falha ao usar modelo ${nomeModelo}: ${msg}`);
+      // Continua tentando os próximos candidatos
     }
   }
+
   throw ultimoErro || new Error("[GEMINI] Nenhum modelo disponível.");
 }
 
