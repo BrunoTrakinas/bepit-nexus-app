@@ -1,6 +1,18 @@
+// src/admin/AdminLogin.jsx
+// ============================================================================
+// Tela de login do Admin:
+// - Chama POST /api/auth/login com { key }
+// - Em caso de ok:true, salva "adminKey" no localStorage
+// - Redireciona para /admin
+// - Trabalha em conjunto com ProtectedRoute (expiração por inatividade).
+// ============================================================================
+
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { adminLoginByKey, setAdminKey } from "./adminApi";
+import apiClient from "../lib/apiClient";
+
+const STORAGE_KEY = "adminKey";
+const LAST_ACTIVE_KEY = "adminLastActiveAt";
 
 export default function AdminLogin() {
   const [key, setKey] = useState("");
@@ -20,10 +32,15 @@ export default function AdminLogin() {
     setIsLoading(true);
     try {
       // Valida a key no backend
-      await adminLoginByKey(trimmed);
-      // persiste localmente (redundante, mas ok)
-      setAdminKey(trimmed);
-      navigate("/admin");
+      const resp = await apiClient.authLoginByKey(trimmed);
+      if (resp?.ok === true) {
+        // Persiste localmente (ProtectedRoute usa essa mesma chave)
+        localStorage.setItem(STORAGE_KEY, trimmed);
+        localStorage.setItem(LAST_ACTIVE_KEY, String(Date.now()));
+        navigate("/admin");
+      } else {
+        setErrorMsg("Chave inválida.");
+      }
     } catch (error) {
       const msg = error?.message || "Falha ao validar a chave.";
       setErrorMsg(msg);
@@ -40,7 +57,9 @@ export default function AdminLogin() {
           <h1 className="text-xl font-bold mt-2 text-gray-900 dark:text-gray-100">
             Painel do Administrador
           </h1>
-          <p className="text-sm text-gray-600 dark:text-gray-300">Acesse com sua chave de administrador</p>
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            Acesse com sua chave de administrador
+          </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

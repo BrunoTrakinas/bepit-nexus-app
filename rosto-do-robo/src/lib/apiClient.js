@@ -1,4 +1,4 @@
-// rosto-do-robo/src/lib/apiClient.js
+// src/lib/apiClient.js
 // ============================================================================
 // Camada de chamadas HTTP do frontend (Chat + Itinerário + Admin)
 // - Mantém TODAS as rotas Admin que você já usava (login, parceiros, regiões,
@@ -26,8 +26,8 @@ const clienteAxios = axios.create({
   baseURL: baseURLDaApi,
   withCredentials: false,
   headers: { "Content-Type": "application/json" },
-  // timeout opcional (evita ficar pendurado em rede ruim):
-  timeout: 30000
+  // timeout aumentado para reduzir falsos timeouts em respostas mais longas (Gemini)
+  timeout: 60000
 });
 
 // --------------------------- Helpers HTTP -----------------------------------
@@ -102,7 +102,7 @@ const apiClient = {
   enviarFeedbackDaInteracao: (corpo) => httpPost("/api/feedback", corpo),
 
   /**
-   * Gera roteiro (itinerário) entre datas (novo endpoint).
+   * Gera roteiro (itinerário) entre datas (seu backend já possui ou adicionaremos).
    * Rota backend: POST /api/itinerario/:slugDaRegiao
    * Body: { inicio: "10/12" | "2025-12-10", fim: "15/12" | "2025-12-15", cidadeSlug?: "cabo-frio" }
    */

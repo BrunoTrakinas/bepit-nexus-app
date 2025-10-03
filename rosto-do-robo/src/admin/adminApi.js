@@ -1,15 +1,16 @@
-// src/admin/adminApi.js
+// rosto-do-robo/src/admin/adminApi.js
 // ============================================================================
 // Camada de chamadas administrativas do frontend (Admin Dashboard)
 // - Autenticação por chave: POST /api/auth/login  -> { ok: true } quando válido
-// - Armazena a chave no localStorage (chave "adminKey")
+// - **Agora usa sessionStorage** (encerra ao fechar aba) e registra lastActivity
 // - Todas as chamadas admin enviam o header "X-Admin-Key"
 // - Usa baseURL do .env (VITE_API_BASE_URL) quando presente; caso contrário usa
 //   caminho relativo (para funcionar com proxy do Netlify /api/*).
+// - Expiração por inatividade: 15 minutos (controlada pelo AuthProvider).
 // ============================================================================
 
-// ------------------------------- Configuração --------------------------------
 const STORAGE_KEY = "adminKey";
+const LAST_ACTIVITY_KEY = "adminLastActivity";
 const API_BASE = (import.meta?.env?.VITE_API_BASE_URL || "").trim();
 
 /**
@@ -23,7 +24,6 @@ const API_BASE = (import.meta?.env?.VITE_API_BASE_URL || "").trim();
 function makeUrl(path) {
   if (!path || typeof path !== "string") throw new Error("Parâmetro 'path' inválido.");
   if (API_BASE) {
-    // Evita double slash ao concatenar
     const base = API_BASE.endsWith("/") ? API_BASE.slice(0, -1) : API_BASE;
     const p = path.startsWith("/") ? path : `/${path}`;
     return `${base}${p}`;
@@ -32,19 +32,34 @@ function makeUrl(path) {
 }
 
 // ---------------------------- Persistência da chave --------------------------
+// Agora em sessionStorage (derruba ao fechar a aba/janela).
 export function setAdminKey(k) {
   if (typeof k !== "string" || !k.trim()) {
     throw new Error("Chave administrativa inválida.");
   }
-  localStorage.setItem(STORAGE_KEY, k.trim());
+  sessionStorage.setItem(STORAGE_KEY, k.trim());
+  touchAdminActivity();
 }
 
 export function getAdminKey() {
-  return localStorage.getItem(STORAGE_KEY) || "";
+  return sessionStorage.getItem(STORAGE_KEY) || "";
 }
 
 export function clearAdminKey() {
-  localStorage.removeItem(STORAGE_KEY);
+  sessionStorage.removeItem(STORAGE_KEY);
+  sessionStorage.removeItem(LAST_ACTIVITY_KEY);
+}
+
+// Marca atividade (atualiza relógio de inatividade)
+export function touchAdminActivity() {
+  sessionStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
+}
+
+// Lê timestamp de última atividade
+export function getLastActivityTs() {
+  const v = sessionStorage.getItem(LAST_ACTIVITY_KEY);
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 }
 
 // --------------------------------- Auth --------------------------------------
@@ -64,7 +79,6 @@ export async function adminLoginByKey(key) {
     credentials: "include"
   });
 
-  // Trata erro de servidor / rota
   if (!res.ok) {
     let errPayload = null;
     try { errPayload = await res.json(); } catch { /* ignore */ }
@@ -74,7 +88,7 @@ export async function adminLoginByKey(key) {
 
   const data = await res.json().catch(() => ({}));
   if (data?.ok === true) {
-    setAdminKey(candidate);
+    setAdminKey(candidate);    // já grava em sessionStorage
     return true;
   }
 
@@ -92,6 +106,7 @@ async function httpGet(path) {
     },
     credentials: "include"
   });
+  touchAdminActivity();
   if (!res.ok) {
     let errPayload = null;
     try { errPayload = await res.json(); } catch { /* ignore */ }
@@ -112,6 +127,7 @@ async function httpPost(path, body) {
     body: JSON.stringify(body || {}),
     credentials: "include"
   });
+  touchAdminActivity();
   if (!res.ok) {
     let errPayload = null;
     try { errPayload = await res.json(); } catch { /* ignore */ }
@@ -132,6 +148,7 @@ async function httpPut(path, body) {
     body: JSON.stringify(body || {}),
     credentials: "include"
   });
+  touchAdminActivity();
   if (!res.ok) {
     let errPayload = null;
     try { errPayload = await res.json(); } catch { /* ignore */ }
@@ -142,30 +159,17 @@ async function httpPut(path, body) {
 }
 
 // ----------------------- Funções genéricas (export) --------------------------
-/**
- * Mantém as assinaturas usadas no AdminDashboard:
- *  - adminGet(path)
- *  - adminPost(path, body)
- *  - adminPut(path, body)
- * Essas funções aceitam paths como "/api/admin/..." e delegam para o backend.
- * O header X-Admin-Key é injetado automaticamente.
- */
 export async function adminGet(path) {
   return httpGet(path);
 }
-
 export async function adminPost(path, body) {
   return httpPost(path, body);
 }
-
 export async function adminPut(path, body) {
   return httpPut(path, body);
 }
 
 // ---------------------- Atalhos específicos (opcional) -----------------------
-// Estes utilitários podem ser usados se quiser padronizar do lado do painel.
-// Não são obrigatórios; o AdminDashboard já trabalha com adminGet/Post/Put.
-
 export async function adminListarParceiros(regiaoSlug, cidadeSlug) {
   if (!regiaoSlug || !cidadeSlug) throw new Error("Parâmetros 'regiaoSlug' e 'cidadeSlug' são obrigatórios.");
   const path = `/api/admin/parceiros/${encodeURIComponent(regiaoSlug)}/${encodeURIComponent(cidadeSlug)}`;
