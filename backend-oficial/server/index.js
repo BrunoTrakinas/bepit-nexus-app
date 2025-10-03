@@ -412,26 +412,52 @@ app.get("/api/health/db", async (_req, res) => {
   }
 });
 
-app.get("/api/diag/gemini", async (_req, res) => {
+// ============================================================================
+// DIAGNÓSTICO DO GEMINI (REST v1) — PRONTO PARA COLAR
+// GET /api/diag/gemini
+// - Confirma se USE_GEMINI_REST=1 está ativo
+// - Lista modelos disponíveis
+// - Mostra qual modelo foi escolhido
+// - Faz um "ping" (generateContent) para validar a chave e o endpoint
+// ============================================================================
+aplicacaoExpress.get("/api/diag/gemini", async (_req, res) => {
   try {
     if (!usarGeminiREST) {
-      return res.status(200).json({ ok: false, modo: "SDK", info: "USE_GEMINI_REST não está ativo." });
+      return res.status(200).json({
+        ok: false,
+        modo: "SDK",
+        info: "USE_GEMINI_REST não está ativo."
+      });
     }
+
     const modelos = await listarModelosREST();
     let escolhido = null;
     let ping = null;
+
     try {
-      escolhido = await obterModeloREST();
+      escolhido = await obterModeloREST(); // respeita GEMINI_MODEL (ex.: gemini-2.5-flash)
       const texto = await gerarConteudoComREST(escolhido, "ping");
       ping = texto ? "ok" : "vazio";
     } catch (e) {
       ping = String(e?.message || e);
     }
-    res.json({ ok: true, modo: "REST", modelos, escolhido, ping });
+
+    res.json({
+      ok: true,
+      modo: "REST",
+      modelos,
+      escolhido,
+      ping
+    });
   } catch (e) {
-    res.status(500).json({ ok: false, modo: "REST", error: String(e?.message || e) });
+    res.status(500).json({
+      ok: false,
+      modo: "REST",
+      error: String(e?.message || e)
+    });
   }
 });
+
 
 // ============================================================================
 // CÉREBRO / PROMPTS E EXTRAÇÕES
