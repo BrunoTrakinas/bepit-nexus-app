@@ -18,6 +18,14 @@ import cors from "cors";
 import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
 
+// >>>>>>>>>>>>>>>>>>>>>>>> IMPORTANTE: GUARDRAILS <<<<<<<<<<<<<<<<<<<<<<<<<<<<
+import {
+  finalizeAssistantResponse,
+  buildNoPartnerFallback,
+  BEPIT_SYSTEM_PROMPT_APPENDIX
+} from "./utils/bepitGuardrails.js";
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
 // ============================== CONFIGURAÇÃO BÁSICA =========================
 const aplicacaoExpress = express();
 const portaDoServidor = process.env.PORT || 3002;
@@ -484,6 +492,10 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
     "Responda à pergunta do usuário de forma útil, baseando-se EXCLUSIVAMENTE nas informações dos parceiros fornecidas em [Contexto].",
     "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
+    // >>>>>>>>>>>>>>>>>>>> APÊNDICE DE REGRAS DE VERACIDADE <<<<<<<<<<<<<<<<<<
+    BEPIT_SYSTEM_PROMPT_APPENDIX,
+    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    "",
     `[Contexto de Parceiros]: ${contextoParceiros}`,
     `[Histórico da Conversa]:\n${historicoTexto}`,
     `[Região]: ${regiaoNome}`,
@@ -499,6 +511,10 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
     `Você é o BEPIT, um concierge amigável e conhecedor da região de ${nomeRegiao}.`,
     "Responda à pergunta do usuário de forma prestativa, usando seu conhecimento geral.",
     "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
+    "",
+    // >>>>>>>>>>>>>>>>>>>> APÊNDICE DE REGRAS DE VERACIDADE <<<<<<<<<<<<<<<<<<
+    BEPIT_SYSTEM_PROMPT_APPENDIX,
+    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     "",
     `[Histórico da Conversa]:\n${historicoTexto}`,
     `[Pergunta do Usuário]: "${pergunta}"`
@@ -575,7 +591,7 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
 }
 
 // ============================================================================
-// ROTA DE CHAT (ORQUESTRADOR LÓGICO v3.3)
+// ROTA DE CHAT (ORQUESTRADOR LÓGICO v3.3) — COM TRAVAS APLICADAS
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) => {
   try {
@@ -642,12 +658,19 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           .eq("id", idDaConversa);
       } catch { /* segue */ }
 
+      // -------------- GERA RESPOSTA E APLICA TRAVAS (PARCEIRO SELECIONADO) --------------
       const respostaCurta = await gerarRespostaComParceiros(
         textoDoUsuario,
         historicoGemini,
         [parceiroSelecionado],
         regiao?.nome
       );
+
+      const respostaCurtaSegura = finalizeAssistantResponse({
+        modelResponseText: respostaCurta,
+        foundPartnersList: [parceiroSelecionado]
+      });
+      // ----------------------------------------------------------------------
 
       let idDaInteracaoSalvaSel = null;
       try {
@@ -657,7 +680,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
             regiao_id: regiao.id,
             conversation_id: idDaConversa,
             pergunta_usuario: textoDoUsuario,
-            resposta_ia: respostaCurta,
+            resposta_ia: respostaCurtaSegura,
             parceiros_sugeridos: [parceiroSelecionado]
           })
           .select("id")
@@ -669,7 +692,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
 
       const fotosDosParceiros = [parceiroSelecionado].flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
       return resposta.status(200).json({
-        reply: respostaCurta,
+        reply: respostaCurtaSegura,
         interactionId: idDaInteracaoSalvaSel,
         photoLinks: fotosDosParceiros,
         conversationId: idDaConversa,
@@ -739,6 +762,13 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       respostaFinal = "Posso ajudar com roteiros, transporte, passeios, praias e onde comer. O que você gostaria de saber?";
     }
 
+    // ---------------------- APLICA TRAVAS NA RESPOSTA FINAL -------------------
+    const respostaFinalSegura = finalizeAssistantResponse({
+      modelResponseText: respostaFinal,
+      foundPartnersList: Array.isArray(parceirosSugeridos) ? parceirosSugeridos : []
+    });
+    // -------------------------------------------------------------------------
+
     let idDaInteracaoSalva = null;
     try {
       const { data: novaInteracao, error: erroDeInsert } = await supabase
@@ -747,7 +777,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           regiao_id: regiao.id,
           conversation_id: idDaConversa,
           pergunta_usuario: textoDoUsuario,
-          resposta_ia: respostaFinal,
+          resposta_ia: respostaFinalSegura,
           parceiros_sugeridos: parceirosSugeridos
         })
         .select("id")
@@ -761,7 +791,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
     const fotosDosParceiros = (parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
 
     return resposta.status(200).json({
-      reply: respostaFinal,
+      reply: respostaFinalSegura,
       interactionId: idDaInteracaoSalva,
       photoLinks: fotosDosParceiros,
       conversationId: idDaConversa,
