@@ -19,7 +19,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
-  }, [messages, photos]);
+  }, [messages, photos, loading]);
 
   async function enviarMensagem(textoManual) {
     const texto = (textoManual ?? input).trim();
@@ -32,7 +32,6 @@ export default function ChatPage({ theme, onToggleTheme }) {
     setPhotos([]);
 
     try {
-      // Chama o backend via apiClient; baseURL vem de VITE_API_BASE_URL ou "/"
       const data = await apiClient.enviarMensagemParaChat(regiaoSlug, {
         message: texto,
         conversationId
@@ -47,7 +46,6 @@ export default function ChatPage({ theme, onToggleTheme }) {
       ]);
       setPhotos(Array.isArray(data?.photoLinks) ? data.photoLinks : []);
     } catch (e) {
-      // Erro mais claro, mostrando status e mensagem vinda do backend quando existir
       const detalhes =
         e?.data?.error ||
         e?.message ||
@@ -120,7 +118,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
             alt="BEPIT"
             style={{ width: 24, height: 24, objectFit: "contain" }}
           />
-          BEPIT Nexus
+          BEPIT Nexus — {formatSlug(regiaoSlug || "")}
         </div>
         <div style={{ marginLeft: "auto" }}>
           <button
@@ -141,6 +139,8 @@ export default function ChatPage({ theme, onToggleTheme }) {
 
       <main style={{ position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <SuggestionButtons onSuggestionClick={onSuggestionClick} isLoading={loading} theme={theme} />
+
+        {/* Lista de mensagens */}
         <div
           ref={listRef}
           style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column" }}
@@ -171,6 +171,31 @@ export default function ChatPage({ theme, onToggleTheme }) {
               <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
             </div>
           ))}
+
+          {/* Indicador de digitando */}
+          {loading && (
+            <div
+              style={{
+                marginBottom: 12,
+                padding: "8px 12px",
+                borderRadius: "12px",
+                backgroundColor: theme.assistantBubble,
+                maxWidth: "60%",
+                alignSelf: "flex-start",
+                display: "inline-flex",
+                gap: 4
+              }}
+            >
+              <span style={{ fontSize: 12, color: theme.text, opacity: 0.7, fontWeight: "bold", marginRight: 6 }}>
+                BEPIT
+              </span>
+              <span className="dots" style={{ display: "inline-flex", gap: 4 }}>
+                <span style={{ width: 6, height: 6, borderRadius: 6, background: theme.text, opacity: 0.35, animation: "blink 1s infinite" }} />
+                <span style={{ width: 6, height: 6, borderRadius: 6, background: theme.text, opacity: 0.35, animation: "blink 1s infinite 0.2s" }} />
+                <span style={{ width: 6, height: 6, borderRadius: 6, background: theme.text, opacity: 0.35, animation: "blink 1s infinite 0.4s" }} />
+              </span>
+            </div>
+          )}
 
           {photos?.length > 0 && (
             <div
@@ -240,6 +265,15 @@ export default function ChatPage({ theme, onToggleTheme }) {
           </button>
         </div>
       </footer>
+
+      {/* CSS do efeito blink */}
+      <style>{`
+        @keyframes blink {
+          0% { opacity: 0.2; transform: translateY(0); }
+          50% { opacity: 0.8; transform: translateY(-2px); }
+          100% { opacity: 0.2; transform: translateY(0); }
+        }
+      `}</style>
     </div>
   );
 }
