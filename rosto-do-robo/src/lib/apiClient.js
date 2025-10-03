@@ -1,86 +1,101 @@
+// rosto-do-robo/src/lib/apiClient.js
 import axios from "axios";
 
 /**
- * Como configurar:
- * - Se for usar o proxy do Netlify, deixe VITE_API_BASE_URL em branco (ou não defina).
- *   As chamadas irão para caminhos relativos /api/* e o Netlify redireciona para o Render.
- *
- * - Se quiser apontar direto para o Render, defina:
- *   VITE_API_BASE_URL=https://bepit-nexus-backend.onrender.com
- *
- * - NÃO coloque /api no final da variável. Se colocar, este cliente trata para não duplicar.
+ * Estratégia:
+ * - Se VITE_API_BASE_URL estiver definida, usamos ela (ex.: https://bepit-nexus-backend.onrender.com).
+ * - Caso contrário, caímos para '/' para usar redirects do Netlify.
+ * - Todos os endpoints começam com "/api", então o baseURL deve ser "" (barra) ou o domínio do backend.
  */
-const RAW_BASE = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/+$/, "");
+const RAW_BASE = (import.meta.env?.VITE_API_BASE_URL || "/").trim();
 
-/**
- * Corrige o path quando a base já termina com /api
- * Ex.: base = https://.../api e path = /api/chat → vira /chat
- */
-function fixPath(path) {
-  if (!RAW_BASE) return path; // usando proxy → caminho relativo funciona
-  const baseHasApi = /\/api$/i.test(RAW_BASE);
-  if (baseHasApi) return path.replace(/^\/api\b/i, "") || "/";
-  return path;
-}
+// Remove barra final para evitar //api
+const baseURLDaApi = RAW_BASE.endsWith("/") ? RAW_BASE.slice(0, -1) : RAW_BASE;
 
-const axiosInstance = axios.create({
-  baseURL: RAW_BASE || "",
+// Cria instância
+const clienteAxios = axios.create({
+  baseURL: baseURLDaApi,
   withCredentials: false,
-  headers: { "Content-Type": "application/json" },
+  headers: { "Content-Type": "application/json" }
 });
 
+// Helpers de chamada HTTP com tratamento de erro consistente
+async function httpGet(url, config = {}) {
+  try {
+    const resp = await clienteAxios.get(url, config);
+    return resp.data;
+  } catch (e) {
+    // Preserva mensagem de backend se existir
+    const msg = e?.response?.data?.error || e?.response?.data?.message || e?.message || "Erro de rede";
+    const err = new Error(msg);
+    err.status = e?.response?.status;
+    err.data = e?.response?.data;
+    throw err;
+  }
+}
+
+async function httpPost(url, body = {}, config = {}) {
+  try {
+    const resp = await clienteAxios.post(url, body, config);
+    return resp.data;
+  } catch (e) {
+    const msg = e?.response?.data?.error || e?.response?.data?.message || e?.message || "Erro de rede";
+    const err = new Error(msg);
+    err.status = e?.response?.status;
+    err.data = e?.response?.data;
+    throw err;
+  }
+}
+
+async function httpPut(url, body = {}, config = {}) {
+  try {
+    const resp = await clienteAxios.put(url, body, config);
+    return resp.data;
+  } catch (e) {
+    const msg = e?.response?.data?.error || e?.response?.data?.message || e?.message || "Erro de rede";
+    const err = new Error(msg);
+    err.status = e?.response?.status;
+    err.data = e?.response?.data;
+    throw err;
+  }
+}
+
+// API de alto nível usada pelo app
 const apiClient = {
-  // Chat & Feedback
-  enviarMensagemParaChat: (slugDaRegiao, body) =>
-    axiosInstance.post(fixPath(`/api/chat/${encodeURIComponent(slugDaRegiao)}`), body),
+  // Chat
+  enviarMensagemParaChat: (slugDaRegiao, corpo) =>
+    httpPost(`/api/chat/${encodeURIComponent(slugDaRegiao)}`, corpo),
 
-  enviarFeedbackDaInteracao: (body) =>
-    axiosInstance.post(fixPath("/api/feedback"), body),
+  enviarFeedbackDaInteracao: (corpo) => httpPost("/api/feedback", corpo),
 
-  // Auth por chave
-  authLoginByKey: (key) =>
-    axiosInstance.post(fixPath("/api/auth/login"), { key }),
+  // Admin - login por chave (X-Admin-Key)
+  authLoginByKey: (key) => httpPost("/api/auth/login", { key }),
 
-  // Admin
-  adminLoginUserPass: (body) =>
-    axiosInstance.post(fixPath("/api/admin/login"), body),
-
-  adminCriarParceiro: (body, adminKey) =>
-    axiosInstance.post(fixPath("/api/admin/parceiros"), body, {
-      headers: { "X-Admin-Key": adminKey },
-    }),
+  // Admin (com header X-Admin-Key)
+  adminCriarParceiro: (corpo, adminKey) =>
+    httpPost("/api/admin/parceiros", corpo, { headers: { "X-Admin-Key": adminKey } }),
 
   adminListarParceiros: (regiaoSlug, cidadeSlug, adminKey) =>
-    axiosInstance.get(fixPath(`/api/admin/parceiros/${regiaoSlug}/${cidadeSlug}`), {
-      headers: { "X-Admin-Key": adminKey },
+    httpGet(`/api/admin/parceiros/${encodeURIComponent(regiaoSlug)}/${encodeURIComponent(cidadeSlug)}`, {
+      headers: { "X-Admin-Key": adminKey }
     }),
 
-  adminAtualizarParceiro: (id, body, adminKey) =>
-    axiosInstance.put(fixPath(`/api/admin/parceiros/${id}`), body, {
-      headers: { "X-Admin-Key": adminKey },
+  adminAtualizarParceiro: (id, corpo, adminKey) =>
+    httpPut(`/api/admin/parceiros/${encodeURIComponent(id)}`, corpo, {
+      headers: { "X-Admin-Key": adminKey }
     }),
 
-  adminCriarRegiao: (body, adminKey) =>
-    axiosInstance.post(fixPath("/api/admin/regioes"), body, {
-      headers: { "X-Admin-Key": adminKey },
-    }),
+  adminCriarRegiao: (corpo, adminKey) =>
+    httpPost("/api/admin/regioes", corpo, { headers: { "X-Admin-Key": adminKey } }),
 
-  adminCriarCidade: (body, adminKey) =>
-    axiosInstance.post(fixPath("/api/admin/cidades"), body, {
-      headers: { "X-Admin-Key": adminKey },
-    }),
+  adminCriarCidade: (corpo, adminKey) =>
+    httpPost("/api/admin/cidades", corpo, { headers: { "X-Admin-Key": adminKey } }),
 
   adminMetricsSummary: (params, adminKey) =>
-    axiosInstance.get(fixPath("/api/admin/metrics/summary"), {
-      params,
-      headers: { "X-Admin-Key": adminKey },
-    }),
+    httpGet("/api/admin/metrics/summary", { params, headers: { "X-Admin-Key": adminKey } }),
 
   adminLogs: (params, adminKey) =>
-    axiosInstance.get(fixPath("/api/admin/logs"), {
-      params,
-      headers: { "X-Admin-Key": adminKey },
-    }),
+    httpGet("/api/admin/logs", { params, headers: { "X-Admin-Key": adminKey } })
 };
 
 export default apiClient;

@@ -1,7 +1,8 @@
+// rosto-do-robo/src/components/ChatPage.jsx
 import React, { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import SuggestionButtons from "./SuggestionButtons.jsx";
-import apiClient from "../lib/apiClient"; // << usa cliente central
+import apiClient from "../lib/apiClient.js";
 
 export default function ChatPage({ theme, onToggleTheme }) {
   const { regiaoSlug } = useParams();
@@ -23,6 +24,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
   async function enviarMensagem(textoManual) {
     const texto = (textoManual ?? input).trim();
     if (!texto || loading) return;
+
     const novaMsgUser = { role: "user", text: texto };
     setMessages((prev) => [...prev, novaMsgUser]);
     setInput("");
@@ -30,10 +32,10 @@ export default function ChatPage({ theme, onToggleTheme }) {
     setPhotos([]);
 
     try {
-      // Agora chamamos via apiClient (que pode usar BASE absoluta)
-      const { data } = await apiClient.enviarMensagemParaChat(regiaoSlug, {
+      // Chama o backend via apiClient; baseURL vem de VITE_API_BASE_URL ou "/"
+      const data = await apiClient.enviarMensagemParaChat(regiaoSlug, {
         message: texto,
-        conversationId,
+        conversationId
       });
 
       if (!conversationId && data?.conversationId) {
@@ -41,16 +43,18 @@ export default function ChatPage({ theme, onToggleTheme }) {
       }
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", text: data?.reply || "..." },
+        { role: "assistant", text: data?.reply || "..." }
       ]);
       setPhotos(Array.isArray(data?.photoLinks) ? data.photoLinks : []);
     } catch (e) {
+      // Erro mais claro, mostrando status e mensagem vinda do backend quando existir
+      const detalhes =
+        e?.data?.error ||
+        e?.message ||
+        "Falha ao enviar sua mensagem. Tente novamente.";
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          text: `Desculpe, ocorreu um erro: ${e.message}`,
-        },
+        { role: "assistant", text: `Desculpe, ocorreu um erro: ${detalhes}` }
       ]);
     } finally {
       setLoading(false);
@@ -70,9 +74,9 @@ export default function ChatPage({ theme, onToggleTheme }) {
   }
 
   const formatSlug = (slug) => {
-    return slug
+    return (slug || "")
       .split("-")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
       .join(" ");
   };
 
@@ -84,7 +88,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
         height: "100vh",
         overflow: "hidden",
         backgroundColor: theme.background,
-        color: theme.text,
+        color: theme.text
       }}
     >
       <header
@@ -94,7 +98,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
           display: "flex",
           gap: 12,
           alignItems: "center",
-          backgroundColor: theme.headerBg,
+          backgroundColor: theme.headerBg
         }}
       >
         <button
@@ -105,12 +109,19 @@ export default function ChatPage({ theme, onToggleTheme }) {
             color: theme.text,
             padding: "6px 10px",
             borderRadius: "6px",
-            cursor: "pointer",
+            cursor: "pointer"
           }}
         >
           &larr; Trocar Região
         </button>
-        <div style={{ fontWeight: 700 }}>BEPIT Nexus</div>
+        <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          <img
+            src="/bepit-logo.png"
+            alt="BEPIT"
+            style={{ width: 24, height: 24, objectFit: "contain" }}
+          />
+          BEPIT Nexus
+        </div>
         <div style={{ marginLeft: "auto" }}>
           <button
             onClick={onToggleTheme}
@@ -120,7 +131,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
               color: theme.text,
               padding: "6px 10px",
               borderRadius: "6px",
-              cursor: "pointer",
+              cursor: "pointer"
             }}
           >
             {theme.background === "#fff" ? "🌙 Escuro" : "☀️ Claro"}
@@ -128,28 +139,11 @@ export default function ChatPage({ theme, onToggleTheme }) {
         </div>
       </header>
 
-      <main
-        style={{
-          position: "relative",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        <SuggestionButtons
-          onSuggestionClick={onSuggestionClick}
-          isLoading={loading}
-          theme={theme}
-        />
+      <main style={{ position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <SuggestionButtons onSuggestionClick={onSuggestionClick} isLoading={loading} theme={theme} />
         <div
           ref={listRef}
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: 12,
-            display: "flex",
-            flexDirection: "column",
-          }}
+          style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column" }}
         >
           {messages.map((m, idx) => (
             <div
@@ -158,10 +152,9 @@ export default function ChatPage({ theme, onToggleTheme }) {
                 marginBottom: 12,
                 padding: "8px 12px",
                 borderRadius: "12px",
-                backgroundColor:
-                  m.role === "assistant" ? theme.assistantBubble : "transparent",
+                backgroundColor: m.role === "assistant" ? theme.assistantBubble : "transparent",
                 maxWidth: "80%",
-                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                alignSelf: m.role === "user" ? "flex-end" : "flex-start"
               }}
             >
               <div
@@ -170,7 +163,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
                   color: theme.text,
                   opacity: 0.7,
                   fontWeight: "bold",
-                  marginBottom: "4px",
+                  marginBottom: "4px"
                 }}
               >
                 {m.role === "user" ? "Você" : "BEPIT"}
@@ -178,13 +171,14 @@ export default function ChatPage({ theme, onToggleTheme }) {
               <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
             </div>
           ))}
+
           {photos?.length > 0 && (
             <div
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
                 gap: 8,
-                marginTop: 12,
+                marginTop: 12
               }}
             >
               {photos.map((src, i) => (
@@ -197,18 +191,13 @@ export default function ChatPage({ theme, onToggleTheme }) {
                     display: "block",
                     border: `1px solid ${theme.inputBg}`,
                     borderRadius: 8,
-                    overflow: "hidden",
+                    overflow: "hidden"
                   }}
                 >
                   <img
                     src={src}
                     alt={`foto-${i + 1}`}
-                    style={{
-                      width: "100%",
-                      height: 120,
-                      objectFit: "cover",
-                      display: "block",
-                    }}
+                    style={{ width: "100%", height: 120, objectFit: "cover", display: "block" }}
                   />
                 </a>
               ))}
@@ -217,13 +206,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
         </div>
       </main>
 
-      <footer
-        style={{
-          padding: 12,
-          borderTop: `1px solid ${theme.inputBg}`,
-          backgroundColor: theme.headerBg,
-        }}
-      >
+      <footer style={{ padding: 12, borderTop: `1px solid ${theme.inputBg}`, backgroundColor: theme.headerBg }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
           <textarea
             value={input}
@@ -237,7 +220,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
               borderRadius: 8,
               border: `1px solid ${theme.inputBg}`,
               backgroundColor: theme.inputBg,
-              color: theme.text,
+              color: theme.text
             }}
           />
           <button
@@ -250,7 +233,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
               background: loading ? "#555" : "#007aff",
               color: "#fff",
               cursor: loading ? "not-allowed" : "pointer",
-              fontWeight: 600,
+              fontWeight: 600
             }}
           >
             {loading ? "..." : "Enviar"}
