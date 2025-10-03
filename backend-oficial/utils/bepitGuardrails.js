@@ -39,7 +39,7 @@ export function buildNoPartnerFallback(category, city) {
  *
  * @param {Object} params
  * @param {string} params.text - Texto de saída do modelo.
- * @param {Array<Object>} params.matchedPartners - Lista de parceiros realmente carregados do banco para esta resposta. Ex.: [{ id, name, address, benefits: [{ id, label }] }]
+ * @param {Array<Object>} params.matchedPartners - Lista de parceiros realmente carregados do banco para esta resposta. Ex.: [{ id, name|nome, address|endereco, benefits|beneficio_bepit }]
  * @returns {string} Texto sanitizado, seguro para exibir ao usuário final.
  */
 export function sanitizeAssistantText({ text, matchedPartners = [] }) {
@@ -48,13 +48,17 @@ export function sanitizeAssistantText({ text, matchedPartners = [] }) {
   // Normaliza a lista de parceiros válidos desta resposta
   const validPartnerNames = new Set(
     matchedPartners
-      .map((partner) => (partner && partner.nome ? partner.nome.toLowerCase().trim() : (partner && partner.name ? partner.name.toLowerCase().trim() : "")))
+      .map((partner) => {
+        if (partner && partner.nome) return partner.nome.toLowerCase().trim();
+        if (partner && partner.name) return partner.name.toLowerCase().trim();
+        return "";
+      })
       .filter(Boolean)
   );
 
   const partnersHaveBenefits =
     matchedPartners.some((partner) => {
-      const benefits = partner?.benefits || partner?.beneficio_bepit || null;
+      const benefits = partner?.benefits ?? partner?.beneficio_bepit ?? null;
       if (Array.isArray(benefits)) return benefits.length > 0;
       if (typeof benefits === "string") return benefits.trim().length > 0;
       return false;

@@ -18,12 +18,12 @@ import cors from "cors";
 import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
 
-// >>>>>>>>>>>>>>>>>>>>>>>> IMPORTANTE: GUARDRAILS <<<<<<<<<<<<<<<<<<<<<<<<<<<<
+// >>>>>>>>>>>>>>>>>>>>>>>> IMPORTANTE: GUARDRAILS (CAMINHO CORRIGIDO) <<<<<<<<
 import {
   finalizeAssistantResponse,
   buildNoPartnerFallback,
   BEPIT_SYSTEM_PROMPT_APPENDIX
-} from "./utils/bepitGuardrails.js";
+} from "../utils/bepitGuardrails.js";
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 // ============================== CONFIGURAÇÃO BÁSICA =========================
@@ -60,10 +60,7 @@ aplicacaoExpress.options("*", cors());
 
 // ============================================================================
 // GEMINI (REST v1) — descoberta e seleção robustas de modelo
-// Aceita GEMINI_MODEL com ou sem "models/"
-// Requer: USE_GEMINI_REST=1 e GEMINI_API_KEY
 // ============================================================================
-
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
 const chaveGemini = process.env.GEMINI_API_KEY || "";
 
@@ -87,8 +84,8 @@ async function listarModelosREST() {
 }
 
 async function selecionarModeloREST() {
-  const todosComPrefixo = await listarModelosREST(); // ex: ["models/gemini-2.5-flash", ...]
-  const disponiveisSimples = todosComPrefixo.map(stripModelsPrefix); // ["gemini-2.5-flash", ...]
+  const todosComPrefixo = await listarModelosREST();
+  const disponiveisSimples = todosComPrefixo.map(stripModelsPrefix);
 
   const envModelo = (process.env.GEMINI_MODEL || "").trim();
   if (envModelo) {
@@ -152,7 +149,6 @@ async function obterModeloREST() {
   return modeloGeminiV1;
 }
 
-// Função única para uso no orquestrador
 async function geminiGerarTexto(texto) {
   if (!usarGeminiREST) {
     throw new Error("[GEMINI] Backend configurado para REST. Ative USE_GEMINI_REST=1.");
@@ -205,7 +201,6 @@ function obterCoordenadasPorCidadeOuTexto(texto, listaDeCidades) {
   return null;
 }
 
-// Histórico da conversa
 async function construirHistoricoParaGemini(idDaConversa, limiteDeTrocas = 12) {
   try {
     const { data, error } = await supabase
@@ -435,7 +430,6 @@ aplicacaoExpress.get("/api/diag/columns", async (_req, res) => {
       const sel = cols.join(", ");
       const out = { table, probe: {} };
       for (const c of cols) out.probe[c] = { ok: true };
-      // tentativa de select limitada (não falhar o diagnóstico)
       await supabase.from(table).select(sel).limit(1);
       return out;
     };
@@ -484,6 +478,20 @@ Frase: "${texto}"`;
   }
 }
 
+function historicoParaTextoSimples(historicoContents) {
+  try {
+    return (historicoContents || [])
+      .map(bloco => {
+        const role = bloco?.role || "user";
+        const text = (bloco?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
+        return `- ${role}: ${text}`;
+      })
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
 async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
@@ -492,9 +500,7 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
     "Responda à pergunta do usuário de forma útil, baseando-se EXCLUSIVAMENTE nas informações dos parceiros fornecidas em [Contexto].",
     "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
-    // >>>>>>>>>>>>>>>>>>>> APÊNDICE DE REGRAS DE VERACIDADE <<<<<<<<<<<<<<<<<<
     BEPIT_SYSTEM_PROMPT_APPENDIX,
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     "",
     `[Contexto de Parceiros]: ${contextoParceiros}`,
     `[Histórico da Conversa]:\n${historicoTexto}`,
@@ -512,9 +518,7 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
     "Responda à pergunta do usuário de forma prestativa, usando seu conhecimento geral.",
     "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
-    // >>>>>>>>>>>>>>>>>>>> APÊNDICE DE REGRAS DE VERACIDADE <<<<<<<<<<<<<<<<<<
     BEPIT_SYSTEM_PROMPT_APPENDIX,
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     "",
     `[Histórico da Conversa]:\n${historicoTexto}`,
     `[Pergunta do Usuário]: "${pergunta}"`
@@ -591,7 +595,7 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
 }
 
 // ============================================================================
-// ROTA DE CHAT (ORQUESTRADOR LÓGICO v3.3) — COM TRAVAS APLICADAS
+// ROTA DE CHAT (com guardrails aplicados)
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) => {
   try {
@@ -658,7 +662,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
           .eq("id", idDaConversa);
       } catch { /* segue */ }
 
-      // -------------- GERA RESPOSTA E APLICA TRAVAS (PARCEIRO SELECIONADO) --------------
       const respostaCurta = await gerarRespostaComParceiros(
         textoDoUsuario,
         historicoGemini,
@@ -670,7 +673,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
         modelResponseText: respostaCurta,
         foundPartnersList: [parceiroSelecionado]
       });
-      // ----------------------------------------------------------------------
 
       let idDaInteracaoSalvaSel = null;
       try {
@@ -762,12 +764,10 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       respostaFinal = "Posso ajudar com roteiros, transporte, passeios, praias e onde comer. O que você gostaria de saber?";
     }
 
-    // ---------------------- APLICA TRAVAS NA RESPOSTA FINAL -------------------
     const respostaFinalSegura = finalizeAssistantResponse({
       modelResponseText: respostaFinal,
       foundPartnersList: Array.isArray(parceirosSugeridos) ? parceirosSugeridos : []
     });
-    // -------------------------------------------------------------------------
 
     let idDaInteracaoSalva = null;
     try {
@@ -837,7 +837,7 @@ aplicacaoExpress.post("/api/feedback", async (requisicao, resposta) => {
 });
 
 // ============================================================================
-// AUTH (login por chave) + ADMIN (user/pass legado e rotas protegidas)
+// AUTH + ADMIN
 // ============================================================================
 aplicacaoExpress.post("/api/auth/login", async (req, res) => {
   try {
