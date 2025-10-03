@@ -15,6 +15,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
   const [loading, setLoading] = useState(false);
   const listRef = useRef(null);
 
+  // Rolagem automática ao final quando chegam mensagens/fotos ou estado de "digitando..."
   useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
@@ -40,6 +41,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
       if (!conversationId && data?.conversationId) {
         setConversationId(data.conversationId);
       }
+
       setMessages((prev) => [
         ...prev,
         { role: "assistant", text: data?.reply || "..." }
@@ -78,6 +80,13 @@ export default function ChatPage({ theme, onToggleTheme }) {
       .join(" ");
   };
 
+  // Paleta base para as bolhas (usa theme quando possível)
+  const assistantBubbleBg =
+    theme?.assistantBubble || (theme.background === "#fff" ? "#f5f7fb" : "#20242c");
+  const assistantBorder = theme.background === "#fff" ? "#e6e8ee" : "#2a2f3a";
+  const userBubbleBg = "#0b74de";
+  const userTextColor = "#fff";
+
   return (
     <div
       style={{
@@ -86,12 +95,14 @@ export default function ChatPage({ theme, onToggleTheme }) {
         height: "100vh",
         overflow: "hidden",
         backgroundColor: theme.background,
-        color: theme.text
+        color: theme.text,
+        fontFamily: "'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
       }}
     >
+      {/* HEADER */}
       <header
         style={{
-          padding: 12,
+          padding: 14,
           borderBottom: `1px solid ${theme.inputBg}`,
           display: "flex",
           gap: 12,
@@ -105,21 +116,31 @@ export default function ChatPage({ theme, onToggleTheme }) {
             background: "none",
             border: `1px solid ${theme.inputBg}`,
             color: theme.text,
-            padding: "6px 10px",
-            borderRadius: "6px",
-            cursor: "pointer"
+            padding: "8px 12px",
+            borderRadius: "10px",
+            cursor: "pointer",
+            fontWeight: 600
           }}
         >
-          &larr; Trocar Região
+          ← Trocar Região
         </button>
-        <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <img
             src="/bepit-logo.png"
             alt="BEPIT"
-            style={{ width: 24, height: 24, objectFit: "contain" }}
+            style={{ width: 28, height: 28, objectFit: "contain" }}
           />
-          BEPIT Nexus — {formatSlug(regiaoSlug || "")}
+          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>
+              BEPIT Concierge
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              {formatSlug(regiaoSlug || "")}
+            </div>
+          </div>
         </div>
+
         <div style={{ marginLeft: "auto" }}>
           <button
             onClick={onToggleTheme}
@@ -127,9 +148,10 @@ export default function ChatPage({ theme, onToggleTheme }) {
               background: "none",
               border: `1px solid ${theme.inputBg}`,
               color: theme.text,
-              padding: "6px 10px",
-              borderRadius: "6px",
-              cursor: "pointer"
+              padding: "8px 12px",
+              borderRadius: "10px",
+              cursor: "pointer",
+              fontWeight: 600
             }}
           >
             {theme.background === "#fff" ? "🌙 Escuro" : "☀️ Claro"}
@@ -137,73 +159,140 @@ export default function ChatPage({ theme, onToggleTheme }) {
         </div>
       </header>
 
+      {/* MAIN */}
       <main style={{ position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <SuggestionButtons onSuggestionClick={onSuggestionClick} isLoading={loading} theme={theme} />
 
-        {/* Lista de mensagens */}
+        {/* LISTA DE MENSAGENS */}
         <div
           ref={listRef}
-          style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column" }}
+          style={{
+            flex: 1,
+            overflowY: "auto",
+            padding: 16,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10
+          }}
         >
-          {messages.map((m, idx) => (
-            <div
-              key={idx}
-              style={{
-                marginBottom: 12,
-                padding: "8px 12px",
-                borderRadius: "12px",
-                backgroundColor: m.role === "assistant" ? theme.assistantBubble : "transparent",
-                maxWidth: "80%",
-                alignSelf: m.role === "user" ? "flex-end" : "flex-start"
-              }}
-            >
+          {messages.map((m, idx) => {
+            const isAssistant = m.role !== "user";
+            return (
               <div
+                key={idx}
                 style={{
-                  fontSize: 12,
-                  color: theme.text,
-                  opacity: 0.7,
-                  fontWeight: "bold",
-                  marginBottom: "4px"
+                  display: "flex",
+                  justifyContent: isAssistant ? "flex-start" : "flex-end"
                 }}
               >
-                {m.role === "user" ? "Você" : "BEPIT"}
+                <div
+                  style={{
+                    maxWidth: "80%",
+                    borderRadius: 16,
+                    padding: "10px 14px",
+                    boxShadow: isAssistant
+                      ? "0 1px 2px rgba(0,0,0,0.06)"
+                      : "0 1px 2px rgba(0,0,0,0.12)",
+                    backgroundColor: isAssistant ? assistantBubbleBg : userBubbleBg,
+                    border: isAssistant ? `1px solid ${assistantBorder}` : "none",
+                    color: isAssistant ? theme.text : userTextColor
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 13,
+                      opacity: 0.8,
+                      fontWeight: 600,
+                      marginBottom: 6
+                    }}
+                  >
+                    {isAssistant ? "BEPIT" : "Você"}
+                  </div>
+                  <div
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      fontSize: 15,
+                      lineHeight: 1.6,
+                      fontWeight: 400
+                    }}
+                  >
+                    {m.text}
+                  </div>
+                </div>
               </div>
-              <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
-            </div>
-          ))}
+            );
+          })}
 
-          {/* Indicador de digitando */}
+          {/* INDICADOR DE “DIGITANDO…” */}
           {loading && (
-            <div
-              style={{
-                marginBottom: 12,
-                padding: "8px 12px",
-                borderRadius: "12px",
-                backgroundColor: theme.assistantBubble,
-                maxWidth: "60%",
-                alignSelf: "flex-start",
-                display: "inline-flex",
-                gap: 4
-              }}
-            >
-              <span style={{ fontSize: 12, color: theme.text, opacity: 0.7, fontWeight: "bold", marginRight: 6 }}>
-                BEPIT
-              </span>
-              <span className="dots" style={{ display: "inline-flex", gap: 4 }}>
-                <span style={{ width: 6, height: 6, borderRadius: 6, background: theme.text, opacity: 0.35, animation: "blink 1s infinite" }} />
-                <span style={{ width: 6, height: 6, borderRadius: 6, background: theme.text, opacity: 0.35, animation: "blink 1s infinite 0.2s" }} />
-                <span style={{ width: 6, height: 6, borderRadius: 6, background: theme.text, opacity: 0.35, animation: "blink 1s infinite 0.4s" }} />
-              </span>
+            <div style={{ display: "flex", justifyContent: "flex-start" }}>
+              <div
+                style={{
+                  backgroundColor: assistantBubbleBg,
+                  border: `1px solid ${assistantBorder}`,
+                  color: theme.text,
+                  maxWidth: "60%",
+                  borderRadius: 16,
+                  padding: "10px 14px",
+                  boxShadow: "0 1px 2px rgba(0,0,0,0.06)",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    opacity: 0.8,
+                    fontWeight: 600
+                  }}
+                >
+                  BEPIT
+                </span>
+                <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 6,
+                      background: theme.text,
+                      opacity: 0.35,
+                      animation: "bepitBlink 1s infinite"
+                    }}
+                  />
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 6,
+                      background: theme.text,
+                      opacity: 0.35,
+                      animation: "bepitBlink 1s infinite 0.2s"
+                    }}
+                  />
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 6,
+                      background: theme.text,
+                      opacity: 0.35,
+                      animation: "bepitBlink 1s infinite 0.4s"
+                    }}
+                  />
+                </span>
+              </div>
             </div>
           )}
 
+          {/* GALERIA DE FOTOS (se houver) */}
           {photos?.length > 0 && (
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-                gap: 8,
-                marginTop: 12
+                gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                gap: 10,
+                marginTop: 4
               }}
             >
               {photos.map((src, i) => (
@@ -214,15 +303,16 @@ export default function ChatPage({ theme, onToggleTheme }) {
                   rel="noreferrer"
                   style={{
                     display: "block",
-                    border: `1px solid ${theme.inputBg}`,
-                    borderRadius: 8,
-                    overflow: "hidden"
+                    border: `1px solid ${assistantBorder}`,
+                    borderRadius: 12,
+                    overflow: "hidden",
+                    background: "#000"
                   }}
                 >
                   <img
                     src={src}
                     alt={`foto-${i + 1}`}
-                    style={{ width: "100%", height: 120, objectFit: "cover", display: "block" }}
+                    style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }}
                   />
                 </a>
               ))}
@@ -231,44 +321,73 @@ export default function ChatPage({ theme, onToggleTheme }) {
         </div>
       </main>
 
-      <footer style={{ padding: 12, borderTop: `1px solid ${theme.inputBg}`, backgroundColor: theme.headerBg }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onEnterEnviar}
-            placeholder={`Pergunte sobre a ${formatSlug(regiaoSlug || "")}...`}
-            rows={2}
-            style={{
-              resize: "none",
-              padding: 10,
-              borderRadius: 8,
-              border: `1px solid ${theme.inputBg}`,
-              backgroundColor: theme.inputBg,
-              color: theme.text
-            }}
-          />
+      {/* FOOTER */}
+      <footer
+        style={{
+          padding: 14,
+          borderTop: `1px solid ${theme.inputBg}`,
+          backgroundColor: theme.headerBg
+        }}
+      >
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr auto",
+            gap: 10,
+            alignItems: "end"
+          }}
+        >
+          <div style={{ display: "grid", gap: 8 }}>
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onEnterEnviar}
+              placeholder={`Pergunte sobre a ${formatSlug(regiaoSlug || "")}...`}
+              rows={2}
+              style={{
+                resize: "none",
+                padding: 12,
+                borderRadius: 12,
+                border: `1px solid ${theme.inputBg}`,
+                backgroundColor: theme.inputBg,
+                color: theme.text,
+                fontFamily: "'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                fontSize: 15,
+                lineHeight: 1.5
+              }}
+            />
+            <div style={{ fontSize: 12, opacity: 0.6 }}>
+              Pressione <b>Enter</b> para enviar · <b>Shift + Enter</b> para nova linha
+            </div>
+          </div>
+
           <button
             onClick={() => enviarMensagem()}
             disabled={loading || !input.trim()}
             style={{
-              padding: "0 18px",
-              borderRadius: 8,
+              padding: "12px 18px",
+              borderRadius: 12,
               border: "none",
-              background: loading ? "#555" : "#007aff",
+              background: loading ? "#657786" : "#0b74de",
               color: "#fff",
               cursor: loading ? "not-allowed" : "pointer",
-              fontWeight: 600
+              fontWeight: 600,
+              minWidth: 120,
+              boxShadow: loading ? "none" : "0 6px 12px rgba(11,116,222,0.25)",
+              transition: "transform 0.06s ease"
             }}
+            onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.98)")}
+            onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+            onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
           >
-            {loading ? "..." : "Enviar"}
+            {loading ? "Enviando…" : "Enviar"}
           </button>
         </div>
       </footer>
 
-      {/* CSS do efeito blink */}
+      {/* ANIMAÇÃO do indicador */}
       <style>{`
-        @keyframes blink {
+        @keyframes bepitBlink {
           0% { opacity: 0.2; transform: translateY(0); }
           50% { opacity: 0.8; transform: translateY(-2px); }
           100% { opacity: 0.2; transform: translateY(0); }
