@@ -201,6 +201,7 @@ function obterCoordenadasPorCidadeOuTexto(texto, listaDeCidades) {
   return null;
 }
 
+// Histórico da conversa: monta conteúdo no formato esperado pelo Gemini
 async function construirHistoricoParaGemini(idDaConversa, limiteDeTrocas = 12) {
   try {
     const { data, error } = await supabase
@@ -228,6 +229,7 @@ async function construirHistoricoParaGemini(idDaConversa, limiteDeTrocas = 12) {
   }
 }
 
+// Converte o histórico "contents" para um texto simples (usado nos prompts)
 function historicoParaTextoSimples(historicoContents) {
   try {
     return (historicoContents || [])
@@ -353,7 +355,7 @@ async function ferramentaDefinirPreferenciaDeIndicacao({ idDaConversa, argumento
 }
 
 // ============================================================================
-// HEALTHCHECKS
+// DIAGNÓSTICOS E HEALTHCHECKS
 // ============================================================================
 aplicacaoExpress.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) });
@@ -373,9 +375,6 @@ aplicacaoExpress.get("/api/health/db", async (_req, res) => {
   }
 });
 
-// ============================================================================
-// DIAGNÓSTICOS
-// ============================================================================
 aplicacaoExpress.get("/api/diag/gemini", async (_req, res) => {
   try {
     if (!usarGeminiREST) {
@@ -475,20 +474,6 @@ Frase: "${texto}"`;
     return { category, city, terms };
   } catch {
     return { category: null, city: null, terms: [] };
-  }
-}
-
-function historicoParaTextoSimples(historicoContents) {
-  try {
-    return (historicoContents || [])
-      .map(bloco => {
-        const role = bloco?.role || "user";
-        const text = (bloco?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
-        return `- ${role}: ${text}`;
-      })
-      .join("\n");
-  } catch {
-    return "";
   }
 }
 
@@ -985,176 +970,6 @@ aplicacaoExpress.post("/api/admin/cidades", exigirChaveDeAdministrador, async (r
   } catch (erro) {
     console.error("[/api/admin/cidades] Erro:", erro);
     resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-
-aplicacaoExpress.get("/api/admin/metrics/summary", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const { regiaoSlug, cidadeSlug } = requisicao.query;
-    if (!regiaoSlug) return resposta.status(400).json({ error: "O parâmetro 'regiaoSlug' é obrigatório." });
-
-    const { data: regiao, error: erroReg } = await supabase
-      .from("regioes")
-      .select("id, nome, slug")
-      .eq("slug", regiaoSlug)
-      .single();
-    if (erroReg || !regiao) return resposta.status(404).json({ error: "Região não encontrada." });
-
-    const { data: cidades, error: erroCid } = await supabase
-      .from("cidades")
-      .select("id, nome, slug")
-      .eq("regiao_id", regiao.id);
-    if (erroCid) return resposta.status(500).json({ error: "Erro ao carregar cidades." });
-
-    let cidade = null;
-    let listaDeIdsDeCidades = (cidades || []).map((c) => c.id);
-    if (cidadeSlug) {
-      cidade = (cidades || []).find((c) => c.slug === cidadeSlug) || null;
-      if (!cidade) return resposta.status(404).json({ error: "Cidade não encontrada nesta região." });
-      listaDeIdsDeCidades = [cidade.id];
-    }
-
-    const { data: parceirosAtivos, error: erroParc } = await supabase
-      .from("parceiros")
-      .select("id")
-      .eq("ativo", true)
-      .in("cidade_id", listaDeIdsDeCidades);
-    if (erroParc) return resposta.status(500).json({ error: "Erro ao contar parceiros." });
-
-    const { data: buscas, error: erroBus } = await supabase
-      .from("buscas_texto")
-      .select("id, cidade_id, regiao_id")
-      .eq("regiao_id", regiao.id);
-    if (erroBus) return resposta.status(500).json({ error: "Erro ao contar buscas." });
-    const totalDeBuscas = (buscas || []).filter((b) => (cidade ? b.cidade_id === cidade.id : true)).length;
-
-    const { data: interacoes, error: erroInt } = await supabase
-      .from("interacoes")
-      .select("id, regiao_id")
-      .eq("regiao_id", regiao.id);
-    if (erroInt) return resposta.status(500).json({ error: "Erro ao contar interações." });
-    const totalDeInteracoes = (interacoes || []).length;
-
-    const { data: registrosDeViews, error: erroViews } = await supabase
-      .from("parceiro_views")
-      .select("parceiro_id, views_total, last_view_at")
-      .order("views_total", { ascending: false })
-      .limit(50);
-    if (erroViews) return resposta.status(500).json({ error: "Erro ao ler views." });
-
-    const listaDeIdsDeParceiros = Array.from(new Set((registrosDeViews || []).map((v) => v.parceiro_id)));
-    const { data: informacoesDosParceiros } = await supabase
-      .from("parceiros")
-      .select("id, nome, categoria, cidade_id")
-      .in("id", listaDeIdsDeParceiros);
-
-    const mapaParceiroPorId = new Map((informacoesDosParceiros || []).map((p) => [p.id, p]));
-    const topCincoPorViews = (registrosDeViews || [])
-      .filter((reg) => {
-        const info = mapaParceiroPorId.get(reg.parceiro_id);
-        if (!info) return false;
-        const cidadesOk = cidade ? info.cidade_id === cidade.id : listaDeIdsDeCidades.includes(info.cidade_id);
-        return cidadesOk;
-      })
-      .slice(0, 5)
-      .map((reg) => {
-        const info = mapaParceiroPorId.get(reg.parceiro_id);
-        return {
-          parceiro_id: reg.parceiro_id,
-          nome: info?.nome || "—",
-          categoria: info?.categoria || "—",
-          views_total: reg.views_total,
-          last_view_at: reg.last_view_at
-        };
-      });
-
-    return resposta.json({
-      regiao: { id: regiao.id, nome: regiao.nome, slug: regiao.slug },
-      cidade: cidade ? { id: cidade.id, nome: cidade.nome, slug: cidade.slug } : null,
-      total_parceiros_ativos: (parceirosAtivos || []).length,
-      total_buscas: totalDeBuscas,
-      total_interacoes: totalDeInteracoes,
-      top5_parceiros_por_views: topCincoPorViews
-    });
-  } catch (erro) {
-    console.error("[/api/admin/metrics/summary] Erro:", erro);
-    resposta.status(500).json({ error: "Erro interno." });
-  }
-});
-
-aplicacaoExpress.get("/api/admin/logs", exigirChaveDeAdministrador, async (requisicao, resposta) => {
-  try {
-    const {
-      tipo,
-      regiaoSlug,
-      cidadeSlug,
-      parceiroId,
-      conversationId,
-      since,
-      until,
-      limit
-    } = requisicao.query;
-
-    let limite = Number(limit || 50);
-    if (!Number.isFinite(limite) || limite <= 0) limite = 50;
-    if (limite > 200) limite = 200;
-
-    let regiaoId = null;
-    let cidadeId = null;
-
-    if (regiaoSlug) {
-      const { data: regiao, error: erroReg } = await supabase
-        .from("regioes")
-        .select("id, slug")
-        .eq("slug", String(regiaoSlug))
-        .single();
-      if (erroReg) {
-        console.error("[/api/admin/logs] Erro ao buscar região:", erroReg);
-        return resposta.status(500).json({ error: "Erro ao buscar região." });
-      }
-      if (!regiao) return resposta.status(404).json({ error: "Região não encontrada." });
-      regiaoId = regiao.id;
-    }
-
-    if (cidadeSlug && regiaoId) {
-      const { data: cidade, error: erroCid } = await supabase
-        .from("cidades")
-        .select("id, slug, regiao_id")
-        .eq("slug", String(cidadeSlug))
-        .eq("regiao_id", regiaoId)
-        .single();
-      if (erroCid) {
-        console.error("[/api/admin/logs] Erro ao buscar cidade:", erroCid);
-        return resposta.status(500).json({ error: "Erro ao buscar cidade." });
-      }
-      if (!cidade) return resposta.status(404).json({ error: "Cidade não encontrada nesta região." });
-      cidadeId = cidade.id;
-    }
-
-    let consulta = supabase
-      .from("eventos_analytics")
-      .select("id, created_at, regiao_id, cidade_id, parceiro_id, conversation_id, tipo_evento, payload")
-      .order("created_at", { ascending: false })
-      .limit(limite);
-
-    if (tipo) consulta = consulta.eq("tipo_evento", String(tipo));
-    if (regiaoId) consulta = consulta.eq("regiao_id", regiaoId);
-    if (cidadeId) consulta = consulta.eq("cidade_id", cidadeId);
-    if (parceiroId) consulta = consulta.eq("parceiro_id", String(parceiroId));
-    if (conversationId) consulta = consulta.eq("conversation_id", String(conversationId));
-    if (since) consulta = consulta.gte("created_at", String(since));
-    if (until) consulta = consulta.lte("created_at", String(until));
-
-    const { data, error } = await consulta;
-    if (error) {
-      console.error("[/api/admin/logs] Erro Supabase:", error);
-      return resposta.status(500).json({ error: "Erro ao consultar logs." });
-    }
-
-    return resposta.json({ data });
-  } catch (erro) {
-    console.error("[/api/admin/logs] Erro inesperado:", erro);
-    return resposta.status(500).json({ error: "Erro interno." });
   }
 });
 
