@@ -1,7 +1,8 @@
 // ============================================================================
-// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.4 (REST Gemini)
-// - Anti-alucinação: respostas SEMPRE limitadas ao que vem do banco (guardrails)
+// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.5 (REST Gemini)
+// - Anti-alucinação e priorização de parceiros
 // - Novas intenções: planejamento_viagem (1-20 dias) e pedido_beneficio
+// - DIFERENCIAÇÃO GASTRONOMIA x PASSEIO: perguntas sobre comer => só restaurantes/bars/etc.
 // - Admin completo: POST/GET/PUT parceiros, regiões, cidades, métricas e logs
 // ============================================================================
 
@@ -225,10 +226,52 @@ function historicoParaTextoSimples(historicoContents) {
 }
 
 // ============================================================================
+// *** DIFERENCIAÇÃO GASTRONOMIA x PASSEIO ***
+// ============================================================================
+
+const FOOD_KEYWORDS = [
+  "comer", "almoçar", "almocar", "jantar", "almoço", "almoco", "peixe", "picanha",
+  "rodizio", "rodízio", "pizza", "sushi", "japa", "massas", "hamburger", "hamburguer",
+  "restaurante", "onde almoçar", "onde jantar", "onde comer", "onde almocar"
+];
+
+const FOOD_CATEGORIES = [
+  "restaurante", "restaurantes", "pizzaria", "churrascaria", "peixaria", "sushi",
+  "japonês", "japones", "bistrô", "bistro", "hamburgueria", "gastronomia",
+  "massas", "italiano", "frutos do mar", "mariscos", "rodízio", "rodizio", "churras"
+];
+
+const TOUR_KEYWORDS = [
+  "praia", "trilha", "passeio", "ilha", "boat", "lancha", "gruta", "mirante", "mergulho"
+];
+
+function isFoodQuery(text) {
+  const s = normalizarTexto(text || "");
+  return FOOD_KEYWORDS.some(k => s.includes(normalizarTexto(k)));
+}
+
+function isTourQuery(text) {
+  const s = normalizarTexto(text || "");
+  return TOUR_KEYWORDS.some(k => s.includes(normalizarTexto(k)));
+}
+
+function isFoodCategory(cat) {
+  const c = normalizarTexto(cat || "");
+  if (!c) return false;
+  return FOOD_CATEGORIES.some(k => c.includes(normalizarTexto(k)));
+}
+
+function isTourCategory(cat) {
+  const c = normalizarTexto(cat || "");
+  if (!c) return false;
+  return ["praia", "trilha", "passeio", "mergulho", "boat", "lancha", "gruta", "ilha"].some(k => c.includes(k));
+}
+
+// ============================================================================
 // FERRAMENTAS (busca parceiros; distancia; preferências)
 // ============================================================================
 
-async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta }) {
+async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, strictFoodMode = false }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
   const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
@@ -254,6 +297,7 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   if (error) throw error;
   let itens = Array.isArray(registrosBase) ? registrosBase : [];
 
+  // Filtro semântico por termos
   if (listaDeTermos.length > 0) {
     const termosNormalizados = listaDeTermos.map((termo) => normalizarTexto(termo));
     itens = itens.filter((parc) => {
@@ -264,6 +308,18 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     });
   }
 
+  // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+  // FILTRO ESTRITO DE GASTRONOMIA: quando é pergunta de comida, removemos
+  // tudo que não for categoria de alimentação e também removemos DICA.
+  // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+  if (strictFoodMode) {
+    itens = itens.filter(p =>
+      p.tipo !== "DICA" &&
+      isFoodCategory(p.categoria || "")
+    );
+  }
+
+  // Ordena priorizando PARCEIRO sobre DICA
   itens.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
   const itensLimitados = itens.slice(0, 20); // aumenta para roteiros
 
@@ -482,7 +538,8 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
     "Responda baseando-se EXCLUSIVAMENTE no [Contexto] de parceiros cadastrados (nomes, endereço, descrição, benefício).",
     "Se o usuário perguntar por 'benefício/desconto', mencione somente o que existir no campo 'beneficio_bepit'. Se não houver, deixe claro que no momento não há benefício cadastrado.",
     "Não invente nomes, endereços ou promoções. Não use linguagem de parceria/venda; use tom de 'indicação'.",
-    "Se a pergunta comparar ('todos servem peixe?'), analise cada item e responda objetivamente, evitando repetir a lista inteira sem análise.",
+    "SE a pergunta for sobre COMER/ALMOÇAR/JANTAR, liste APENAS itens de gastronomia (restaurantes, pizzarias, churrascarias, sushi etc.). NUNCA liste praias, trilhas, passeios ou 'DICA' nesse caso.",
+    "Se a pergunta comparar ('todos servem peixe?'), analise cada item e responda objetivamente, sem repetir a lista inteira sem análise.",
     "",
     BEPIT_SYSTEM_PROMPT_APPENDIX,
     "",
@@ -542,9 +599,9 @@ function agruparParceiros(parceiros) {
       out.hospedagem.push(p);
     } else if (cat.includes("bar")) {
       out.bares.push(p);
-    } else if (cat.includes("rest")) {
+    } else if (cat.includes("rest") || cat.includes("pizz") || cat.includes("churr") || cat.includes("sushi") || cat.includes("hamburg")) {
       out.restaurantes.push(p);
-    } else if (cat.includes("passeio") || cat.includes("boat") || cat.includes("lancha") || cat.includes("trilha") || cat.includes("mergulho")) {
+    } else if (cat.includes("passeio") || cat.includes("boat") || cat.includes("lancha") || cat.includes("trilha") || cat.includes("mergulho") || cat.includes("praia")) {
       out.passeios.push(p);
     } else if (cat.includes("carro") || cat.includes("aluguel") || cat.includes("locadora")) {
       out.aluguel_carro.push(p);
@@ -625,9 +682,15 @@ async function gerarRoteiroViagem(pergunta, historicoContents, regiaoNome, dias,
 async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa }) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
 
+  // >>> heurística: se pergunta é de comida e não veio category, força "restaurante" e ativa strictFoodMode
+  const foodIntent = isFoodQuery(textoDoUsuario) && !isTourQuery(textoDoUsuario);
+  const categoryFinal = entidades.category || (foodIntent ? "restaurante" : "");
+  const strictFoodMode = foodIntent || isFoodCategory(entidades.category || "");
+
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
     cidadesAtivas,
-    argumentosDaFerramenta: entidades
+    argumentosDaFerramenta: { ...entidades, category: categoryFinal },
+    strictFoodMode
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
@@ -642,7 +705,7 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
     try {
       await supabase
         .from("conversas")
-        .update({ parceiros_sugeridos: parceirosSugeridos, parceiro_em_foco: null, topico_atual: entidades?.category || null })
+        .update({ parceiros_sugeridos: parceirosSugeridos, parceiro_em_foco: null, topico_atual: entidades?.category || (foodIntent ? "restaurante" : null) })
         .eq("id", idDaConversa);
     } catch {}
 
@@ -661,13 +724,17 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
 async function lidarComPedidoBeneficio({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa }) {
   const { city, category } = await extrairPedidoBeneficio(textoDoUsuario);
 
+  const foodIntent = isFoodQuery(textoDoUsuario) || isFoodCategory(category || "");
+  const categoryFinal = category || (foodIntent ? "restaurante" : "");
+
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
     cidadesAtivas,
-    argumentosDaFerramenta: { category: category || "", city: city || "", terms: [] }
+    argumentosDaFerramenta: { category: categoryFinal || "", city: city || "", terms: [] },
+    strictFoodMode: foodIntent
   });
 
   let parceiros = resultadoBusca?.items || [];
-  parceiros = filtrarParceirosComBeneficio(parceiros, { category });
+  parceiros = filtrarParceirosComBeneficio(parceiros, { category: categoryFinal || "" });
 
   const respostaModelo = await gerarRespostaComParceiros(
     textoDoUsuario,
@@ -1425,5 +1492,5 @@ app.get("/api/admin/logs", exigirChaveDeAdministrador, async (req, res) => {
 // ------------------------ INICIAR SERVIDOR ----------------------------------
 
 app.listen(PORT, () => {
-  console.log(`✅ BEPIT Nexus (Orquestrador v3.4 REST) rodando em http://localhost:${PORT}`);
+  console.log(`✅ BEPIT Nexus (Orquestrador v3.5 REST) rodando em http://localhost:${PORT}`);
 });
