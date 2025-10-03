@@ -1,145 +1,110 @@
-// backend-oficial/utils/bepitGuardrails.js
+// backend-oficial/server/utils/bepitGuardrails.js
 // ============================================================================
-// BEPIT Guardrails - Travas de veracidade e pós-processamento de respostas
-// Objetivo: impedir promoções e endereços inventados quando não houver parceiro
-// cadastrado no banco. NÃO altera sua arquitetura — é utilitário puro.
+// Guardrails do BEPIT — sanitização e pós-processamento das respostas do modelo
+// - Proíbe termos de "parceria/benefício/convênio" e promoções inventadas
+// - Não cria endereço quando não existe no banco
+// - Remove cabeçalhos genéricos e numeração "1- 2- ..." que o modelo inventa
+// - Reescreve a resposta com base somente nos parceiros encontrados (quando houver)
 // ============================================================================
 
+function limparPromocoesETermosProibidos(text) {
+  if (!text) return "";
+  let t = String(text);
+
+  // Remoção de promessas de promoção/benefício e linguagem de parceria
+  const padroesBanidos = [
+    /com\s+o\s+bepit[^,.!?]*?(desconto|brinde|benef[ií]cio|cortesia)/gi,
+    /(desconto|brinde|benef[ií]cio|cortesia)\s+(exclusivo|especial)/gi,
+    /(parceria|parceiro\s+oficial|conv[eê]nio)/gi,
+    /(ganha|ganhar[aã]?)\s+(uma|um)\s+(por[cç][aã]o|brinde|cortesia)/gi,
+    /na compra de[^,.!?]+/gi
+  ];
+  padroesBanidos.forEach((rx) => (t = t.replace(rx, "")));
+
+  // Trocar "parceiro" por "indicação" (tom neutro)
+  t = t.replace(/\bparceir[oa]s?\b/gi, "indicação");
+  t = t.replace(/\bparceria\b/gi, "indicação");
+
+  // Remover duplicações de espaços e pontuação
+  t = t.replace(/[ \t]+/g, " ").replace(/\s+\n/g, "\n").trim();
+
+  return t;
+}
+
+function removerNumeracaoEHeadersGenericos(text) {
+  if (!text) return "";
+  let t = String(text);
+
+  // Remove cabeçalhos genéricos que o modelo insiste em criar
+  t = t.replace(/^#+\s*\*?\s*op[cç][aã]o\s+de\s+estabelecimento\s*\*?$/gim, "");
+  t = t.replace(/^#+\s*(dicas?|sugest[oõ]es?)\s*$/gim, "");
+
+  // Remove numeração forçada "1- Nome", "2 - Nome", "**1- Nome**"
+  t = t
+    .replace(/^\s*\*?\*?\s*\d{1,2}\s*[-.)]\s*/gim, "• ")
+    .replace(/^\s*\d{1,2}\s*[°º]\s*/gim, "• ");
+
+  // Colapsar múltiplas linhas vazias
+  t = t.replace(/\n{3,}/g, "\n\n").trim();
+  return t;
+}
+
+function montarListaSeguraDeParceiros(foundPartnersList) {
+  const arr = Array.isArray(foundPartnersList) ? foundPartnersList : [];
+  if (!arr.length) return "";
+
+  const linhas = arr.map((p) => {
+    const nome = p?.nome ? `**${p.nome}**` : "Indicação";
+    const cat = p?.categoria ? ` · ${p.categoria}` : "";
+    const desc = p?.descricao ? ` — ${p.descricao}` : "";
+    const end = p?.endereco ? `\n   • Endereço: ${p.endereco}` : "";
+    const contato = p?.contato ? `\n   • Contato: ${p.contato}` : "";
+    const preco = p?.faixa_preco ? `\n   • Faixa de preço: ${p.faixa_preco}` : "";
+    const beneficio = ""; // nunca incluir benefício para não induzir promo inventada
+    return `• ${nome}${cat}${desc}${end}${contato}${preco}${beneficio}`;
+  });
+
+  return linhas.join("\n");
+}
+
 /**
- * Texto de regras para anexar ao seu prompt do sistema (opcional, mas recomendado).
- * Você pode simplesmente concatenar este texto ao final do seu prompt atual.
+ * Pós-processa a resposta do modelo garantindo:
+ * - Modo "partners": reescreve com base SÓ na lista de parceiros encontrada
+ * - Modo "general": mantém o texto, mas limpa termos proibidos e numeração
+ */
+export function finalizeAssistantResponse({ modelResponseText, foundPartnersList, mode }) {
+  const safeList = Array.isArray(foundPartnersList) ? foundPartnersList : [];
+  const base = String(modelResponseText || "");
+
+  if (mode === "partners" && safeList.length > 0) {
+    const bloco = montarListaSeguraDeParceiros(safeList);
+    // Mensagem curta e objetiva, sem prometer benefícios e sem inventar endereço
+    let resposta = `Aqui vão algumas **indicações confiáveis**:\n\n${bloco}\n\nSe quiser, eu te ajudo a escolher conforme seu estilo (família, casal, orçamento, etc.).`;
+    resposta = limparPromocoesETermosProibidos(resposta);
+    resposta = removerNumeracaoEHeadersGenericos(resposta);
+    return resposta;
+  }
+
+  // Modo general: preservar a fala do modelo, mas sanear
+  let texto = limparPromocoesETermosProibidos(base);
+  texto = removerNumeracaoEHeadersGenericos(texto);
+  return texto;
+}
+
+/**
+ * Quando não houver parceiros, retornar um fallback neutro e honesto.
+ */
+export function buildNoPartnerFallback() {
+  return "Ainda não tenho indicações cadastradas para esse pedido específico. Posso sugerir regiões e tipos de lugares populares e, se quiser, posso cadastrar novas indicações assim que você me disser seu estilo (ex.: mais econômico, familiar, perto da praia).";
+}
+
+/**
+ * Instruções auxiliares que reforçam a política dentro do prompt.
  */
 export const BEPIT_SYSTEM_PROMPT_APPENDIX = `
-REGRAS DE VERACIDADE (OBRIGATÓRIAS)
-1) Parceiros e benefícios: só cite nome, endereço e benefícios que existam no meu banco (tabelas: partners, deals). Se não houver registro, responda SEM mencionar endereço específico, SEM citar promoção/desconto e SEM inventar condições.
-2) Proibições: é proibido inventar “10% de desconto”, “cortesia”, endereço, telefone ou horário que não existam no meu banco.
-3) Quando não houver parceiro na categoria/cidade: ofereça ajuda para “procurar opções públicas” de forma genérica, SEM nomes e SEM endereços, ou sugira categorias (“pizzaria no centro / no canal”) sem citar locais concretos.
-4) Em caso de dúvida: responda “Não tenho isso cadastrado ainda. Posso buscar opções públicas?”.
-5) Nunca afirme parcerias, filiações, cupons ou condições comerciais sem ID de parceiro e ID de benefício do meu banco.
-`;
-
-/**
- * Constrói um texto padrão quando não houver parceiros cadastrados
- * para a categoria e a cidade informadas.
- */
-export function buildNoPartnerFallback(category, city) {
-  const safeCategory = (category || "a categoria escolhida").toString();
-  const safeCity = (city || "sua cidade").toString();
-
-  return (
-    `Para ${safeCategory} em ${safeCity}, ainda não tenho parceiros cadastrados.\n` +
-    `Posso te sugerir **opções públicas de forma genérica** (sem benefícios ou endereços) ` +
-    `ou, se preferir, posso **buscar e cadastrar parceiros confiáveis** para você aproveitar vantagens no BEPIT.`
-  );
-}
-
-/**
- * Remove ou neutraliza trechos de resposta do modelo que podem induzir a erro,
- * como promoções e endereços não respaldados pelo banco.
- *
- * @param {Object} params
- * @param {string} params.text - Texto de saída do modelo.
- * @param {Array<Object>} params.matchedPartners - Lista de parceiros realmente carregados do banco para esta resposta. Ex.: [{ id, name|nome, address|endereco, benefits|beneficio_bepit }]
- * @returns {string} Texto sanitizado, seguro para exibir ao usuário final.
- */
-export function sanitizeAssistantText({ text, matchedPartners = [] }) {
-  if (!text || typeof text !== "string") return text || "";
-
-  // Normaliza a lista de parceiros válidos desta resposta
-  const validPartnerNames = new Set(
-    matchedPartners
-      .map((partner) => {
-        if (partner && partner.nome) return partner.nome.toLowerCase().trim();
-        if (partner && partner.name) return partner.name.toLowerCase().trim();
-        return "";
-      })
-      .filter(Boolean)
-  );
-
-  const partnersHaveBenefits =
-    matchedPartners.some((partner) => {
-      const benefits = partner?.benefits ?? partner?.beneficio_bepit ?? null;
-      if (Array.isArray(benefits)) return benefits.length > 0;
-      if (typeof benefits === "string") return benefits.trim().length > 0;
-      return false;
-    }) || false;
-
-  // Padrões básicos (endereços e promoções)
-  const addressPattern = /\b(rua|r\.|av\.?|avenida|estrada|rod\.|praça|pc\.|travessa|tv\.)\s+[^\n,]+(\d{1,6})?/i;
-  const promoPattern = /\b(\d{1,2}\s?%|por cento|cortesia|grátis|gratuito|free|cupom|desconto)\b/gi;
-
-  // 1) Se há termos de benefício na resposta e NÃO há benefícios no banco, eliminamos trechos de promoção
-  if (promoPattern.test(text) && !partnersHaveBenefits) {
-    text = text.replace(promoPattern, "").replace(/\s{2,}/g, " ");
-    // Remove frases curtas que podem ficar soltas depois da remoção
-    text = text.replace(/\b(de\s+(desconto|cortesia|gratuito|grátis|free))\b/gi, "").trim();
-  }
-
-  // 2) Remover linhas com endereços quando não houver parceiro válido associado
-  const lines = text.split("\n");
-  const sanitizedLines = [];
-  for (let index = 0; index < lines.length; index++) {
-    const currentLine = lines[index];
-    const previousLine = index > 0 ? lines[index - 1] : "";
-
-    const currentLooksLikeAddress = addressPattern.test(currentLine);
-    if (!currentLooksLikeAddress) {
-      sanitizedLines.push(currentLine);
-      continue;
-    }
-
-    // Tenta associar o endereço a um parceiro válido usando o nome destacado na linha atual ou anterior
-    const boldNameRegex = /(\*\*?)([^*\n]{3,80}?)(\*\*?)/; // **Nome** ou *Nome*
-    const currentNameMatch = currentLine.match(boldNameRegex);
-    const previousNameMatch = previousLine.match(boldNameRegex);
-
-    const currentName = currentNameMatch ? currentNameMatch[2].toLowerCase().trim() : "";
-    const previousName = previousNameMatch ? previousNameMatch[2].toLowerCase().trim() : "";
-
-    const isCurrentValid = currentName && validPartnerNames.has(currentName);
-    const isPreviousValid = previousName && validPartnerNames.has(previousName);
-
-    if (isCurrentValid || isPreviousValid) {
-      sanitizedLines.push(currentLine); // Endereço associado a parceiro validado — mantém
-    } else {
-      // Endereço sem parceiro validado — descarta a linha de endereço
-    }
-  }
-  let sanitizedText = sanitizedLines.join("\n");
-
-  // 3) Tornar genérico qualquer nome destacado que não esteja na lista de parceiros válidos
-  // Ex.: "**Pizzaria Forno D'Oro**" -> "**Opção de estabelecimento**" (se não for parceiro validado)
-  sanitizedText = sanitizedText.replace(
-    /(\*\*?)([^*\n]{3,80}?)(\*\*?)(?=\s*:|\s*\n|$)/g,
-    (fullMatch, openMark, capturedName, closeMark) => {
-      const normalized = (capturedName || "").toLowerCase().trim();
-      if (!normalized) return fullMatch;
-      if (validPartnerNames.has(normalized)) return fullMatch; // parceiro válido, mantém
-      return `${openMark}Opção de estabelecimento${closeMark}`;
-    }
-  );
-
-  // 4) Se ainda restarem termos de promoção sem respaldo, adiciona uma nota branda
-  if (/\b(\d{1,2}\s?%|por cento|cortesia|grátis|gratuito|free|cupom|desconto)\b/i.test(sanitizedText) && !partnersHaveBenefits) {
-    sanitizedText += `\n\n_Notas: benefícios específicos ainda não estão cadastrados para esta busca._`;
-  }
-
-  return sanitizedText;
-}
-
-/**
- * Função de alto nível para aplicar a sanitização e devolver o texto final.
- * Use esta função no seu handler de chat, passando a resposta do modelo e
- * a lista de parceiros realmente encontrados no banco.
- *
- * @param {Object} params
- * @param {string} params.modelResponseText - Texto bruto vindo do modelo.
- * @param {Array<Object>} params.foundPartnersList - Parceiros usados na resposta (vindos do seu banco).
- * @returns {string} Texto final pronto para retornar ao frontend.
- */
-export function finalizeAssistantResponse({ modelResponseText, foundPartnersList = [] }) {
-  return sanitizeAssistantText({
-    text: modelResponseText,
-    matchedPartners: Array.isArray(foundPartnersList) ? foundPartnersList : [],
-  });
-}
+- NÃO invente nomes de estabelecimentos, endereços, promoções, descontos ou “benefícios”.
+- NÃO use os termos “parceiro”, “parceria”, “benefício”, “convênio”, “desconto”, “cortesia”.
+- Use linguagem neutra: “indicação”, “opção”, “sugestão”.
+- Quando houver lista de estabelecimentos, use bullets “•” e evite “1-, 2-”.
+- Só mencione endereço/contato se vierem do contexto. Caso contrário, diga que não tenho o endereço cadastrado.
+`.trim();
