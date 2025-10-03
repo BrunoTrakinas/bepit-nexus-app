@@ -2,7 +2,6 @@
 // BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.3 (REST Gemini)
 // (arquivo completo, pronto para uso)
 // ============================================================================
-
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -36,7 +35,8 @@ function origemPermitida(origem) {
 
 aplicacaoExpress.use(
   cors({
-    origin: (origin, cb) => (origemPermitida(origin) ? cb(null, true) : cb(new Error("CORS: origem não permitida."))),
+    origin: (origin, cb) =>
+      origemPermitida(origin) ? cb(null, true) : cb(new Error("CORS: origem não permitida.")),
     credentials: true,
     allowedHeaders: ["Content-Type", "x-admin-key", "authorization"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
@@ -54,26 +54,34 @@ function stripModelsPrefix(id) {
 
 async function listarModelosREST() {
   if (!chaveGemini) throw new Error("[GEMINI REST] GEMINI_API_KEY não definida.");
-  const url = `https://generativelanguage.googleapis.com/v1/models?key=${encodeURIComponent(chaveGemini)}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models?key=${encodeURIComponent(
+    chaveGemini
+  )}`;
   const resp = await fetch(url, { method: "GET" });
   if (!resp.ok) {
     const texto = await resp.text().catch(() => "");
-    throw new Error(`[GEMINI REST] Falha ao listar modelos: ${resp.status} ${resp.statusText} ${texto}`);
+    throw new Error(
+      `[GEMINI REST] Falha ao listar modelos: ${resp.status} ${resp.statusText} ${texto}`
+    );
   }
   const json = await resp.json();
   const items = Array.isArray(json.models) ? json.models : [];
-  return items.map(m => String(m.name || "")).filter(Boolean);
+  return items.map((m) => String(m.name || "")).filter(Boolean);
 }
 
 async function selecionarModeloREST() {
-  const todosComPrefixo = await listarModelosREST(); // ["models/gemini-2.5-flash", ...]
-  const disponiveis = todosComPrefixo.map(stripModelsPrefix); // ["gemini-2.5-flash", ...]
+  const todosComPrefixo = await listarModelosREST();
+  const disponiveis = todosComPrefixo.map(stripModelsPrefix);
 
   const envModelo = (process.env.GEMINI_MODEL || "").trim();
   if (envModelo) {
     const alvo = stripModelsPrefix(envModelo);
     if (disponiveis.includes(alvo)) return alvo;
-    console.warn(`[GEMINI REST] GEMINI_MODEL "${envModelo}" indisponível. Disponíveis: ${disponiveis.join(", ")}`);
+    console.warn(
+      `[GEMINI REST] GEMINI_MODEL "${envModelo}" indisponível. Disponíveis: ${disponiveis.join(
+        ", "
+      )}`
+    );
   }
 
   const preferencia = [
@@ -89,7 +97,7 @@ async function selecionarModeloREST() {
 
   for (const alvo of preferencia) if (disponiveis.includes(alvo)) return alvo;
 
-  const qualquer = disponiveis.find(n => /^gemini-/.test(n));
+  const qualquer = disponiveis.find((n) => /^gemini-/.test(n));
   if (qualquer) return qualquer;
 
   throw new Error("[GEMINI REST] Não foi possível selecionar modelo.");
@@ -97,7 +105,9 @@ async function selecionarModeloREST() {
 
 async function gerarConteudoComREST(modelo, texto) {
   if (!chaveGemini) throw new Error("[GEMINI REST] GEMINI_API_KEY não definida.");
-  const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(modelo)}:generateContent?key=${encodeURIComponent(chaveGemini)}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(
+    modelo
+  )}:generateContent?key=${encodeURIComponent(chaveGemini)}`;
   const payload = { contents: [{ role: "user", parts: [{ text: String(texto || "") }] }] };
   const resp = await fetch(url, {
     method: "POST",
@@ -106,11 +116,13 @@ async function gerarConteudoComREST(modelo, texto) {
   });
   if (!resp.ok) {
     const texto = await resp.text().catch(() => "");
-    throw new Error(`[GEMINI REST] Falha no generateContent: ${resp.status} ${resp.statusText} ${texto}`);
+    throw new Error(
+      `[GEMINI REST] Falha no generateContent: ${resp.status} ${resp.statusText} ${texto}`
+    );
   }
   const json = await resp.json();
   const parts = json?.candidates?.[0]?.content?.parts;
-  const out = Array.isArray(parts) ? parts.map(p => p?.text || "").join("\n").trim() : "";
+  const out = Array.isArray(parts) ? parts.map((p) => p?.text || "").join("\n").trim() : "";
   return out || "";
 }
 
@@ -130,23 +142,31 @@ async function geminiGerarTexto(texto) {
 
 // ============================== HELPERS =====================================
 function normalizarTexto(texto) {
-  return String(texto || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  return String(texto || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
-function converterGrausParaRadianos(g) { return (g * Math.PI) / 180; }
+function converterGrausParaRadianos(g) {
+  return (g * Math.PI) / 180;
+}
 function calcularDistanciaHaversineEmKm(a, b) {
   const R = 6371;
   const dLat = converterGrausParaRadianos(b.lat - a.lat);
   const dLng = converterGrausParaRadianos(b.lng - a.lng);
   const lat1 = converterGrausParaRadianos(a.lat);
   const lat2 = converterGrausParaRadianos(b.lat);
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
 const coordenadasFallback = {
   "cabo frio": { lat: -22.8894, lng: -42.0286 },
   "arraial do cabo": { lat: -22.9661, lng: -42.0271 },
-  "buzios": { lat: -22.7469, lng: -41.8817 },
+  buzios: { lat: -22.7469, lng: -41.8817 },
   "búzios": { lat: -22.7469, lng: -41.8817 },
   "sao pedro da aldeia": { lat: -22.8427, lng: -42.1026 },
   "são pedro da aldeia": { lat: -22.8427, lng: -42.1026 }
@@ -154,7 +174,10 @@ const coordenadasFallback = {
 
 function obterCoordenadasPorCidadeOuTexto(texto, cidades) {
   const chave = normalizarTexto(texto);
-  const candidato = (cidades || []).find(c => normalizarTexto(c.nome) === chave || normalizarTexto(c.slug) === chave);
+  const candidato = (cidades || []).find(
+    (c) =>
+      normalizarTexto(c.nome) === chave || normalizarTexto(c.slug) === chave
+  );
   if (candidato && typeof candidato.lat === "number" && typeof candidato.lng === "number") {
     return { lat: candidato.lat, lng: candidato.lng, fonte: "db" };
   }
@@ -172,7 +195,6 @@ async function construirHistoricoParaGemini(conversationId, limite = 12) {
     if (error) throw error;
     const rows = data || [];
     const ultimas = rows.slice(-limite);
-
     const contents = [];
     for (const it of ultimas) {
       if (it.pergunta_usuario) contents.push({ role: "user", parts: [{ text: it.pergunta_usuario }] });
@@ -188,7 +210,7 @@ async function construirHistoricoParaGemini(conversationId, limite = 12) {
 function historicoParaTextoSimples(contents) {
   try {
     return (contents || [])
-      .map(b => {
+      .map((b) => {
         const role = b?.role || "user";
         const text = (b?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
         return `- ${role}: ${text}`;
@@ -199,24 +221,155 @@ function historicoParaTextoSimples(contents) {
   }
 }
 
+// ============================== INTENÇÃO CULINÁRIA (NOVO) ===================
+// Palavras-chave simples para filtrar parceiros por pedido culinário
+const KEYWORDS = {
+  peixe: ["peixe", "peixes", "frutos do mar", "moqueca", "tilapia", "salmão", "salmao", "bacalhau", "camarão", "camarao", "lula", "polvo"],
+  pizza: ["pizza", "pizzaria", "forno a lenha"],
+  churrasco: ["churrasco", "churrascaria", "picanha", "carnes"],
+  massa: ["massa", "massa fresca", "italiano", "macarrao", "macarrão", "gnocchi", "nhoque"],
+  vegetariano: ["veg", "vegetar", "vegano", "sem carne", "plant-based"]
+};
+
+// Categorias e tags que normalmente fazem sentido para “peixe”
+const CATS_FISH_LIKE = ["restaurante", "frutos do mar", "peixaria", "quiosque", "beira-mar", "mar", "praia", "bistrô", "bistro"];
+
+// Ajuda a detectar intenção rápida pelo texto do usuário
+function detectarPreferenciasCulinarias(texto) {
+  const t = normalizarTexto(texto);
+  const prefs = {};
+  for (const k of Object.keys(KEYWORDS)) {
+    prefs[k] = KEYWORDS[k].some((kw) => t.includes(normalizarTexto(kw)));
+  }
+  return prefs;
+}
+
+// Decide se um parceiro combina com “peixe”
+function parceiroCombinaComPeixe(p) {
+  const nome = normalizarTexto(p?.nome || "");
+  const cat = normalizarTexto(p?.categoria || "");
+  const desc = normalizarTexto(p?.descricao || "");
+  const tags = Array.isArray(p?.tags) ? p.tags.map((x) => normalizarTexto(String(x))) : [];
+
+  const hasFishWord =
+    KEYWORDS.peixe.some((kw) => nome.includes(normalizarTexto(kw)) || desc.includes(normalizarTexto(kw))) ||
+    tags.some((tg) => KEYWORDS.peixe.some((kw) => tg.includes(normalizarTexto(kw))));
+
+  const catLooksOk = CATS_FISH_LIKE.some((c) => cat.includes(c)) || cat.includes("mar") || cat.includes("sea");
+  // Excluir categorias obviamente fora (ex.: pizzaria) quando não há indício de peixe
+  const isObviamenteNao = cat.includes("pizzaria") || cat.includes("pizza") || cat.includes("churrasc") || cat.includes("barbearia") || cat.includes("praia") && !hasFishWord;
+
+  if (isObviamenteNao) return false;
+  if (hasFishWord) return true;
+  // Se a categoria parece plausível para peixe, aceitaremos quando não há sinal contrário
+  return catLooksOk;
+}
+
+// Refina lista conforme preferência detectada
+function refinarParceirosPorPreferencia(prefs, parceiros) {
+  if (!Array.isArray(parceiros) || parceiros.length === 0) return [];
+
+  // Prioridade: peixe > pizza > churrasco > massa > vegetariano (apenas 1 por vez, o primeiro detectado)
+  const ordem = ["peixe", "pizza", "churrasco", "massa", "vegetariano"];
+  const alvo = ordem.find((k) => prefs[k]);
+
+  if (!alvo) {
+    return parceiros;
+  }
+
+  if (alvo === "peixe") {
+    const filtrados = parceiros.filter((p) => parceiroCombinaComPeixe(p));
+    return filtrados.length > 0 ? filtrados : parceiros;
+  }
+
+  // Implementações simples para outros sabores (não estritas, só para não sugerir coisa nada a ver)
+  if (alvo === "pizza") {
+    const filtrados = parceiros.filter((p) => {
+      const cat = normalizarTexto(p?.categoria || "");
+      const nome = normalizarTexto(p?.nome || "");
+      const desc = normalizarTexto(p?.descricao || "");
+      return cat.includes("pizza") || nome.includes("pizza") || desc.includes("pizza");
+    });
+    return filtrados.length > 0 ? filtrados : parceiros;
+  }
+
+  if (alvo === "churrasco") {
+    const filtrados = parceiros.filter((p) => {
+      const cat = normalizarTexto(p?.categoria || "");
+      const nome = normalizarTexto(p?.nome || "");
+      const desc = normalizarTexto(p?.descricao || "");
+      return cat.includes("churras") || nome.includes("churrasc") || desc.includes("picanha") || desc.includes("carne");
+    });
+    return filtrados.length > 0 ? filtrados : parceiros;
+  }
+
+  if (alvo === "massa") {
+    const filtrados = parceiros.filter((p) => {
+      const cat = normalizarTexto(p?.categoria || "");
+      const desc = normalizarTexto(p?.descricao || "");
+      return cat.includes("italiano") || cat.includes("trattoria") || desc.includes("massa");
+    });
+    return filtrados.length > 0 ? filtrados : parceiros;
+  }
+
+  if (alvo === "vegetariano") {
+    const filtrados = parceiros.filter((p) => {
+      const desc = normalizarTexto(p?.descricao || "");
+      const tags = Array.isArray(p?.tags) ? p.tags.map((x) => normalizarTexto(String(x))) : [];
+      return desc.includes("veg") || tags.some((tg) => tg.includes("veg"));
+    });
+    return filtrados.length > 0 ? filtrados : parceiros;
+  }
+
+  return parceiros;
+}
+
+// Evita “itens que não são comida” quando a pergunta é claramente de comida
+function removerItensNaoGastronomicosSeForPerguntaDeComida(textoUsuario, parceiros) {
+  const t = normalizarTexto(textoUsuario);
+  const querComer =
+    t.includes("comer") ||
+    t.includes("jantar") ||
+    t.includes("almoçar") ||
+    t.includes("almocar") ||
+    t.includes("restaurante") ||
+    t.includes("peixe") ||
+    t.includes("pizza") ||
+    t.includes("churrasco") ||
+    t.includes("frutos do mar");
+
+  if (!querComer) return parceiros;
+
+  return (parceiros || []).filter((p) => {
+    const cat = normalizarTexto(p?.categoria || "");
+    // Exclui praia/passeio/loja etc. quando o usuário pediu restaurante
+    const categoriasNaoComida = ["praia", "passeio", "mergulho", "loja", "shopping", "moda"];
+    return !categoriasNaoComida.some((c) => cat.includes(c));
+  });
+}
+
 // ============================== FERRAMENTAS =================================
 async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
   const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
 
-  const cidadesValidas = (cidadesAtivas || []);
-  let idsCidade = cidadesValidas.map(c => c.id);
+  const cidadesValidas = cidadesAtivas || [];
+  let idsCidade = cidadesValidas.map((c) => c.id);
   if (cidadeProcurada) {
     const alvo = cidadesValidas.find(
-      c => normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) || normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
+      (c) =>
+        normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) ||
+        normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
     );
     if (alvo) idsCidade = [alvo.id];
   }
 
   let q = supabase
     .from("parceiros")
-    .select("id, tipo, nome, categoria, descricao, endereco, contato, beneficio_bepit, faixa_preco, fotos_parceiros, cidade_id, tags, ativo")
+    .select(
+      "id, tipo, nome, categoria, descricao, endereco, contato, beneficio_bepit, faixa_preco, fotos_parceiros, cidade_id, tags, ativo"
+    )
     .eq("ativo", true)
     .in("cidade_id", idsCidade);
 
@@ -228,22 +381,29 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   let itens = Array.isArray(base) ? base : [];
 
   if (listaDeTermos.length > 0) {
-    const termosNorm = listaDeTermos.map(t => normalizarTexto(t));
-    itens = itens.filter(p => {
+    const termosNorm = listaDeTermos.map((t) => normalizarTexto(t));
+    itens = itens.filter((p) => {
       const nomeN = normalizarTexto(p.nome);
       const catN = normalizarTexto(p.categoria || "");
-      const tags = Array.isArray(p.tags) ? p.tags.map(x => normalizarTexto(String(x))) : [];
-      return termosNorm.some(t => nomeN.includes(t) || catN.includes(t) || tags.includes(t));
+      const descN = normalizarTexto(p.descricao || "");
+      const tags = Array.isArray(p.tags) ? p.tags.map((x) => normalizarTexto(String(x))) : [];
+      return termosNorm.some(
+        (t) =>
+          nomeN.includes(t) ||
+          catN.includes(t) ||
+          descN.includes(t) ||
+          tags.includes(t)
+      );
     });
   }
 
   itens.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-  const limitados = itens.slice(0, 8);
+  const limitados = itens.slice(0, 12);
 
   return {
     ok: true,
     count: limitados.length,
-    items: limitados.map(p => ({
+    items: limitados.map((p) => ({
       id: p.id,
       tipo: p.tipo,
       nome: p.nome,
@@ -254,7 +414,8 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
       beneficio_bepit: p.beneficio_bepit,
       faixa_preco: p.faixa_preco,
       fotos_parceiros: Array.isArray(p.fotos_parceiros) ? p.fotos_parceiros : [],
-      cidade_id: p.cidade_id
+      cidade_id: p.cidade_id,
+      tags: Array.isArray(p.tags) ? p.tags : []
     }))
   };
 }
@@ -265,7 +426,9 @@ async function ferramentaObterRotaOuDistanciaAproximada({ argumentosDaFerramenta
   if (!origem || !destino) return { ok: false, error: "Os campos 'origin' e 'destination' são obrigatórios." };
 
   const coordO = obterCoordenadasPorCidadeOuTexto(origem, cidadesAtivas);
-  const coordD = obterCoordenadasPorCidadeOuTexto(destino, cidadesAtivas) || obterCoordenadasPorCidadeOuTexto("cabo frio", cidadesAtivas);
+  const coordD =
+    obterCoordenadasPorCidadeOuTexto(destino, cidadesAtivas) ||
+    obterCoordenadasPorCidadeOuTexto("cabo frio", cidadesAtivas);
   if (!coordO || !coordD) return { ok: false, error: "Coordenadas não disponíveis." };
 
   const kmLinha = calcularDistanciaHaversineEmKm(coordO, coordD);
@@ -288,12 +451,15 @@ async function ferramentaObterRotaOuDistanciaAproximada({ argumentosDaFerramenta
 
 async function ferramentaDefinirPreferenciaDeIndicacao({ idDaConversa, argumentosDaFerramenta }) {
   const preferencia = String(argumentosDaFerramenta?.preference || "").toLowerCase();
-  const topico = (argumentosDaFerramenta?.topic || null);
+  const topico = argumentosDaFerramenta?.topic || null;
   if (!["locais", "generico"].includes(preferencia)) {
     return { ok: false, error: "O campo 'preference' deve ser 'locais' ou 'generico'." };
   }
   try {
-    const { error } = await supabase.from("conversas").update({ preferencia_indicacao: preferencia, topico_atual: topico || null }).eq("id", idDaConversa);
+    const { error } = await supabase
+      .from("conversas")
+      .update({ preferencia_indicacao: preferencia, topico_atual: topico || null })
+      .eq("id", idDaConversa);
     if (error) throw error;
     return { ok: true, saved: { preference: preferencia, topic: topico || null } };
   } catch (erro) {
@@ -302,8 +468,12 @@ async function ferramentaDefinirPreferenciaDeIndicacao({ idDaConversa, argumento
 }
 
 // ============================== HEALTH/DIAG =================================
-aplicacaoExpress.get("/health", (_req, res) => res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) }));
-aplicacaoExpress.get("/api/health", (_req, res) => res.status(200).json({ ok: true, scope: "api", message: "BEPIT Nexus API ok", port: String(portaDoServidor) }));
+aplicacaoExpress.get("/health", (_req, res) =>
+  res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) })
+);
+aplicacaoExpress.get("/api/health", (_req, res) =>
+  res.status(200).json({ ok: true, scope: "api", message: "BEPIT Nexus API ok", port: String(portaDoServidor) })
+);
 
 aplicacaoExpress.get("/api/health/db", async (_req, res) => {
   try {
@@ -317,7 +487,8 @@ aplicacaoExpress.get("/api/health/db", async (_req, res) => {
 
 aplicacaoExpress.get("/api/diag/gemini", async (_req, res) => {
   try {
-    if (!usarGeminiREST) return res.status(200).json({ ok: false, modo: "SDK", info: "USE_GEMINI_REST não está ativo." });
+    if (!usarGeminiREST)
+      return res.status(200).json({ ok: false, modo: "SDK", info: "USE_GEMINI_REST não está ativo." });
     const modelos = await listarModelosREST();
     let escolhido = null;
     let ping = null;
@@ -340,7 +511,13 @@ async function analisarIntencaoDoUsuario(textoDoUsuario) {
 Frase: "${textoDoUsuario}"`;
   const saida = await geminiGerarTexto(prompt);
   const text = (saida || "").trim().toLowerCase();
-  const classes = new Set(["busca_parceiro", "follow_up_parceiro", "pergunta_geral", "mudanca_contexto", "small_talk"]);
+  const classes = new Set([
+    "busca_parceiro",
+    "follow_up_parceiro",
+    "pergunta_geral",
+    "mudanca_contexto",
+    "small_talk"
+  ]);
   return classes.has(text) ? text : "pergunta_geral";
 }
 
@@ -355,9 +532,17 @@ Frase: "${texto}"`;
   try {
     const bruto = await geminiGerarTexto(prompt);
     const parsed = JSON.parse(bruto);
-    const category = typeof parsed.category === "string" && parsed.category.trim() ? parsed.category.trim() : null;
-    const city = typeof parsed.city === "string" && parsed.city.trim() ? parsed.city.trim() : null;
-    const terms = Array.isArray(parsed.terms) ? parsed.terms.filter(t => typeof t === "string" && t.trim()).map(t => t.trim()) : [];
+    const category =
+      typeof parsed.category === "string" && parsed.category.trim()
+        ? parsed.category.trim()
+        : null;
+    const city =
+      typeof parsed.city === "string" && parsed.city.trim() ? parsed.city.trim() : null;
+    const terms = Array.isArray(parsed.terms)
+      ? parsed.terms
+          .filter((t) => typeof t === "string" && t.trim())
+          .map((t) => t.trim())
+      : [];
     return { category, city, terms };
   } catch {
     return { category: null, city: null, terms: [] };
@@ -367,10 +552,14 @@ Frase: "${texto}"`;
 async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
+
+  // Instruções adicionais para evitar repetição e responder comparativamente
   const prompt = [
     "Você é o BEPIT, um concierge especialista.",
     "Responda à pergunta do usuário baseando-se EXCLUSIVAMENTE no [Contexto] de parceiros cadastrados.",
-    "Evite linguagem de parceria/benefício — use tom neutro (indicação).",
+    "Não repita a lista completa se a pergunta for específica (ex.: 'todos servem peixe?'). Analise item a item e responda objetivamente: quais parecem servir peixe, quais não possuem sinal claro, e evite inventar dados.",
+    "Se não houver sinal claro nos campos de cada parceiro (categoria, tags, descrição), admita a incerteza e ofereça filtrar melhor.",
+    "Evite linguagem de parceria/benefício — use tom neutro de 'indicação'.",
     "",
     BEPIT_SYSTEM_PROMPT_APPENDIX,
     "",
@@ -379,6 +568,7 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
     `[Região]: ${regiaoNome}`,
     `[Pergunta]: "${pergunta}"`
   ].join("\n");
+
   return await geminiGerarTexto(prompt);
 }
 
@@ -405,10 +595,21 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
     const matchNumero = texto.match(/\b(\d{1,2})(?:º|o|a|\.|°)?\b/);
     if (matchNumero) {
       const idx = Number(matchNumero[1]);
-      if (Number.isFinite(idx) && idx >= 1 && idx <= listaDeParceiros.length) return listaDeParceiros[idx - 1];
+      if (Number.isFinite(idx) && idx >= 1 && idx <= listaDeParceiros.length)
+        return listaDeParceiros[idx - 1];
     }
 
-    const ordinais = ["primeiro", "segundo", "terceiro", "quarto", "quinto", "sexto", "sétimo", "setimo", "oitavo"];
+    const ordinais = [
+      "primeiro",
+      "segundo",
+      "terceiro",
+      "quarto",
+      "quinto",
+      "sexto",
+      "sétimo",
+      "setimo",
+      "oitavo"
+    ];
     for (let i = 0; i < ordinais.length; i++) {
       if (texto.includes(ordinais[i])) {
         const pos = i + 1;
@@ -420,7 +621,7 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
       const nome = normalizarTexto(p?.nome || "");
       if (nome && texto.includes(nome)) return p;
       const tokens = (nome || "").split(/\s+/).filter(Boolean);
-      const acertos = tokens.filter(t => texto.includes(t)).length;
+      const acertos = tokens.filter((t) => texto.includes(t)).length;
       if (acertos >= Math.max(1, Math.ceil(tokens.length * 0.6))) return p;
     }
     return null;
@@ -429,8 +630,15 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
   }
 }
 
-async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa }) {
+async function lidarComNovaBusca({
+  textoDoUsuario,
+  historicoGemini,
+  regiao,
+  cidadesAtivas,
+  idDaConversa
+}) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
+  const preferencias = detectarPreferenciasCulinarias(textoDoUsuario);
 
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
     cidadesAtivas,
@@ -438,25 +646,51 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
-    const parceirosSugeridos = resultadoBusca.items || [];
-    const respostaModelo = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, parceirosSugeridos, regiao?.nome);
+    let parceirosSugeridos = resultadoBusca.items || [];
+
+    // 1) Se pergunta é de comida, removemos itens não gastronômicos
+    parceirosSugeridos = removerItensNaoGastronomicosSeForPerguntaDeComida(
+      textoDoUsuario,
+      parceirosSugeridos
+    );
+
+    // 2) Refinamos conforme preferência (ex.: peixe)
+    const refinados = refinarParceirosPorPreferencia(preferencias, parceirosSugeridos);
+    const usandoRefino = refinados.length > 0 && refinados.length <= parceirosSugeridos.length;
+    parceirosSugeridos = refinados.length > 0 ? refinados : parceirosSugeridos;
+
+    // 3) Gera resposta segura
+    const respostaModelo = await gerarRespostaComParceiros(
+      textoDoUsuario,
+      historicoGemini,
+      parceirosSugeridos,
+      regiao?.nome
+    );
     const respostaFinal = finalizeAssistantResponse({
       modelResponseText: respostaModelo,
       foundPartnersList: parceirosSugeridos,
-      mode: "partners"
+      mode: "partners",
+      meta: { refined: usandoRefino }
     });
 
     try {
-      await supabase.from("conversas").update({
-        parceiros_sugeridos: parceirosSugeridos,
-        parceiro_em_foco: null,
-        topico_atual: entidades?.category || null
-      }).eq("id", idDaConversa);
+      await supabase
+        .from("conversas")
+        .update({
+          parceiros_sugeridos: parceirosSugeridos,
+          parceiro_em_foco: null,
+          topico_atual: entidades?.category || null
+        })
+        .eq("id", idDaConversa);
     } catch {}
 
     return { respostaFinal, parceirosSugeridos };
   } else {
-    const respostaModelo = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
+    const respostaModelo = await gerarRespostaGeral(
+      textoDoUsuario,
+      historicoGemini,
+      regiao
+    );
     const respostaFinal = finalizeAssistantResponse({
       modelResponseText: respostaModelo,
       foundPartnersList: [],
@@ -471,18 +705,32 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
     let { message: textoDoUsuario, conversationId } = req.body || {};
-    if (!textoDoUsuario || typeof textoDoUsuario !== "string" || !textoDoUsuario.trim()) {
-      return res.status(400).json({ error: "O campo 'message' é obrigatório e deve ser uma string não vazia." });
+    if (
+      !textoDoUsuario ||
+      typeof textoDoUsuario !== "string" ||
+      !textoDoUsuario.trim()
+    ) {
+      return res
+        .status(400)
+        .json({ error: "O campo 'message' é obrigatório e deve ser uma string não vazia." });
     }
     textoDoUsuario = textoDoUsuario.trim();
 
-    const { data: regiao, error: erroRegiao } = await supabase.from("regioes").select("id, nome, slug, ativo").eq("slug", slugDaRegiao).single();
+    const { data: regiao, error: erroRegiao } = await supabase
+      .from("regioes")
+      .select("id, nome, slug, ativo")
+      .eq("slug", slugDaRegiao)
+      .single();
     if (erroRegiao || !regiao) return res.status(404).json({ error: "Região não encontrada." });
     if (regiao.ativo === false) return res.status(403).json({ error: "Região desativada." });
 
-    const { data: cidades, error: erroCidades } = await supabase.from("cidades").select("id, nome, slug, lat, lng, ativo").eq("regiao_id", regiao.id);
-    if (erroCidades) return res.status(500).json({ error: "Erro ao carregar cidades.", internal: erroCidades });
-    const cidadesAtivas = (cidades || []).filter(c => c.ativo !== false);
+    const { data: cidades, error: erroCidades } = await supabase
+      .from("cidades")
+      .select("id, nome, slug, lat, lng, ativo")
+      .eq("regiao_id", regiao.id);
+    if (erroCidades)
+      return res.status(500).json({ error: "Erro ao carregar cidades.", internal: erroCidades });
+    const cidadesAtivas = (cidades || []).filter((c) => c.ativo !== false);
 
     if (!conversationId || typeof conversationId !== "string" || !conversationId.trim()) {
       conversationId = randomUUID();
@@ -515,14 +763,24 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const historicoGemini = await construirHistoricoParaGemini(conversationId, 12);
 
     // Seleção direta por "1º/2º" ou nome
-    const candidatos = Array.isArray(conversaAtual?.parceiros_sugeridos) ? conversaAtual.parceiros_sugeridos : [];
+    const candidatos = Array.isArray(conversaAtual?.parceiros_sugeridos)
+      ? conversaAtual.parceiros_sugeridos
+      : [];
     const parceiroSelecionado = encontrarParceiroNaLista(textoDoUsuario, candidatos);
     if (parceiroSelecionado) {
       try {
-        await supabase.from("conversas").update({ parceiro_em_foco: parceiroSelecionado, parceiros_sugeridos: candidatos }).eq("id", conversationId);
+        await supabase
+          .from("conversas")
+          .update({ parceiro_em_foco: parceiroSelecionado, parceiros_sugeridos: candidatos })
+          .eq("id", conversationId);
       } catch {}
 
-      const respostaModelo = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, [parceiroSelecionado], regiao?.nome);
+      const respostaModelo = await gerarRespostaComParceiros(
+        textoDoUsuario,
+        historicoGemini,
+        [parceiroSelecionado],
+        regiao?.nome
+      );
       const respostaCurtaSegura = finalizeAssistantResponse({
         modelResponseText: respostaModelo,
         foundPartnersList: [parceiroSelecionado],
@@ -547,7 +805,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         console.warn("[INTERACOES] Falha ao salvar (seleção):", e?.message || e);
       }
 
-      const fotos = [parceiroSelecionado].flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
+      const fotos = [parceiroSelecionado]
+        .flatMap((p) => p?.fotos_parceiros || [])
+        .filter(Boolean);
       return res.status(200).json({
         reply: respostaCurtaSegura,
         interactionId,
@@ -565,7 +825,13 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     switch (intent) {
       case "busca_parceiro": {
-        const r = await lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa: conversationId });
+        const r = await lidarComNovaBusca({
+          textoDoUsuario,
+          historicoGemini,
+          regiao,
+          cidadesAtivas,
+          idDaConversa: conversationId
+        });
         respostaFinal = r.respostaFinal;
         parceirosSugeridos = r.parceirosSugeridos;
         break;
@@ -573,11 +839,26 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       case "follow_up_parceiro": {
         const p = conversaAtual?.parceiro_em_foco || null;
         if (p) {
-          const respostaModelo = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, [p], regiao?.nome);
-          respostaFinal = finalizeAssistantResponse({ modelResponseText: respostaModelo, foundPartnersList: [p], mode: "partners" });
+          const respostaModelo = await gerarRespostaComParceiros(
+            textoDoUsuario,
+            historicoGemini,
+            [p],
+            regiao?.nome
+          );
+          respostaFinal = finalizeAssistantResponse({
+            modelResponseText: respostaModelo,
+            foundPartnersList: [p],
+            mode: "partners"
+          });
           parceirosSugeridos = [p];
         } else {
-          const r = await lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa: conversationId });
+          const r = await lidarComNovaBusca({
+            textoDoUsuario,
+            historicoGemini,
+            regiao,
+            cidadesAtivas,
+            idDaConversa: conversationId
+          });
           respostaFinal = r.respostaFinal;
           parceirosSugeridos = r.parceirosSugeridos;
         }
@@ -585,13 +866,27 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       }
       case "pergunta_geral":
       case "mudanca_contexto": {
-        const respostaModelo = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
-        respostaFinal = finalizeAssistantResponse({ modelResponseText: respostaModelo, foundPartnersList: [], mode: "general" });
-        try { await supabase.from("conversas").update({ parceiro_em_foco: null }).eq("id", conversationId); } catch {}
+        const respostaModelo = await gerarRespostaGeral(
+          textoDoUsuario,
+          historicoGemini,
+          regiao
+        );
+        respostaFinal = finalizeAssistantResponse({
+          modelResponseText: respostaModelo,
+          foundPartnersList: [],
+          mode: "general"
+        });
+        try {
+          await supabase
+            .from("conversas")
+            .update({ parceiro_em_foco: null })
+            .eq("id", conversationId);
+        } catch {}
         break;
       }
       case "small_talk": {
-        respostaFinal = "Olá! Sou o BEPIT, seu concierge na Região dos Lagos. O que você gostaria de fazer hoje?";
+        respostaFinal =
+          "Olá! Sou o BEPIT, seu concierge na Região dos Lagos. O que você gostaria de fazer hoje?";
         break;
       }
       default: {
@@ -601,7 +896,8 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     }
 
     if (!respostaFinal) {
-      respostaFinal = "Posso ajudar com roteiros, transporte, passeios, praias e onde comer. O que você gostaria de saber?";
+      respostaFinal =
+        "Posso ajudar com roteiros, transporte, passeios, praias e onde comer. O que você gostaria de saber?";
     }
 
     let interactionId = null;
@@ -623,7 +919,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       console.warn("[INTERACOES] Falha ao salvar:", e?.message || e);
     }
 
-    const fotos = (parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
+    const fotos = (parceirosSugeridos || [])
+      .flatMap((p) => p?.fotos_parceiros || [])
+      .filter(Boolean);
 
     return res.status(200).json({
       reply: respostaFinal,
@@ -635,7 +933,10 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     });
   } catch (erro) {
     console.error("[/api/chat/:slugDaRegiao] Erro:", erro);
-    return res.status(500).json({ error: "Erro interno no servidor do BEPIT.", internal: { message: String(erro?.message || erro) } });
+    return res.status(500).json({
+      error: "Erro interno no servidor do BEPIT.",
+      internal: { message: String(erro?.message || erro) }
+    });
   }
 });
 
@@ -643,13 +944,22 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 aplicacaoExpress.post("/api/feedback", async (req, res) => {
   try {
     const { interactionId, feedback } = req.body || {};
-    if (!interactionId || typeof interactionId !== "string") return res.status(400).json({ error: "interactionId é obrigatório (uuid)." });
-    if (!feedback || typeof feedback !== "string" || !feedback.trim()) return res.status(400).json({ error: "feedback é obrigatório (string não vazia)." });
+    if (!interactionId || typeof interactionId !== "string")
+      return res.status(400).json({ error: "interactionId é obrigatório (uuid)." });
+    if (!feedback || typeof feedback !== "string" || !feedback.trim())
+      return res.status(400).json({ error: "feedback é obrigatório (string não vazia)." });
 
-    const { error } = await supabase.from("interacoes").update({ feedback_usuario: feedback }).eq("id", interactionId);
+    const { error } = await supabase
+      .from("interacoes")
+      .update({ feedback_usuario: feedback })
+      .eq("id", interactionId);
     if (error) return res.status(500).json({ error: "Erro ao registrar feedback." });
 
-    try { await supabase.from("eventos_analytics").insert({ tipo_evento: "feedback", payload: { interactionId, feedback } }); } catch {}
+    try {
+      await supabase
+        .from("eventos_analytics")
+        .insert({ tipo_evento: "feedback", payload: { interactionId, feedback } });
+    } catch {}
     res.json({ success: true });
   } catch (erro) {
     console.error("[/api/feedback] Erro:", erro);
@@ -663,7 +973,8 @@ aplicacaoExpress.post("/api/auth/login", async (req, res) => {
     const { key } = req.body || {};
     if (!key || typeof key !== "string") return res.status(400).json({ error: "missing_key" });
     const ADMIN_API_KEY = process.env.ADMIN_API_KEY || "";
-    if (ADMIN_API_KEY && key === ADMIN_API_KEY) return res.status(200).json({ ok: true });
+    if (ADMIN_API_KEY && key === ADMIN_API_KEY)
+      return res.status(200).json({ ok: true });
     return res.status(401).json({ error: "invalid_key" });
   } catch (erro) {
     console.error("[/api/auth/login] Erro:", erro);
@@ -686,17 +997,27 @@ aplicacaoExpress.post("/api/admin/login", async (req, res) => {
 
 function exigirChaveDeAdministrador(req, res, next) {
   const chave = req.headers["x-admin-key"];
-  if (!chave || chave !== (process.env.ADMIN_API_KEY || "")) return res.status(401).json({ error: "Chave administrativa inválida ou ausente." });
+  if (!chave || chave !== (process.env.ADMIN_API_KEY || ""))
+    return res.status(401).json({ error: "Chave administrativa inválida ou ausente." });
   next();
 }
 
 aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async (req, res) => {
   try {
     const { regiaoSlug, cidadeSlug, ...rest } = req.body || {};
-    const { data: regiao, error: eReg } = await supabase.from("regioes").select("id").eq("slug", regiaoSlug).single();
+    const { data: regiao, error: eReg } = await supabase
+      .from("regioes")
+      .select("id")
+      .eq("slug", regiaoSlug)
+      .single();
     if (eReg || !regiao) return res.status(400).json({ error: "regiaoSlug inválido." });
 
-    const { data: cidade, error: eCid } = await supabase.from("cidades").select("id").eq("regiao_id", regiao.id).eq("slug", cidadeSlug).single();
+    const { data: cidade, error: eCid } = await supabase
+      .from("cidades")
+      .select("id")
+      .eq("regiao_id", regiao.id)
+      .eq("slug", cidadeSlug)
+      .single();
     if (eCid || !cidade) return res.status(400).json({ error: "cidadeSlug inválido." });
 
     const novo = {
@@ -711,11 +1032,19 @@ aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async 
       tags: Array.isArray(rest.tags) ? rest.tags : null,
       horario_funcionamento: rest.horario_funcionamento || null,
       faixa_preco: rest.faixa_preco || null,
-      fotos_parceiros: Array.isArray(rest.fotos_parceiros) ? rest.fotos_parceiros : (Array.isArray(rest.fotos) ? rest.fotos : null),
+      fotos_parceiros: Array.isArray(rest.fotos_parceiros)
+        ? rest.fotos_parceiros
+        : Array.isArray(rest.fotos)
+        ? rest.fotos
+        : null,
       ativo: rest.ativo !== false
     };
 
-    const { data, error } = await supabase.from("parceiros").insert(novo).select("*").single();
+    const { data, error } = await supabase
+      .from("parceiros")
+      .insert(novo)
+      .select("*")
+      .single();
     if (error) return res.status(500).json({ error: "Erro ao criar parceiro/dica." });
 
     return res.status(200).json({ ok: true, data });
@@ -725,31 +1054,55 @@ aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async 
   }
 });
 
-aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChaveDeAdministrador, async (req, res) => {
-  try {
-    const { regiaoSlug, cidadeSlug } = req.params;
-    const { data: regiao, error: eReg } = await supabase.from("regioes").select("id").eq("slug", regiaoSlug).single();
-    if (eReg || !regiao) return res.status(400).json({ error: "regiaoSlug inválido." });
+aplicacaoExpress.get(
+  "/api/admin/parceiros/:regiaoSlug/:cidadeSlug",
+  exigirChaveDeAdministrador,
+  async (req, res) => {
+    try {
+      const { regiaoSlug, cidadeSlug } = req.params;
+      const { data: regiao, error: eReg } = await supabase
+        .from("regioes")
+        .select("id")
+        .eq("slug", regiaoSlug)
+        .single();
+      if (eReg || !regiao) return res.status(400).json({ error: "regiaoSlug inválido." });
 
-    const { data: cidade, error: eCid } = await supabase.from("cidades").select("id").eq("regiao_id", regiao.id).eq("slug", cidadeSlug).single();
-    if (eCid || !cidade) return res.status(400).json({ error: "cidadeSlug inválido." });
+      const { data: cidade, error: eCid } = await supabase
+        .from("cidades")
+        .select("id")
+        .eq("regiao_id", regiao.id)
+        .eq("slug", cidadeSlug)
+        .single();
+      if (eCid || !cidade) return res.status(400).json({ error: "cidadeSlug inválido." });
 
-    const { data, error } = await supabase.from("parceiros").select("*").eq("cidade_id", cidade.id).order("nome");
-    if (error) return res.status(500).json({ error: "Erro ao listar parceiros/dicas." });
+      const { data, error } = await supabase
+        .from("parceiros")
+        .select("*")
+        .eq("cidade_id", cidade.id)
+        .order("nome");
+      if (error) return res.status(500).json({ error: "Erro ao listar parceiros/dicas." });
 
-    return res.status(200).json({ data });
-  } catch (erro) {
-    console.error("[/api/admin/parceiros list] Erro:", erro);
-    return res.status(500).json({ error: "Erro interno." });
+      return res.status(200).json({ data });
+    } catch (erro) {
+      console.error("[/api/admin/parceiros list] Erro:", erro);
+      return res.status(500).json({ error: "Erro interno." });
+    }
   }
-});
+);
 
 aplicacaoExpress.post("/api/admin/regioes", exigirChaveDeAdministrador, async (req, res) => {
   try {
     const { nome, slug, ativo = true } = req.body || {};
-    if (!nome || !slug) return res.status(400).json({ error: "Campos 'nome' e 'slug' são obrigatórios." });
+    if (!nome || !slug)
+      return res
+        .status(400)
+        .json({ error: "Campos 'nome' e 'slug' são obrigatórios." });
 
-    const { data, error } = await supabase.from("regioes").insert({ nome, slug, ativo: Boolean(ativo) }).select("*").single();
+    const { data, error } = await supabase
+      .from("regioes")
+      .insert({ nome, slug, ativo: Boolean(ativo) })
+      .select("*")
+      .single();
     if (error) return res.status(500).json({ error: "Erro ao criar região." });
 
     res.json({ ok: true, data });
@@ -762,14 +1115,28 @@ aplicacaoExpress.post("/api/admin/regioes", exigirChaveDeAdministrador, async (r
 aplicacaoExpress.post("/api/admin/cidades", exigirChaveDeAdministrador, async (req, res) => {
   try {
     const { regiaoSlug, nome, slug, ativo = true, lat = null, lng = null } = req.body || {};
-    if (!regiaoSlug || !nome || !slug) return res.status(400).json({ error: "Campos 'regiaoSlug', 'nome' e 'slug' são obrigatórios." });
+    if (!regiaoSlug || !nome || !slug)
+      return res
+        .status(400)
+        .json({ error: "Campos 'regiaoSlug', 'nome' e 'slug' são obrigatórios." });
 
-    const { data: regiao, error: eReg } = await supabase.from("regioes").select("id").eq("slug", regiaoSlug).single();
+    const { data: regiao, error: eReg } = await supabase
+      .from("regioes")
+      .select("id")
+      .eq("slug", regiaoSlug)
+      .single();
     if (eReg || !regiao) return res.status(400).json({ error: "regiaoSlug inválido." });
 
     const { data, error } = await supabase
       .from("cidades")
-      .insert({ regiao_id: regiao.id, nome, slug, ativo: Boolean(ativo), lat: lat === null ? null : Number(lat), lng: lng === null ? null : Number(lng) })
+      .insert({
+        regiao_id: regiao.id,
+        nome,
+        slug,
+        ativo: Boolean(ativo),
+        lat: lat === null ? null : Number(lat),
+        lng: lng === null ? null : Number(lng)
+      })
       .select("*")
       .single();
     if (error) return res.status(500).json({ error: "Erro ao criar cidade." });
@@ -783,5 +1150,8 @@ aplicacaoExpress.post("/api/admin/cidades", exigirChaveDeAdministrador, async (r
 
 // ============================== START =======================================
 aplicacaoExpress.listen(portaDoServidor, () => {
-  console.log(`✅ BEPIT Nexus (Orquestrador v3.3 REST) rodando em http://localhost:${portaDoServidor}`);
+  console.log(
+    `✅ BEPIT Nexus (Orquestrador v3.3 REST) rodando em http://localhost:${portaDoServidor}`
+  );
 });
+
