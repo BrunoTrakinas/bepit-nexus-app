@@ -26,6 +26,10 @@ import {
   BEPIT_SYSTEM_PROMPT_APPENDIX
 } from "../utils/bepitGuardrails.js";
 
+// >>>>>>>>>>>>>>>>>>>>>>>>>>> ADIÇÃO: busca tolerante (novo util)
+import { buscarParceirosTolerante, normalizeTerm as normalizeSearchTerm } from "./utils/searchPartners.js";
+// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
 // ============================== CONFIG BÁSICA ================================
 const aplicacaoExpress = express();
 const portaDoServidor = process.env.PORT || 3002;
@@ -269,60 +273,84 @@ const MAPA_CESTA_PARA_CATEGORIAS_DB = {
 };
 
 // ============================== FERRAMENTAS =================================
+// >>>>>>>>>>>>>>>>>>>>>>>>>> REESCRITA MÍNIMA (usa busca tolerante)
 async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal }) {
+  // 1) Entidades do modelo + heurística de cesta
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
   const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
 
   const cestaInferida = inferirCestaCategoria(textoOriginal || "");
-  const categoriasPermitidas = cestaInferida ? MAPA_CESTA_PARA_CATEGORIAS_DB[cestaInferida] : null;
+  const categoriasDaCesta = cestaInferida ? MAPA_CESTA_PARA_CATEGORIAS_DB[cestaInferida] : null;
 
-  // Filtra por cidades ativas da região
-  const cidadesValidas = (cidadesAtivas || []);
-  let idsCidade = cidadesValidas.map(c => c.id);
+  // 2) Resolve cidade (slug) usando as cidades ativas já carregadas
+  const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
+  let cidadeSlug = "";
   if (cidadeProcurada) {
     const alvo = cidadesValidas.find(
       c => normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) || normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
     );
-    if (alvo) idsCidade = [alvo.id];
+    cidadeSlug = alvo?.slug || "";
+  }
+  // Se não especificou cidade, usamos a primeira cidade ativa da região (mantendo seu comportamento anterior)
+  if (!cidadeSlug && cidadesValidas.length > 0) {
+    cidadeSlug = cidadesValidas[0].slug;
   }
 
-  // Base da query
-  let q = supabase
-    .from("parceiros")
-    .select("id, tipo, nome, categoria, descricao, endereco, contato, beneficio_bepit, faixa_preco, fotos_parceiros, cidade_id, tags, ativo")
-    .eq("ativo", true)
-    .in("cidade_id", idsCidade);
-
-  // Se o usuário digitou uma categoria explícita, aplica um ilike nessa categoria
-  if (categoriaProcurada) q = q.ilike("categoria", `%${categoriaProcurada}%`);
-
-  const { data: base, error } = await q;
-  if (error) throw error;
-  let itens = Array.isArray(base) ? base : [];
-
-  // Se a pergunta claramente é sobre "comida", "passeios", "praias", etc., restringe às categorias mapeadas.
-  if (categoriasPermitidas && categoriasPermitidas.length > 0) {
-    const setPermitidas = new Set(categoriasPermitidas.map(normalizarTexto));
-    itens = itens.filter(p => setPermitidas.has(normalizarTexto(p.categoria || "")));
+  // 3) Monta lista de categorias a tentar (ordem de prioridade):
+  //    - se o usuário pediu uma categoria explícita, tenta ela primeiro (normalizada em minúsculas)
+  //    - senão, tenta as categorias da cesta inferida
+  const categoriasAProcurar = [];
+  if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
+  if (Array.isArray(categoriasDaCesta)) {
+    for (const cat of categoriasDaCesta) {
+      const cn = normalizarTexto(cat);
+      if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
+    }
   }
+  // fallback: se ainda não tem nada, assume "restaurante" para intenções gastronômicas genéricas
+  if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
 
-  // Se vieram termos (ex.: "peixe", "rodízio"), filtra por nome/categoria/tags
-  if (listaDeTermos.length > 0) {
-    const termosNorm = listaDeTermos.map(t => normalizarTexto(t));
-    itens = itens.filter(p => {
-      const nomeN = normalizarTexto(p.nome || "");
-      const catN = normalizarTexto(p.categoria || "");
-      const tags = Array.isArray(p.tags) ? p.tags.map(x => normalizarTexto(String(x))) : [];
-      return termosNorm.some(t => nomeN.includes(t) || catN.includes(t) || tags.includes(t));
+  // 4) Termo livre (para “piconha”, “vista”, etc.)
+  const termoLivre = String(textoOriginal || "").trim();
+
+  // 5) Tenta as categorias em ordem, usando a busca tolerante no banco (RPC)
+  let acumulado = [];
+  for (const cat of categoriasAProcurar) {
+    const r = await buscarParceirosTolerante({
+      cidadeSlug,
+      categoria: cat,
+      term: termoLivre,
+      limit: 12
     });
+    if (r.ok && r.items.length > 0) {
+      acumulado = r.items;
+      break;
+    }
   }
 
-  // Ordena PARCEIRO antes de DICA (restaura ordem esperada)
-  itens.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-  const limitados = itens.slice(0, 8);
+  // 6) Se ainda vazio e o usuário passou termos explícitos, tenta com termos como palavra-chave
+  if (acumulado.length === 0 && listaDeTermos.length > 0) {
+    const termoExtra = listaDeTermos.join(" ");
+    for (const cat of categoriasAProcurar) {
+      const r = await buscarParceirosTolerante({
+        cidadeSlug,
+        categoria: cat,
+        term: termoExtra,
+        limit: 12
+      });
+      if (r.ok && r.items.length > 0) {
+        acumulado = r.items;
+        break;
+      }
+    }
+  }
 
-  // Log leve de analytics (não bloqueante)
+  // 7) Ordena PARCEIRO antes de DICA (manter comportamento)
+  acumulado.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
+  const limitados = acumulado.slice(0, 8);
+
+  // 8) Analytics leve (não bloqueante)
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
@@ -330,10 +358,10 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
         termos: listaDeTermos,
         categoriaProcurada,
         cestaInferida,
-        categoriasAplicadas: categoriasPermitidas || null,
+        categoriasAplicadas: categoriasAProcurar,
         cidadeProcurada,
-        total_base: (base || []).length,
-        total_filtrado: limitados.length
+        total_filtrado: limitados.length,
+        cidadeSlug
       }
     });
   } catch {}
@@ -356,6 +384,7 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     }))
   };
 }
+// <<<<<<<<<<<<<<<<<<<<<<<<<< FIM da reescrita mínima da ferramenta
 
 async function ferramentaObterRotaOuDistanciaAproximada({ argumentosDaFerramenta, cidadesAtivas }) {
   const origem = String(argumentosDaFerramenta?.origin || "").trim();
