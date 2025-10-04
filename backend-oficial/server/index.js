@@ -222,7 +222,7 @@ async function extrairEntidadesDaBusca(texto) {
   return { category: categoria, city: cidade, terms: [] };
 }
 
-// FUNÇÃO COM A CORREÇÃO FINAL - SUBSTITUA A VERSÃO ATUAL PELA ABAIXO
+// FUNÇÃO COM O REFINAMENTO FINAL DA BUSCA - SUBSTITUA A VERSÃO ATUAL
 
 async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
@@ -254,7 +254,7 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   }
   if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
 
-  // A variável termoLivre (frase inteira) não será mais usada para a busca principal.
+  // AQUI ESTÁ A MUDANÇA: Voltamos a usar o texto original do usuário como termo de busca.
   const termoLivre = String(textoOriginal || "").trim();
 
   let resultados = [];
@@ -262,18 +262,19 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
-      // ===== ESTA É A CORREÇÃO FINAL =====
-      // Em vez de enviar a frase inteira (termoLivre), enviamos a própria categoria
-      // como o termo de busca, que é muito mais preciso para a função SQL.
-      term: cat,
-      // ===================================
+      // ===== MUDANÇA IMPORTANTE =====
+      // Agora que a base está funcionando, podemos usar o texto original
+      // para que a busca por "picanha" seja considerada.
+      term: termoLivre,
+      // ==============================
       limit: 8
     });
     if (r.ok && r.items.length > 0) {
       resultados.push(...r.items);
     }
   }
-
+  
+  // O resto da função continua igual...
   const mapaResultados = new Map(resultados.map(p => [p.id, p]));
   let acumulado = Array.from(mapaResultados.values());
 
