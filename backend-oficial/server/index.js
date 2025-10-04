@@ -224,6 +224,8 @@ async function extrairEntidadesDaBusca(texto) {
 
 // FUNÇÃO COM O REFINAMENTO FINAL DA BUSCA - SUBSTITUA A VERSÃO ATUAL
 
+// VERSÃO FINAL E CORRIGIDA - SUBSTITUA PELA ÚLTIMA VEZ
+
 async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
@@ -253,20 +255,30 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     }
   }
   if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
-
-  // AQUI ESTÁ A MUDANÇA: Voltamos a usar o texto original do usuário como termo de busca.
-  const termoLivre = String(textoOriginal || "").trim();
+  
+  const textoNormalizado = normalizarTexto(textoOriginal || "");
 
   let resultados = [];
   for (const cat of categoriasAProcurar) {
+    // ===== LÓGICA DO TERMO DE BUSCA INTELIGENTE =====
+    // 1. Procura por um termo específico de comida na frase do usuário.
+    let termoDeBusca = PALAVRAS_CHAVE.comida.find(p => textoNormalizado.includes(p));
+
+    // 2. Se não achar, procura por um termo específico de passeio.
+    if (!termoDeBusca) {
+      termoDeBusca = PALAVRAS_CHAVE.passeios.find(p => textoNormalizado.includes(p));
+    }
+    
+    // 3. Se ainda não achar nenhum termo específico, usa a própria categoria como termo de busca.
+    if (!termoDeBusca) {
+      termoDeBusca = cat;
+    }
+    // =================================================
+
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
-      // ===== MUDANÇA IMPORTANTE =====
-      // Agora que a base está funcionando, podemos usar o texto original
-      // para que a busca por "picanha" seja considerada.
-      term: termoLivre,
-      // ==============================
+      term: termoDeBusca, // Usando o termo de busca inteligente
       limit: 8
     });
     if (r.ok && r.items.length > 0) {
@@ -274,7 +286,6 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     }
   }
   
-  // O resto da função continua igual...
   const mapaResultados = new Map(resultados.map(p => [p.id, p]));
   let acumulado = Array.from(mapaResultados.values());
 
