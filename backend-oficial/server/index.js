@@ -217,11 +217,14 @@ function historicoParaTextoSimples(contents) {
 }
 
 // ============================== HEURÍSTICA DE INTENÇÃO ======================
-// Força "busca_parceiro" quando a pergunta tem palavras-chave de categorias.
+// Incluí "piconha" (typo comum) e variações curtas que indicam comida.
 const PALAVRAS_CHAVE = {
   comida: [
-    "restaurante","restaurantes","almoço","almoco","jantar","comer","comida","picanha",
-    "pizza","pizzaria","peixe","frutos do mar","moqueca","rodizio","rodízio","churrascaria","lanchonete","burger","hamburguer","hambúrguer","bistrô","bistro"
+    "restaurante","restaurantes","almoço","almoco","jantar","comer","comida",
+    "picanha","piconha",        // <= adição que faltava
+    "carne","churrasco","churrascaria",
+    "pizza","pizzaria","peixe","frutos do mar","moqueca","rodizio","rodízio",
+    "lanchonete","burger","hamburguer","hambúrguer","bistrô","bistro"
   ],
   hospedagem: ["pousada","pousadas","hotel","hotéis","hospedagem","hostel","airbnb"],
   bebidas: ["bar","bares","chopp","chope","drinks","pub","boteco"],
@@ -232,6 +235,8 @@ const PALAVRAS_CHAVE = {
 
 function forcarBuscaParceiro(texto) {
   const t = normalizarTexto(texto);
+  // tolerância simples a plurais/acentos já acontece em normalizarTexto.
+  // aqui só verificamos a presença de qualquer termo das listas.
   for (const lista of Object.values(PALAVRAS_CHAVE)) {
     if (lista.some(p => t.includes(p))) return true;
   }
@@ -471,7 +476,14 @@ Frase: "${textoDoUsuario}"`;
   const saida = await geminiGerarTexto(prompt);
   const text = (saida || "").trim().toLowerCase();
   const classes = new Set(["busca_parceiro", "follow_up_parceiro", "pergunta_geral", "mudanca_contexto", "small_talk"]);
-  return classes.has(text) ? text : "pergunta_geral";
+  const r = classes.has(text) ? text : "pergunta_geral";
+
+  // 🔒 Fallback: se o modelo voltar "pergunta_geral" mas a frase tem sinais fortes de comida,
+  // force "busca_parceiro" (pega casos como "piconha", "quero comer", etc.)
+  if (r !== "busca_parceiro" && forcarBuscaParceiro(textoDoUsuario)) {
+    return "busca_parceiro";
+  }
+  return r;
 }
 
 async function extrairEntidadesDaBusca(texto) {
