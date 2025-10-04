@@ -41,6 +41,9 @@ export async function getCidadeIdBySlug(cidadeSlug) {
  *
  * Retorna { ok: true, items: [...] } ou { ok: false, error }
  */
+// Arquivo: server/utils/searchPartners.js
+// FUNÇÃO COM LOGS DE DEPURAÇÃO - SUBSTITUA A ORIGINAL
+
 export async function buscarParceirosTolerante({
   cidadeId,
   cidadeSlug,
@@ -48,33 +51,60 @@ export async function buscarParceirosTolerante({
   term,
   limit = 10,
 }) {
+  console.log("\n==================== INICIANDO BUSCA TOLERANTE ====================");
   try {
     const categoriaNorm = (categoria || "").toLowerCase().trim();
-    if (!categoriaNorm) return { ok: false, error: "Categoria ausente." };
+    if (!categoriaNorm) {
+      console.log("[DEBUG] Busca falhou: Categoria ausente.");
+      console.log("====================================================================\n");
+      return { ok: false, error: "Categoria ausente." };
+    }
 
     let cidadeUUID = cidadeId || null;
     if (!cidadeUUID && cidadeSlug) {
+      console.log(`[DEBUG] Buscando UUID para a cidade com slug: "${cidadeSlug}"`);
       cidadeUUID = await getCidadeIdBySlug(cidadeSlug);
-      if (!cidadeUUID) return { ok: false, error: `Cidade não encontrada para slug: ${cidadeSlug}` };
+      if (!cidadeUUID) {
+        console.log(`[DEBUG] Busca falhou: Cidade não encontrada para o slug: ${cidadeSlug}`);
+        console.log("====================================================================\n");
+        return { ok: false, error: `Cidade não encontrada para slug: ${cidadeSlug}` };
+      }
+      console.log(`[DEBUG] UUID da cidade encontrado: ${cidadeUUID}`);
     }
-    if (!cidadeUUID) return { ok: false, error: "cidadeId ou cidadeSlug obrigatório." };
 
+    if (!cidadeUUID) {
+      console.log("[DEBUG] Busca falhou: cidadeId ou cidadeSlug obrigatório não resolvido.");
+      console.log("====================================================================\n");
+      return { ok: false, error: "cidadeId ou cidadeSlug obrigatório." };
+    }
+    
     const termNorm = normalizeTerm(term || "");
 
-    const { data, error } = await supabase.rpc("search_parceiros", {
+    const params = {
       p_cidade_id: cidadeUUID,
       p_categoria_norm: categoriaNorm,
       p_term_norm: termNorm,
       p_limit: limit,
-    });
+    };
+
+    console.log("[DEBUG] Parâmetros enviados para a função RPC 'search_parceiros':", params);
+
+    const { data, error } = await supabase.rpc("search_parceiros", params);
 
     if (error) {
-      console.error("[buscarParceirosTolerante] RPC error:", error);
+      console.error("[DEBUG] !!! ERRO RETORNADO PELA CHAMADA RPC:", error);
+      console.log("====================================================================\n");
       return { ok: false, error: "Falha na busca (RPC)." };
     }
+
+    console.log("[DEBUG] Dados retornados pela chamada RPC:", data);
+    console.log(`[DEBUG] Total de itens retornados: ${Array.isArray(data) ? data.length : 0}`);
+    console.log("==================== FIM DA BUSCA TOLERANTE ====================\n");
+
     return { ok: true, items: Array.isArray(data) ? data : [] };
   } catch (err) {
-    console.error("[buscarParceirosTolerante] exception:", err);
+    console.error("[DEBUG] !!! EXCEÇÃO INESPERADA na função buscarParceirosTolerante:", err);
+    console.log("====================================================================\n");
     return { ok: false, error: err?.message || "Erro inesperado." };
   }
 }
