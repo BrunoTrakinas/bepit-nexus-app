@@ -24,7 +24,7 @@ import {
   finalizeAssistantResponse,
   buildNoPartnerFallback,
   BEPIT_SYSTEM_PROMPT_APPENDIX
-} from "../utils/bepitGuardrails.js";
+} from "./utils/bepitGuardrails.js";
 
 // >>>>>>>>>>>>>>>>>>>>>>>>>>> ADIÇÃO: busca tolerante (novo util)
 import { buscarParceirosTolerante, normalizeTerm as normalizeSearchTerm } from "./utils/searchPartners.js";
