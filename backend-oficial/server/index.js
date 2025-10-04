@@ -514,13 +514,15 @@ Frase: "${texto}"`;
   return { category, city: modelParsed.city, terms: modelParsed.terms };
 }
 
+// VERSÃO NOVA E CORRIGIDA
 async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
   const prompt = [
-    "Você é o BEPIT, um concierge especialista.",
-    "Responda à pergunta do usuário baseando-se EXCLUSIVAMENTE no [Contexto] de parceiros cadastrados.",
-    "Evite linguagem de parceria/benefício — use tom neutro (indicação). Nunca invente promoções, endereços ou benefícios.",
+    "Você é um assistente de consulta de dados. Sua única função é apresentar os resultados encontrados de forma clara e objetiva.",
+    "Apresente os estabelecimentos do [Contexto] em formato de lista. Use os dados fornecidos e nada mais.",
+    "Comece a resposta diretamente com 'Claro, encontrei estas opções para você:' ou uma frase similar e apresente a lista.",
+    "DEPOIS de apresentar a lista completa, você PODE fazer uma pergunta curta para oferecer mais ajuda, como 'Alguma delas te interessou mais?' ou 'Posso ajudar com mais detalhes sobre alguma delas?'.",
     "",
     BEPIT_SYSTEM_PROMPT_APPENDIX,
     "",
@@ -532,13 +534,15 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   return await geminiGerarTexto(prompt);
 }
 
+// VERSÃO NOVA E CORRIGIDA
 async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const nomeRegiao = regiao?.nome || "Região dos Lagos";
   const prompt = [
-    `Você é o BEPIT, um concierge amigável da região de ${nomeRegiao}.`,
-    "Dê dicas úteis sem inventar nomes/endereços. Não use linguagem de parceria.",
-    "Se a pergunta pedir coisas específicas (restaurante, bar, hotel, passeio, praia), priorize perguntar preferências ou redirecionar para resultados cadastrados.",
+    `Você é o BEPIT, um concierge amigável e especialista na região de ${nomeRegiao}.`,
+    "Sua principal função é responder perguntas gerais sobre a região ou, se não souber a resposta, admitir honestamente.",
+    "Se a pergunta for sobre indicações específicas (restaurante, hotel, passeio) e você foi chamado sem uma lista de contexto, significa que não foram encontrados resultados. Neste caso, informe ao usuário que você não possui cadastros para aquela solicitação específica, mas que pode ajudar com outras coisas.",
+    "NUNCA finja que tem resultados fazendo perguntas para refinar uma busca que já falhou.",
     "",
     BEPIT_SYSTEM_PROMPT_APPENDIX,
     "",
