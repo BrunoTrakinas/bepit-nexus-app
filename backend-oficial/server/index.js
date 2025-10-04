@@ -279,6 +279,7 @@ const MAPA_CESTA_PARA_CATEGORIAS_DB = {
 
 // ============================== FERRAMENTAS =================================
 // >>>>>>>>>>>>>>>>>>>>>>>>>> REESCRITA MÍNIMA (usa busca tolerante)
+// VERSÃO NOVA E MELHORADA
 async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal }) {
   // 1) Entidades do modelo + heurística de cesta
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
@@ -288,7 +289,7 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   const cestaInferida = inferirCestaCategoria(textoOriginal || "");
   const categoriasDaCesta = cestaInferida ? MAPA_CESTA_PARA_CATEGORIAS_DB[cestaInferida] : null;
 
-  // 2) Resolve cidade (slug) usando as cidades ativas já carregadas
+  // 2) Resolve cidade (slug)
   const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   let cidadeSlug = "";
   if (cidadeProcurada) {
@@ -297,14 +298,11 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     );
     cidadeSlug = alvo?.slug || "";
   }
-  // Se não especificou cidade, usamos a primeira cidade ativa da região (mantendo seu comportamento anterior)
   if (!cidadeSlug && cidadesValidas.length > 0) {
     cidadeSlug = cidadesValidas[0].slug;
   }
 
-  // 3) Monta lista de categorias a tentar (ordem de prioridade):
-  //    - se o usuário pediu uma categoria explícita, tenta ela primeiro (normalizada em minúsculas)
-  //    - senão, tenta as categorias da cesta inferida
+  // 3) Monta lista de categorias a tentar
   const categoriasAProcurar = [];
   if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
   if (Array.isArray(categoriasDaCesta)) {
@@ -313,49 +311,34 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
       if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
     }
   }
-  // fallback: se ainda não tem nada, assume "restaurante" para intenções gastronômicas genéricas
   if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
 
-  // 4) Termo livre (para “piconha”, “vista”, etc.)
+  // 4) Termo livre
   const termoLivre = String(textoOriginal || "").trim();
 
-  // 5) Tenta as categorias em ordem, usando a busca tolerante no banco (RPC)
-  let acumulado = [];
+  // 5) Executa a busca e ACUMULA resultados de todas as categorias
+  let resultados = [];
   for (const cat of categoriasAProcurar) {
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
       term: termoLivre,
-      limit: 12
+      limit: 8 // Limite por categoria
     });
     if (r.ok && r.items.length > 0) {
-      acumulado = r.items;
-      break;
+      resultados.push(...r.items);
     }
   }
 
-  // 6) Se ainda vazio e o usuário passou termos explícitos, tenta com termos como palavra-chave
-  if (acumulado.length === 0 && listaDeTermos.length > 0) {
-    const termoExtra = listaDeTermos.join(" ");
-    for (const cat of categoriasAProcurar) {
-      const r = await buscarParceirosTolerante({
-        cidadeSlug,
-        categoria: cat,
-        term: termoExtra,
-        limit: 12
-      });
-      if (r.ok && r.items.length > 0) {
-        acumulado = r.items;
-        break;
-      }
-    }
-  }
+  // 6) Remove duplicatas (caso um parceiro apareça em mais de uma categoria)
+  const mapaResultados = new Map(resultados.map(p => [p.id, p]));
+  let acumulado = Array.from(mapaResultados.values());
 
-  // 7) Ordena PARCEIRO antes de DICA (manter comportamento)
+  // 7) Ordena e limita o resultado final
   acumulado.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
   const limitados = acumulado.slice(0, 8);
 
-  // 8) Analytics leve (não bloqueante)
+  // 8) Analytics (não alterado)
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
