@@ -1,20 +1,19 @@
 // src/admin/AdminLogin.jsx
 // ============================================================================
 // Tela de login do Admin:
-// - Chama POST /api/auth/login com { key }
+// - Chama apiClient.authLoginByKey(key) que já existe no seu projeto
 // - Em caso de ok:true, salva a chave em localStorage E sessionStorage
 //   * localStorage: persistência opcional
 //   * sessionStorage ("bepit_admin_key"): lida pelo apiClient para enviar X-Admin-Key
 // - Redireciona para /admin
-// - Trabalha em conjunto com ProtectedRoute (expiração por inatividade).
-// - Ajustes de acessibilidade e autofill: id/name/autoComplete no input.
+// - Ajustes de acessibilidade/autofill (id/name/autoComplete).
 // ============================================================================
 
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import apiClient from "../lib/apiClient";
 
-const STORAGE_KEY_LOCAL = "adminKey";            // mantém compatibilidade com o que você já usava
+const STORAGE_KEY_LOCAL = "adminKey";            // compatibilidade com o que já usava
 const STORAGE_KEY_SESSION = "bepit_admin_key";   // ***lido pelo apiClient para X-Admin-Key***
 const LAST_ACTIVE_KEY = "adminLastActiveAt";
 
@@ -36,20 +35,18 @@ export default function AdminLogin() {
 
     setIsLoading(true);
     try {
-      // Valida a chave no backend (retorno esperado: { ok: true } em caso de sucesso)
-      const { data } = await apiClient.post("/api/auth/login", { key: trimmed });
-      const ok = data?.ok === true;
+      // ✅ usa o helper existente no seu projeto
+      const resp = await apiClient.authLoginByKey(trimmed);
+      const ok = resp?.ok === true;
 
       if (ok) {
-        // 1) Persistência opcional (como você já fazia)
+        // 1) Persistência opcional (como você já tinha)
         localStorage.setItem(STORAGE_KEY_LOCAL, trimmed);
         localStorage.setItem(LAST_ACTIVE_KEY, String(Date.now()));
 
-        // 2) ***Fundamental para o apiClient injetar o X-Admin-Key***
-        //    O interceptor lê exatamente 'bepit_admin_key' no sessionStorage.
+        // 2) ***Fundamental para o X-Admin-Key no interceptor***
         sessionStorage.setItem(STORAGE_KEY_SESSION, trimmed);
 
-        // Redireciona para o painel
         navigate("/admin");
       } else {
         setErrorMsg("Chave inválida.");
@@ -80,7 +77,7 @@ export default function AdminLogin() {
             <span className="text-sm font-medium">Chave</span>
             <input
               id="adminKey"
-              name="adminKey"                 // <== evita o aviso do Chrome
+              name="adminKey"                 // evita o aviso do Chrome
               type="password"
               autoComplete="off"              // chave sensível: não sugerir armazenamento
               className="mt-1 w-full border rounded-md px-3 py-2"
