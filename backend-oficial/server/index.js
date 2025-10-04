@@ -222,7 +222,8 @@ async function extrairEntidadesDaBusca(texto) {
   return { category: categoria, city: cidade, terms: [] };
 }
 
-// VERSÃO COM ACUMULADOR DE RESULTADOS
+// FUNÇÃO COM A CORREÇÃO FINAL - SUBSTITUA A VERSÃO ATUAL PELA ABAIXO
+
 async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
@@ -253,6 +254,7 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   }
   if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
 
+  // A variável termoLivre (frase inteira) não será mais usada para a busca principal.
   const termoLivre = String(textoOriginal || "").trim();
 
   let resultados = [];
@@ -260,7 +262,11 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
-      term: termoLivre,
+      // ===== ESTA É A CORREÇÃO FINAL =====
+      // Em vez de enviar a frase inteira (termoLivre), enviamos a própria categoria
+      // como o termo de busca, que é muito mais preciso para a função SQL.
+      term: cat,
+      // ===================================
       limit: 8
     });
     if (r.ok && r.items.length > 0) {
