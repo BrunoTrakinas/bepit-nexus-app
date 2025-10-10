@@ -209,114 +209,140 @@ const MAPA_CESTA_PARA_CATEGORIAS_DB = {
 
 // ============================== FERRAMENTAS E PROMPTS =======================
 
-// Extrator simples (sem IA) para cidade/cesta; mantido.
+// NOVA VERSÃO — extrai termos úteis da frase (prioriza picanha/piconha)
 async function extrairEntidadesDaBusca(texto) {
-  const cesta = inferirCestaCategoria(texto || "");
-  const categoria = cesta || null;
+  const tNorm = normalizarTexto(texto || "");
 
+  // cidade simples (pode ampliar depois)
   let cidade = null;
-  const textoNorm = normalizarTexto(texto || "");
-  if (textoNorm.includes("cabo frio")) cidade = "Cabo Frio";
-  else if (textoNorm.includes("buzios")) cidade = "Búzios";
-  else if (textoNorm.includes("arraial")) cidade = "Arraial do Cabo";
+  if (tNorm.includes("cabo frio")) cidade = "Cabo Frio";
+  else if (tNorm.includes("buzios") || tNorm.includes("búzios")) cidade = "Búzios";
+  else if (tNorm.includes("arraial")) cidade = "Arraial do Cabo";
 
-  return { category: categoria, city: cidade, terms: [] };
+  // termos específicos de comida (em ordem de prioridade)
+  const termosPrioritarios = [
+    "picanha", "piconha", "churrasco", "rodizio", "rodízio", "carne",
+    "peixe", "frutos do mar", "moqueca", "pizza", "hamburguer", "hambúrguer", "sushi", "vista"
+  ];
+
+  const termosEncontrados = [];
+  for (const termo of termosPrioritarios) {
+    if (tNorm.includes(normalizarTexto(termo))) termosEncontrados.push(termo);
+  }
+
+  // cesta macro só para orientar categorias default
+  let categoriaMacro = null;
+  if (PALAVRAS_CHAVE.comida.some(p => tNorm.includes(p))) categoriaMacro = "comida";
+  else if (PALAVRAS_CHAVE.hospedagem.some(p => tNorm.includes(p))) categoriaMacro = "hospedagem";
+  else if (PALAVRAS_CHAVE.bebidas.some(p => tNorm.includes(p))) categoriaMacro = "bebidas";
+  else if (PALAVRAS_CHAVE.passeios.some(p => tNorm.includes(p))) categoriaMacro = "passeios";
+  else if (PALAVRAS_CHAVE.praias.some(p => tNorm.includes(p))) categoriaMacro = "praias";
+  else if (PALAVRAS_CHAVE.transporte.some(p => tNorm.includes(p))) categoriaMacro = "transporte";
+
+  return {
+    category: categoriaMacro,   // macro (usaremos só para orientar)
+    city: cidade,
+    terms: termosEncontrados,   // agora vem “picanha/piconha” etc
+  };
 }
 
+
 // ============================== FERRAMENTA DE BUSCA (versão com reforço p/ picanha + logs) =======================
+// VERSÃO AJUSTADA — usa termo principal correto e prioriza categorias certas
 async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal, isInitialSearch = true, excludeIds = [] }) {
-  const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
+  const categoriaMacro = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
-  const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
+  const termosEntrada = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
+  const tNorm = normalizarTexto(textoOriginal || "");
 
-  // 1) Cesta inferida pelas palavras-chave
-  const cestaInferida = inferirCestaCategoria(textoOriginal || "");
-
-  // 2) Resolve cidade (slug)
+  // Cidade → slug
   const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   let cidadeSlug = "";
   if (cidadeProcurada) {
     const alvo = cidadesValidas.find(
-      c => normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) ||
-           normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
+      c => normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) || normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
     );
     cidadeSlug = alvo?.slug || "";
   }
   if (!cidadeSlug && cidadesValidas.length > 0) {
-    cidadeSlug = cidadesValidas[0].slug; // fallback: 1ª cidade ativa da região
+    cidadeSlug = cidadesValidas[0].slug;
   }
 
-  // 3) Monta lista de categorias baseadas na cesta + explícita
-  const categoriasBaseDaCesta = cestaInferida ? (MAPA_CESTA_PARA_CATEGORIAS_DB[cestaInferida] || []) : [];
-  const categoriasAProcurar = [];
-  if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
-  for (const cat of categoriasBaseDaCesta) {
-    const cn = normalizarTexto(cat);
-    if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
+  // Termo principal: priorize palavras “fortes” (picanha/piconha/churrasco/etc) e ignore genéricos
+  const STOPWORDS = new Set(["comer","comida","restaurante","restaurantes","onde","lugar","local","pra","para","em","de"]);
+  const candidatosTermo = [
+    ...termosEntrada,                                   // termos vindos do extrator (ex.: "picanha")
+    ...PALAVRAS_CHAVE.comida.filter(w => tNorm.includes(w)) // mais quaisquer palavras de comida presentes na frase
+  ].map(normalizarTexto).filter(w => w && !STOPWORDS.has(w));
+
+  // escolha do termo principal
+  let termoPrincipal = null;
+  // prioridade: picanha/piconha > churrasc(o|aria)/rodizio > carne > peixe/frutos do mar > pizza/hamburguer/sushi > vista
+  const ordemForca = [
+    "picanha","piconha",
+    "churrasco","churrascaria","rodizio","rodízio",
+    "carne",
+    "peixe","frutos do mar",
+    "pizza","hamburguer","hambúrguer","sushi",
+    "vista"
+  ];
+  for (const alvo of ordemForca) {
+    if (candidatosTermo.includes(alvo)) { termoPrincipal = alvo; break; }
   }
-  // Heurística suave: se “comida” e nada explícito, partimos de “restaurante”
-  if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
+  // fallback: se nada forte foi encontrado, tenta a primeira palavra útil (que não seja stopword)
+  if (!termoPrincipal) termoPrincipal = candidatosTermo.find(w => !STOPWORDS.has(w)) || "";
 
-  // 4) **Reforço específico para picanha** (ou typo piconha):
-  //    Sempre incluir “churrascaria” e “restaurante” entre as categorias quando detectar “picanha/piconha”
-  const textoN = normalizarTexto(textoOriginal || "");
-  const querPicanha = textoN.includes("picanha") || textoN.includes("piconha");
-  if (querPicanha) {
-    for (const fixa of ["churrascaria", "restaurante"]) {
-      if (!categoriasAProcurar.includes(fixa)) categoriasAProcurar.push(fixa);
-    }
+  // Categorias a procurar:
+  // - Se detectar picanha/piconha/carne/churrasco => prioriza churrascaria e restaurante
+  // - Caso contrário, usa mapeamento da cesta macro (ou cai em “restaurante” como default)
+  let categoriasAProcurar = [];
+  const pedeCarne = ["picanha","piconha","carne","churrasco","rodizio","rodízio"].some(w => tNorm.includes(w));
+  if (pedeCarne) {
+    categoriasAProcurar = ["churrascaria","restaurante"];
+  } else if (categoriaMacro && MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaMacro]) {
+    categoriasAProcurar = [...MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaMacro]];
+  } else {
+    categoriasAProcurar = ["restaurante"]; // default sensato
   }
 
-  // 5) LOGS de depuração da busca (apenas console)
-  console.log("[BUSCA] cidadeSlug=", cidadeSlug, "| categoriasAProcurar=", categoriasAProcurar, "| querPicanha=", querPicanha, "| termos=", listaDeTermos);
+  // Evite duplicatas mantendo ordem de prioridade
+  categoriasAProcurar = categoriasAProcurar
+    .map(normalizarTexto)
+    .filter((v, i, arr) => arr.indexOf(v) === i);
 
-  // 6) Termo “inteligente” por categoria (prioriza palavra específica no texto)
-  const resultados = [];
+  // Executa buscas (primeira leva com isInitialSearch=true envia mais “largas”)
+  let resultados = [];
   for (const cat of categoriasAProcurar) {
-    let termoDeBusca = null;
-
-    // prioridade 1: palavras de COMIDA presentes no texto (inclui picanha/piconha)
-    termoDeBusca = PALAVRAS_CHAVE.comida.find(p => textoN.includes(p)) || null;
-    // prioridade 2: se nada, usa a própria categoria
-    if (!termoDeBusca) termoDeBusca = cat;
-
-    // Chama a busca tolerante (com paginação inicial aleatória e exclusão de IDs quando aplicável)
+    console.log(`[BUSCA] categoria='${cat}' termo='${termoPrincipal || ""}' -> start`);
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
-      term: termoDeBusca,
-      limit: 24,
-      isInitialSearch: Boolean(isInitialSearch),
-      excludeIds: Array.isArray(excludeIds) ? excludeIds : []
+      term: termoPrincipal || "",     // agora vai “picanha” em vez de “comer”
+      limit: isInitialSearch ? 24 : 8,
+      isInitialSearch,
+      excludeIds
     });
-
-    console.log(`[BUSCA] categoria='${cat}' termo='${termoDeBusca}' -> ok=${r.ok} itens=${Array.isArray(r.items) ? r.items.length : 0}`);
-
-    if (r.ok && r.items.length > 0) {
-      for (const it of r.items) resultados.push(it);
-    }
+    console.log(`[BUSCA] categoria='${cat}' termo='${termoPrincipal || ""}' -> ok=${r.ok} itens=${r.ok ? r.items.length : "err"}`);
+    if (r.ok && r.items.length > 0) resultados.push(...r.items);
   }
 
-  // 7) Dedup por id
-  const mapaResultados = new Map(resultados.map(p => [p.id, p]));
-  let acumulado = Array.from(mapaResultados.values());
+  // Dedup e ordena: PARCEIRO antes de DICA
+  const mapa = new Map(resultados.map(p => [p.id, p]));
+  const unicos = Array.from(mapa.values());
+  unicos.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
+  const limitados = unicos.slice(0, 8);
 
-  // 8) Ordena PARCEIRO antes de DICA e limita
-  acumulado.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-  const limitados = acumulado.slice(0, 8);
-
-  // 9) Analytics leve
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
       payload: {
-        termos: listaDeTermos,
-        categoriaProcurada,
-        cestaInferida,
+        termosEntrada,
+        termoPrincipal,
+        categoriaMacro,
         categoriasAplicadas: categoriasAProcurar,
         cidadeProcurada,
-        cidadeSlug,
-        total_filtrado: limitados.length
+        total_filtrado: limitados.length,
+        cidadeSlug
       }
     });
   } catch {}
