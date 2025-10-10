@@ -1,9 +1,10 @@
 // ============================================================================
-// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v3.5 (Otimizado)
-// - VERSÃO COMPLETA E CORRIGIDA
-// - Resolve: Timeout com fluxo de UMA chamada à IA por busca.
-// - Resolve: Erro de import "MODULE_NOT_FOUND".
-// - Mantém: Busca tolerante no Supabase e prompts diretos.
+// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v4.0
+// - Base: sua v3.5 otimizada (mantido).
+// - Novidades:
+//   * Paginação Inteligente: 1ª busca = 3 aleatórios relevantes (sem repetir depois)
+//   * Fluxo de Refinamento: "outras opções"/"mais" => pergunta critérios + nova busca sem repetir
+// - Rotas e guardrails preservados.
 // ============================================================================
 
 import "dotenv/config";
@@ -208,25 +209,28 @@ const MAPA_CESTA_PARA_CATEGORIAS_DB = {
 
 // ============================== FERRAMENTAS E PROMPTS =======================
 
-// NOVA VERSÃO RÁPIDA (SEM IA)
+// Extrator simples (sem IA) para cidade/cesta; mantido.
 async function extrairEntidadesDaBusca(texto) {
   const cesta = inferirCestaCategoria(texto || "");
   const categoria = cesta || null;
-  
+
   let cidade = null;
   const textoNorm = normalizarTexto(texto || "");
   if (textoNorm.includes("cabo frio")) cidade = "Cabo Frio";
   else if (textoNorm.includes("buzios")) cidade = "Búzios";
   else if (textoNorm.includes("arraial")) cidade = "Arraial do Cabo";
-  
+
   return { category: categoria, city: cidade, terms: [] };
 }
 
-// FUNÇÃO COM O REFINAMENTO FINAL DA BUSCA - SUBSTITUA A VERSÃO ATUAL
-
-// VERSÃO FINAL E CORRIGIDA - SUBSTITUA PELA ÚLTIMA VEZ
-
-async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal }) {
+// ===== BUSCA PRINCIPAL (agora com isInitialSearch/excludeIds repassados) =====
+async function ferramentaBuscarParceirosOuDicas({
+  cidadesAtivas,
+  argumentosDaFerramenta,
+  textoOriginal,
+  isInitialSearch = false,
+  excludeIds = []
+}) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
   const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
@@ -254,48 +258,55 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
       if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
     }
   }
-  if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
-  
+  if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante", "churrascaria");
+
   const textoNormalizado = normalizarTexto(textoOriginal || "");
-
   let resultados = [];
-  for (const cat of categoriasAProcurar) {
-    // ===== LÓGICA DO TERMO DE BUSCA INTELIGENTE =====
-    // 1. Procura por um termo específico de comida na frase do usuário.
-    let termoDeBusca = PALAVRAS_CHAVE.comida.find(p => textoNormalizado.includes(p));
 
-    // 2. Se não achar, procura por um termo específico de passeio.
-    if (!termoDeBusca) {
-      termoDeBusca = PALAVRAS_CHAVE.passeios.find(p => textoNormalizado.includes(p));
-    }
-    
-    // 3. Se ainda não achar nenhum termo específico, usa a própria categoria como termo de busca.
-    if (!termoDeBusca) {
-      termoDeBusca = cat;
-    }
-    // =================================================
+  for (const cat of categoriasAProcurar) {
+    // termo inteligente simples
+    let termoDeBusca = PALAVRAS_CHAVE.comida.find(p => textoNormalizado.includes(p));
+    if (!termoDeBusca) termoDeBusca = PALAVRAS_CHAVE.passeios.find(p => textoNormalizado.includes(p));
+    if (!termoDeBusca) termoDeBusca = cat;
 
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
-      term: termoDeBusca, // Usando o termo de busca inteligente
-      limit: 8
+      term: termoDeBusca,
+      limit: isInitialSearch ? 12 : 8, // a função interna já trata quando isInitialSearch = true
+      isInitialSearch,
+      excludeIds
     });
     if (r.ok && r.items.length > 0) {
       resultados.push(...r.items);
+      // Na 1ª busca, se já trouxe 3 da primeira categoria, podemos parar cedo
+      if (isInitialSearch && resultados.length >= 3) break;
     }
   }
-  
+
+  // Dedup
   const mapaResultados = new Map(resultados.map(p => [p.id, p]));
   let acumulado = Array.from(mapaResultados.values());
 
+  // Ordena PARCEIRO antes de DICA e limita
   acumulado.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-  const limitados = acumulado.slice(0, 8);
+  const limitados = isInitialSearch ? acumulado.slice(0, 3) : acumulado.slice(0, 8);
 
+  // Analytics leve
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
-      payload: { termos: listaDeTermos, categoriaProcurada, cestaInferida, categoriasAplicadas: categoriasAProcurar, cidadeProcurada, total_filtrado: limitados.length, cidadeSlug }
+      payload: {
+        termos: listaDeTermos,
+        categoriaProcurada,
+        cestaInferida,
+        categoriasAplicadas: categoriasAProcurar,
+        cidadeProcurada,
+        cidadeSlug,
+        total_filtrado: limitados.length,
+        isInitialSearch,
+        excludeIds
+      }
     });
   } catch {}
 
@@ -303,29 +314,14 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     ok: true,
     count: limitados.length,
     items: limitados.map(p => ({
-      id: p.id, tipo: p.tipo, nome: p.nome, categoria: p.categoria, descricao: p.descricao, endereco: p.endereco, contato: p.contato, beneficio_bepit: p.beneficio_bepit, faixa_preco: p.faixa_preco, fotos_parceiros: Array.isArray(p.fotos_parceiros) ? p.fotos_parceiros : [], cidade_id: p.cidade_id
+      id: p.id, tipo: p.tipo, nome: p.nome, categoria: p.categoria, descricao: p.descricao,
+      endereco: p.endereco, contato: p.contato, beneficio_bepit: p.beneficio_bepit, faixa_preco: p.faixa_preco,
+      fotos_parceiros: Array.isArray(p.fotos_parceiros) ? p.fotos_parceiros : [], cidade_id: p.cidade_id
     }))
   };
 }
 
-
-async function analisarIntencaoDoUsuario(textoDoUsuario) {
-  if (forcarBuscaParceiro(textoDoUsuario)) return "busca_parceiro";
-  
-  const prompt = `Sua única tarefa é analisar a frase do usuário e classificá-la em uma das seguintes categorias: 'busca_parceiro', 'pergunta_geral'. Responda apenas com a string da categoria. Frase: "${textoDoUsuario}"`;
-  const saida = await geminiGerarTexto(prompt);
-  const text = (saida || "").trim().toLowerCase();
-  
-  const classes = new Set(["busca_parceiro", "pergunta_geral"]);
-  const r = classes.has(text) ? text : "pergunta_geral";
-
-  if (r !== "busca_parceiro" && forcarBuscaParceiro(textoDoUsuario)) {
-    return "busca_parceiro";
-  }
-  return r;
-}
-
-// PROMPT CORRIGIDO
+// PROMPTS (mantidos, com instruções de listar parceiros)
 async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
@@ -345,7 +341,6 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   return await geminiGerarTexto(prompt);
 }
 
-// PROMPT CORRIGIDO
 async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const nomeRegiao = regiao?.nome || "Região dos Lagos";
@@ -363,7 +358,27 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
   return await geminiGerarTexto(prompt);
 }
 
+async function analisarIntencaoDoUsuario(textoDoUsuario) {
+  if (forcarBuscaParceiro(textoDoUsuario)) return "busca_parceiro";
+
+  const prompt = `Sua única tarefa é analisar a frase do usuário e classificá-la em uma das seguintes categorias: 'busca_parceiro', 'pergunta_geral'. Responda apenas com a string da categoria. Frase: "${textoDoUsuario}"`;
+  const saida = await geminiGerarTexto(prompt);
+  const text = (saida || "").trim().toLowerCase();
+
+  const classes = new Set(["busca_parceiro", "pergunta_geral"]);
+  const r = classes.has(text) ? text : "pergunta_geral";
+
+  if (r !== "busca_parceiro" && forcarBuscaParceiro(textoDoUsuario)) {
+    return "busca_parceiro";
+  }
+  return r;
+}
+
 function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
+  try {
+    const texto = normalizarTexto(textoDoUsuario);
+    if (!Array.isArray(listaDeParceiros) || listaDeParceeiros.length === 0) return null;
+  } catch {}
   try {
     const texto = normalizarTexto(textoDoUsuario);
     if (!Array.isArray(listaDeParceiros) || listaDeParceiros.length === 0) return null;
@@ -395,14 +410,24 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
   }
 }
 
-// NOVA VERSÃO OTIMIZADA
-async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa }) {
+// ====== NOVO FLUXO: chamada de busca com paginação inteligente/refinamento ====
+async function lidarComNovaBusca({
+  textoDoUsuario,
+  historicoGemini,
+  regiao,
+  cidadesAtivas,
+  idDaConversa,
+  isInitialSearch = false,
+  excludeIds = []
+}) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
 
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
     cidadesAtivas,
     argumentosDaFerramenta: entidades,
-    textoOriginal: textoDoUsuario
+    textoOriginal: textoDoUsuario,
+    isInitialSearch,
+    excludeIds
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
@@ -433,7 +458,6 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
   }
 }
 
-
 // ============================== ROTAS =======================================
 
 // ------------------------------ CHAT ----------------------------------------
@@ -453,7 +477,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const { data: cidades, error: erroCidades } = await supabase.from("cidades").select("id, nome, slug, lat, lng, ativo").eq("regiao_id", regiao.id);
     if (erroCidades) return res.status(500).json({ error: "Erro ao carregar cidades.", internal: erroCidades });
     const cidadesAtivas = (cidades || []).filter(c => c.ativo !== false);
-    
+
     if (!conversationId || typeof conversationId !== "string" || !conversationId.trim()) {
       conversationId = randomUUID();
       try {
@@ -465,15 +489,50 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     let conversaAtual = null;
     try {
-      const { data: conv } = await supabase.from("conversas").select("id, parceiro_em_foco, parceiros_sugeridos").eq("id", conversationId).maybeSingle();
+      const { data: conv } = await supabase
+        .from("conversas")
+        .select("id, parceiro_em_foco, parceiros_sugeridos, aguardando_refinamento")
+        .eq("id", conversationId)
+        .maybeSingle();
       conversaAtual = conv || null;
     } catch {}
 
     const historicoGemini = await construirHistoricoParaGemini(conversationId, 12);
-    
+
+    // ================= INÍCIO: NOVO FLUXO DE REFINAMENTO ===================
+    if (conversaAtual?.aguardando_refinamento) {
+      const criteriosDeBusca = textoDoUsuario;
+      const parceirosJaSugeridos = Array.isArray(conversaAtual.parceiros_sugeridos)
+        ? conversaAtual.parceiros_sugeridos.map(p => p.id).filter(Boolean)
+        : [];
+
+      const r = await lidarComNovaBusca({
+        textoDoUsuario: criteriosDeBusca,
+        historicoGemini,
+        regiao,
+        cidadesAtivas,
+        idDaConversa: conversationId,
+        isInitialSearch: false,
+        excludeIds: parceirosJaSugeridos
+      });
+
+      try {
+        await supabase.from("conversas").update({ aguardando_refinamento: false }).eq("id", conversationId);
+      } catch {}
+
+      const fotos = (r.parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
+      return res.status(200).json({
+        reply: r.respostaFinal,
+        photoLinks: fotos,
+        conversationId,
+        partners: r.parceirosSugeridos
+      });
+    }
+    // ================== FIM: NOVO FLUXO DE REFINAMENTO =====================
+
+    // Seleção direta por "1º/2º" ou nome
     const candidatos = Array.isArray(conversaAtual?.parceiros_sugeridos) ? conversaAtual.parceiros_sugeridos : [];
     const parceiroSelecionado = encontrarParceiroNaLista(textoDoUsuario, candidatos);
-    
     if (parceiroSelecionado) {
       try {
         await supabase.from("conversas").update({ parceiro_em_foco: parceiroSelecionado }).eq("id", conversationId);
@@ -485,26 +544,68 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         foundPartnersList: [parceiroSelecionado],
         mode: "partners"
       });
-      
+
       let interactionId = null;
       try {
-        const { data: nova } = await supabase.from("interacoes").insert({ regiao_id: regiao.id, conversation_id: conversationId, pergunta_usuario: textoDoUsuario, resposta_ia: respostaCurtaSegura, parceiros_sugeridos: [parceiroSelecionado] }).select("id").single();
+        const { data: nova } = await supabase.from("interacoes").insert({
+          regiao_id: regiao.id,
+          conversation_id: conversationId,
+          pergunta_usuario: textoDoUsuario,
+          resposta_ia: respostaCurtaSegura,
+          parceiros_sugeridos: [parceiroSelecionado]
+        }).select("id").single();
         interactionId = nova?.id || null;
       } catch (e) {
         console.warn("[INTERACOES] Falha ao salvar (seleção):", e?.message || e);
       }
 
       const fotos = [parceiroSelecionado].flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
-      return res.status(200).json({ reply: respostaCurtaSegura, interactionId, photoLinks: fotos, conversationId, intent: "follow_up_parceiro", partners: [parceiroSelecionado] });
+      return res.status(200).json({
+        reply: respostaCurtaSegura,
+        interactionId,
+        photoLinks: fotos,
+        conversationId,
+        intent: "follow_up_parceiro",
+        partners: [parceiroSelecionado]
+      });
     }
 
+    // ↓↓↓ NOVO: detecção de pedido por "mais/outras opções"
+    const palavrasDeRefinamento = ["outras opções", "outras", "mais opções", "mais", "não gostei", "nao gostei", "outra sugestão", "outra sugestao"];
+    const pediuRefinamento = palavrasDeRefinamento.some(p => normalizarTexto(textoDoUsuario).includes(p));
+    if (pediuRefinamento && Array.isArray(conversaAtual?.parceiros_sugeridos) && conversaAtual.parceiros_sugeridos.length > 0) {
+      const perguntaRefinamento = "Ok! Para te ajudar a encontrar a opção ideal, o que você procura? (Ex.: mais barato, ambiente família, vista para o mar, rodízio, etc.)";
+      try {
+        await supabase.from("conversas").update({ aguardando_refinamento: true }).eq("id", conversationId);
+        await supabase.from("interacoes").insert({
+          regiao_id: regiao.id,
+          conversation_id: conversationId,
+          pergunta_usuario: textoDoUsuario,
+          resposta_ia: perguntaRefinamento
+        });
+      } catch (e) {
+        console.warn("[REFINAMENTO] Falha ao registrar estado:", e?.message || e);
+      }
+      return res.status(200).json({ reply: perguntaRefinamento, conversationId });
+    }
+
+    // Intenção
     const intent = await analisarIntencaoDoUsuario(textoDoUsuario);
     let respostaFinal = "";
     let parceirosSugeridos = [];
 
     switch (intent) {
       case "busca_parceiro": {
-        const r = await lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa: conversationId });
+        // PRIMEIRA BUSCA: paginação inteligente (3 aleatórios)
+        const r = await lidarComNovaBusca({
+          textoDoUsuario,
+          historicoGemini,
+          regiao,
+          cidadesAtivas,
+          idDaConversa: conversationId,
+          isInitialSearch: true,
+          excludeIds: []
+        });
         respostaFinal = r.respostaFinal;
         parceirosSugeridos = r.parceirosSugeridos;
         break;
@@ -527,7 +628,17 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     let interactionId = null;
     try {
-      const { data: nova, error: errIns } = await supabase.from("interacoes").insert({ regiao_id: regiao.id, conversation_id: conversationId, pergunta_usuario: textoDoUsuario, resposta_ia: respostaFinal, parceiros_sugeridos: parceirosSugeridos }).select("id").single();
+      const { data: nova, error: errIns } = await supabase
+        .from("interacoes")
+        .insert({
+          regiao_id: regiao.id,
+          conversation_id: conversationId,
+          pergunta_usuario: textoDoUsuario,
+          resposta_ia: respostaFinal,
+          parceiros_sugeridos: parceirosSugeridos
+        })
+        .select("id")
+        .single();
       if (errIns) throw errIns;
       interactionId = nova?.id || null;
     } catch (e) {
@@ -535,14 +646,20 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     }
 
     const fotos = (parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
-    return res.status(200).json({ reply: respostaFinal, interactionId, photoLinks: fotos, conversationId, intent, partners: parceirosSugeridos });
+    return res.status(200).json({
+      reply: respostaFinal,
+      interactionId,
+      photoLinks: fotos,
+      conversationId,
+      intent,
+      partners: parceirosSugeridos
+    });
 
   } catch (erro) {
     console.error("[/api/chat/:slugDaRegiao] Erro:", erro);
     return res.status(500).json({ error: "Erro interno no servidor do BEPIT.", internal: { message: String(erro?.message || erro) } });
   }
 });
-
 
 // ------------------------------ FEEDBACK ------------------------------------
 aplicacaoExpress.post("/api/feedback", async (req, res) => {
@@ -561,7 +678,6 @@ aplicacaoExpress.post("/api/feedback", async (req, res) => {
     res.status(500).json({ error: "Erro interno." });
   }
 });
-
 
 // ------------------------------ HEALTH/DIAG ---------------------------------
 aplicacaoExpress.get("/health", (_req, res) => res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) }));
@@ -664,8 +780,7 @@ aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChave
   }
 });
 
-
 // ============================== START =======================================
 aplicacaoExpress.listen(portaDoServidor, () => {
-  console.log(`✅ BEPIT Nexus (Orquestrador v3.5 Otimizado) rodando em http://localhost:${portaDoServidor}`);
+  console.log(`✅ BEPIT Nexus (Orquestrador v4.0) rodando em http://localhost:${portaDoServidor}`);
 });
