@@ -7,7 +7,7 @@
 // Requer extensões: unaccent, pg_trgm.
 // ============================================================================
 
-import { supabase } from "../lib/supabaseClient.js"; // <-- corrigido (um nível acima)
+import { supabase } from "../../lib/supabaseClient.js"; // <-- corrigido (um nível acima)
 
 // Normaliza o termo (minúsculo + sem acentos)
 export function normalizeTerm(s) {
