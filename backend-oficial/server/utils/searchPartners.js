@@ -10,41 +10,191 @@
 import { supabase } from "../../lib/supabaseClient.js";
 
 // ---------------------------------------------------------------------------
-// Normaliza o termo (minúsculo + sem acentos) e corrige typos comuns
+// DICIONÁRIO DE TOLERÂNCIAS (normalizado: minúsculo + sem acento)
+// Observação: normalizeTerm() abaixo já remove acentos/caixa; por isso
+// TODAS as chaves deste mapa estão sem acentos.
 // ---------------------------------------------------------------------------
-export function normalizeTerm(s) {
-  if (!s) return "";
-  let out = String(s).toLowerCase();
-  out = out.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const FIX = new Map([
+  // === HOSPEDAGEM ===
+  ["pousadinha", "pousada"],
+  ["posada", "pousada"],
+  ["pouzada", "pousada"],
+  ["caza", "casa"],
+  ["kasa", "casa"],
+  ["kaza", "casa"],
+  ["casinha", "casa"],
+  ["cazinha", "casa"],
+  ["casarao", "casa"],
+  ["cazarao", "casa"],
+  ["casa de temporada", "casa para temporada"],
+  ["casa temporada", "casa para temporada"],
+  ["casaparatemporada", "casa para temporada"],
+  ["otel", "hotel"],
+  ["hoteis", "hotel"],
+  ["ostel", "hostel"],
+  ["alojamiento", "alojamento"],
+  ["canping", "camping"],
+  ["campin", "camping"],
+  ["chaleh", "chale"],
+  ["chales", "chale"],
+  ["suite", "flat"], // suite como tipo de flat/apto
+  ["resorte", "resort"],
+
+  // === ALIMENTAÇÃO ===
+  ["piconha", "picanha"],
+  ["piconia", "picanha"],
+  ["piconia", "picanha"],
+  ["picania", "picanha"],
+  ["karn", "carne"],
+  ["peixe frito", "peixe"],
+  ["peixada", "peixe"],
+  ["muqueca", "moqueca"],
+  ["camaro", "camarao"],
+  ["camaraum", "camarao"],
+  ["carangueijo", "caranguejo"],
+  ["siri na lata", "siri"],
+  ["casquinha de siri", "casquinha"],
+  ["pastel de camarao", "pastel"],
+  ["pastel de carne", "pastel"],
+  ["hamburquer", "hamburguer"],
+  ["amburguer", "hamburguer"],
+  ["burger", "hamburguer"],
+  ["burguer", "hamburguer"],
+  ["pitsa", "pizza"],
+  ["pitza", "pizza"],
+  ["rodisio", "rodizio"],
+  ["rodizio de carne", "rodizio"],
+  ["rodizio de pizza", "rodizio"],
+  ["petiscos", "petisco"],
+  ["macarrao", "massas"],
+  ["macarronada", "massas"],
+  ["comida japonesa", "cozinha japonesa"],
+  ["sushi", "cozinha japonesa"],
+  ["sashimi", "cozinha japonesa"],
+  ["temaki", "cozinha japonesa"],
+  ["suchi", "cozinha japonesa"],
+  ["esfira", "esfiha"],
+  ["esfirra", "esfiha"],
+  ["acarage", "acaraje"],
+  ["costelinha", "costela"],
+  ["churras", "churrasco"],
+  ["churrascaria", "churrasco"], // usuário às vezes escreve o gênero pelo tipo
+  ["acai", "acai"],
+  ["self service", "self-service"],
+  ["comida por kilo", "comida a quilo"],
+
+  // === SERVIÇOS ===
+  ["aluguel de carros", "aluguel de carro"],
+  ["aluga carro", "aluguel de carro"],
+  ["aluga moto", "aluguel de moto"],
+  ["jet ski", "aluguel de jet ski"],
+  ["jetski", "aluguel de jet ski"],
+  ["lancha", "aluguel de lancha"],
+  ["barco", "aluguel de barco"],
+  ["arcondicionado", "aluguel de ar condicionado"],
+  ["motorista", "motorista particular"],
+  ["guia turistico", "guia de turismo"],
+  ["fotografo de passeio", "fotografo"],
+  ["agencia de turismo", "agencia de viagens"],
+  ["traslado", "transfer"],
+  ["prancha de surf", "aluguel de prancha"],
+  ["aula de surfe", "aula de surf"],
+  ["kite surf", "aula de kitesurf"],
+  ["kitesurf", "aula de kitesurf"],
+  ["standup paddle", "aula de stand up paddle"],
+  ["stand-up-paddle", "aula de stand up paddle"],
+  ["sup", "aula de stand up paddle"],
+  ["farmassia", "farmacia"],
+  ["remedio", "farmacia"],
+  ["supermercado", "mercado"],
+  ["panificadora", "padaria"],
+
+  // === SHOWS/EVENTOS ===
+  ["barsinho", "barzinho"],
+  ["bar com musica", "bar"],
+  ["musica ao vivo", "ao vivo"],
+  ["shoppin", "shopping"],
+  ["loja", "lojas"],
+  ["rua dos biquinis", "rua dos biquinis"],
+  ["praca da cidadania", "praca da liberdade"], // conforme solicitado
+  ["show de rock", "rock"],
+  ["pagode", "samba"],
+  ["rodas de samba", "samba"],
+  ["festa", "balada"],
+  ["night", "balada"],
+  ["pubi", "pub"],
+  ["reveion", "reveillon"],
+  ["ano novo", "reveillon"],
+
+  // === PASSEIOS/LOCAIS ===
+  ["passeio de barco", "barco"],
+  ["trilias", "trilha"],
+  ["buggy", "bugre"],
+  ["bug", "bugre"],
+  ["praia", "praias"],
+  ["forte sao mateus", "forte"],
+  ["praia dos anjos", "anjos"],
+  ["praia do forno", "do forno"],
+  ["praia do farol", "farol"],
+  ["prainhas", "prainhas do atalaia"],
+  ["pontal do atalaia", "prainhas do atalaia"],
+  ["geriba", "geriba"],
+  ["feradurinha", "ferradura"],
+  ["busios", "buzios"],
+  ["arraial do cabo", "arraial"],
+  ["cabo frio", "cabo frio"],
+  ["rio das ostras", "rio das ostras"],
+  ["sao pedro", "sao pedro da aldeia"],
+  ["joao fernandes", "joao fernandes"],
+  ["ilha do japones", "japones"],
+  ["mergulio", "mergulho"],
+  ["snorkeling", "snorkel"],
+  ["pordosol", "por do sol"],
+  ["por do sol", "por do sol"],
+  ["rua das pedras", "rua das pedras"],
+]);
+
+// Normaliza o termo (minúsculo + sem acentos) e aplica o dicionário FIX
+export function normalizeTerm(input) {
+  if (!input) return "";
+  // 1) normalização básica
+  let out = String(input).toLowerCase();
+  out = out.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // remove acentos
   out = out.replace(/\s+/g, " ").trim();
 
-  // Correções simples por palavra (expanda conforme necessário)
-  const FIX = new Map([
-    ["piconha", "picanha"],
-    ["piconia", "picanha"],
-    ["picania", "picanha"],
+  // 2) substituições exatas por palavra/frase (na ordem decrescente de tamanho
+  //    para priorizar frases maiores — evita "quebrar" composições)
+  //    Obs.: como já normalizamos (sem acentos/caixa), as chaves de FIX estão
+  //    nesse mesmo formato e casam direto.
+  const entries = Array.from(FIX.entries()).sort(
+    // maior chave primeiro (frases > palavras); desempate alfabético estável
+    (a, b) => b[0].length - a[0].length || (a[0] > b[0] ? 1 : -1)
+  );
 
-    // exemplos de normalização de termos populares com erro
-    ["hambuguer", "hamburguer"],
-    ["hamburquer", "hamburguer"],
-
-    // acentos já foram removidos acima, mas mantemos para referência de termos
-    ["rodizio", "rodizio"],
-    ["acaraje", "acaraje"],
-  ]);
-
-  out = out
-    .split(" ")
-    .map((w) => FIX.get(w) || w)
-    .join(" ");
+  for (const [from, to] of entries) {
+    // substitui apenas quando encontra token/frase inteira
+    // - se for frase com espaços, aplica substituição direta
+    // - se for palavra, usa bordas (\b) para evitar trocar substrings
+    if (from.includes(" ")) {
+      const re = new RegExp(`\\b${escapeRegExp(from)}\\b`, "g");
+      out = out.replace(re, to);
+    } else {
+      const re = new RegExp(`\\b${escapeRegExp(from)}\\b`, "g");
+      out = out.replace(re, to);
+    }
+  }
 
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Resolve o UUID da cidade a partir do slug (via RPC no banco).
-// Retorna null se não encontrar.
-// ---------------------------------------------------------------------------
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Resolve o UUID da cidade a partir do slug (via RPC no banco).
+ * Retorna null se não encontrar.
+ */
 export async function getCidadeIdBySlug(cidadeSlug) {
   if (!cidadeSlug) return null;
   const { data, error } = await supabase.rpc("cidade_id_by_slug", { p_slug: cidadeSlug });
@@ -55,9 +205,7 @@ export async function getCidadeIdBySlug(cidadeSlug) {
   return data ?? null;
 }
 
-// ---------------------------------------------------------------------------
-// Embaralha um array in-place (Fisher–Yates) — para variedade na 1ª busca.
-// ---------------------------------------------------------------------------
+/** Embaralha um array (Fisher–Yates) — ajuda a dar variedade na 1ª busca. */
 function shuffleInPlace(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -65,23 +213,24 @@ function shuffleInPlace(arr) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Busca tolerante via RPC + pós-processamento:
-//  - Filtra excludeIds no Node (evita repetir nas próximas páginas/refinos)
-//  - Se isInitialSearch = true: amplia o fetch (até 24), embaralha e retorna 3
-//  - Senão: respeita o limit normal (default 5) e mantém a ordem da RPC
-//
-// Parâmetros:
-//  - cidadeId?: string (uuid)
-//  - cidadeSlug?: string
-//  - categoria: string (minúsculas, ex.: 'churrascaria', 'restaurante')
-//  - term?: string (termo livre; tolera typos)
-//  - limit?: number (default 10; ignorado quando isInitialSearch=true)
-//  - isInitialSearch?: boolean (default false)
-//  - excludeIds?: string[] (IDs para NÃO retornar)
-//
-// Retorno: { ok: boolean, items?: any[], error?: string }
-// ---------------------------------------------------------------------------
+/**
+ * Busca tolerante via RPC + pós-processamento:
+ * - Aplica normalizeTerm (com dicionário FIX).
+ * - Filtra excludeIds no Node (para não repetir nas próximas páginas/refinos).
+ * - Se isInitialSearch = true: busca 24, embaralha e retorna 3 aleatórios.
+ * - Senão: respeita limit (default 5) e mantém a ordem da RPC (relevância).
+ *
+ * @param {Object} opts
+ *  - cidadeId?: string (uuid)
+ *  - cidadeSlug?: string
+ *  - categoria: string (ex.: 'churrascaria', 'restaurante' — minúsculas)
+ *  - term?: string (termo livre; tolera typos)
+ *  - limit?: number (default 10; ignorado quando isInitialSearch=true)
+ *  - isInitialSearch?: boolean (default false)
+ *  - excludeIds?: string[] (IDs para NÃO retornar)
+ *
+ * @returns {Promise<{ok: boolean, items?: any[], error?: string}>}
+ */
 export async function buscarParceirosTolerante({
   cidadeId,
   cidadeSlug,
@@ -89,7 +238,7 @@ export async function buscarParceirosTolerante({
   term,
   limit = 10,
   isInitialSearch = false,
-  excludeIds = [],
+  excludeIds = []
 }) {
   console.log("\n==================== INICIANDO BUSCA TOLERANTE (v4.0) ====================");
   try {
@@ -119,67 +268,39 @@ export async function buscarParceirosTolerante({
     }
 
     const termNorm = normalizeTerm(term || "");
-
-    // Para isInitialSearch, buscamos mais (24) e depois reduzimos/aleatorizamos no Node.
     const rpcLimit = isInitialSearch ? 24 : Math.max(1, Math.min(50, limit || 10));
 
     const params = {
       p_cidade_id: cidadeUUID,
       p_categoria_norm: categoriaNorm,
       p_term_norm: termNorm,
-      p_limit: rpcLimit,
+      p_limit: rpcLimit
     };
 
-    console.log(
-      "[DEBUG] Parâmetros RPC search_parceiros:",
-      params,
-      "isInitialSearch=",
-      isInitialSearch,
-      "excludeIds=",
-      excludeIds
-    );
+    console.log("[DEBUG] Parâmetros RPC search_parceiros:", params, "isInitialSearch=", isInitialSearch, "excludeIds=", excludeIds);
 
-    // -------- Chamada principal à RPC
-    const rpc = await supabase.rpc("search_parceiros", params);
-    if (rpc.error) {
-      console.error("[DEBUG] !!! ERRO RPC search_parceiros:", rpc.error);
+    const { data, error } = await supabase.rpc("search_parceiros", params);
+    if (error) {
+      console.error("[DEBUG] !!! ERRO RPC search_parceiros:", error);
       console.log("====================================================================\n");
       return { ok: false, error: "Falha na busca (RPC)." };
     }
 
-    // Converte para array
-    let rows = Array.isArray(rpc.data) ? rpc.data : [];
-    console.log(`[DEBUG] RPC retornou ${rows.length} itens (antes de filtros).`);
-
-    // -------- Fallback de typo específico: “piconha” -> “picanha”
-    // Se não veio nada e o termo original aparenta ser “piconh…”, re-tenta 1x com "picanha".
-    if (rows.length === 0 && /piconh/i.test(term || "")) {
-      const paramsRetry = { ...params, p_term_norm: "picanha" };
-      console.log("[DEBUG] Fallback typo -> tentando com 'picanha':", paramsRetry);
-      const retry = await supabase.rpc("search_parceiros", paramsRetry);
-      if (!retry.error && Array.isArray(retry.data) && retry.data.length > 0) {
-        rows = retry.data;
-        console.log(`[DEBUG] Fallback recuperou ${rows.length} item(ns).`);
-      }
-    }
-
-    // A partir daqui trabalhamos com "items"
-    let items = rows;
+    let items = Array.isArray(data) ? data : [];
+    console.log(`[DEBUG] RPC retornou ${items.length} itens (antes de filtros).`);
 
     // Excluir IDs já exibidos (se houver)
     const excludeSet = new Set((excludeIds || []).filter(Boolean));
     if (excludeSet.size > 0) {
-      items = items.filter((p) => p && p.id && !excludeSet.has(p.id));
+      items = items.filter(p => p && p.id && !excludeSet.has(p.id));
       console.log(`[DEBUG] Após excludeIds, restaram ${items.length} itens.`);
     }
 
-    // Primeira busca: embaralhar e pegar 3 (paginação inteligente inicial)
     if (isInitialSearch) {
       shuffleInPlace(items);
       items = items.slice(0, 3);
       console.log(`[DEBUG] isInitialSearch: retornando ${items.length} aleatórios.`);
     } else {
-      // Refinamento/lista normal: respeita limit (default 5 ou o passado)
       const finalLimit = Math.max(1, Math.min(20, limit || 5));
       items = items.slice(0, finalLimit);
       console.log(`[DEBUG] busca refinada: retornando até ${finalLimit} itens (sobrou ${items.length}).`);
