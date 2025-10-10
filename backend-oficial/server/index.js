@@ -682,8 +682,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
+    const debug = String(req.query.debug || "") === "1";
 
-    // 1) Validar/pegar a região
+    // 1) Região
     const { data: regiao, error: erroRegiao } = await supabase
       .from("regioes")
       .select("id, ativo, nome, slug")
@@ -691,51 +692,63 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
       .single();
 
     if (erroRegiao || !regiao) {
+      if (debug) console.error("[avisos] região erro:", erroRegiao);
       return res.status(404).json({ error: "Região não encontrada." });
     }
     if (regiao.ativo === false) {
       return res.status(403).json({ error: "Região desativada." });
     }
 
-    // 2) Buscar avisos ativos para a região - ordem preferida: data_publicacao desc
-    let avisos = [];
-    let erroAvisos = null;
+    // 2) Buscar avisos ativos (sem ORDER BY para evitar erro de coluna inexistente)
+    const { data, error: erroAvisos } = await supabase
+      .from("avisos_publicos")
+      .select("*")
+      .eq("regiao_id", regiao.id)
+      .eq("ativo", true);
 
-    // Primeira tentativa: ordenar por data_publicacao (mais recente primeiro)
-    {
-      const { data, error } = await supabase
-        .from("avisos_publicos")
-        .select("*")
-        .eq("regiao_id", regiao.id)
-        .eq("ativo", true)
-        .order("data_publicacao", { ascending: false });
-      avisos = data || [];
-      erroAvisos = error || null;
-    }
-
-    // Fallback: se a coluna data_publicacao não existir/gerar erro, ordena por created_at
     if (erroAvisos) {
-      const { data, error } = await supabase
-        .from("avisos_publicos")
-        .select("*")
-        .eq("regiao_id", regiao.id)
-        .eq("ativo", true)
-        .order("created_at", { ascending: false });
-      if (error) {
-        throw error;
-      }
-      avisos = data || [];
+      if (debug) console.error("[avisos] erro consulta avisos:", erroAvisos);
+      return res
+        .status(500)
+        .json({ error: "Falha ao consultar avisos da região." });
     }
 
-    // 3) Retornar formato esperado pelo front (items)
+    const avisos = Array.isArray(data) ? data : [];
+
+    // 3) Ordenar em memória pelo campo disponível (mais recente primeiro)
+    const pickDate = (row) =>
+      row?.data_publicacao ??
+      row?.created_at ??
+      row?.periodo_inicio ??
+      row?.updated_at ??
+      null;
+
+    avisos.sort((a, b) => {
+      const da = pickDate(a);
+      const db = pickDate(b);
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      // mais recente primeiro
+      return Date.parse(db) - Date.parse(da);
+    });
+
+    // 4) Retorno
     return res.status(200).json({ items: avisos });
   } catch (erro) {
-    console.error("[/api/avisos/:slugDaRegiao] Erro:", erro);
+    console.error("[/api/avisos/:slugDaRegiao] Erro inesperado:", erro);
+    const debug = String(req.query.debug || "") === "1";
+    if (debug) {
+      return res
+        .status(500)
+        .json({ error: "Erro interno ao buscar avisos.", internal: String(erro?.message || erro) });
+    }
     return res
       .status(500)
       .json({ error: "Erro interno no servidor ao buscar avisos." });
   }
 });
+
 
 
 // ------------------------------ FEEDBACK ------------------------------------
