@@ -1,68 +1,20 @@
 // src/App.jsx
-import React, { useState } from "react";
-import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
-import RegionSelection from "./components/RegionSelection";
-import ChatPage from "./components/ChatPage";
-import AdminLogin from "./admin/AdminLogin";
-import AdminDashboard from "./admin/AdminDashboard";
-import ProtectedRoute from "./components/ProtectedRoute";
+import React from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import RegionSelection from "./pages/RegionSelection.jsx";
+import ChatPage from "./pages/ChatPage.jsx";
 
-const themes = {
-  light: {
-    background: "#fff",
-    text: "#222",
-    headerBg: "#f8f8f8",
-    inputBg: "#f0f0f0",
-    assistantBubble: "#e9e9eb"
-  },
-  dark: {
-    background: "#121212",
-    text: "#e0e0e0",
-    headerBg: "#1e1e1e",
-    inputBg: "#2a2a2a",
-    assistantBubble: "#2c2c2e"
-  }
-};
-
-function App() {
-  const [theme, setTheme] = useState("light");
-  const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
-  const currentTheme = themes[theme];
-
+export default function App() {
   return (
-    <Router>
-      <div
-        style={{
-          backgroundColor: currentTheme.background,
-          color: currentTheme.text,
-          minHeight: "100vh"
-        }}
-      >
-        <Routes>
-          {/* público */}
-          <Route path="/" element={<RegionSelection theme={currentTheme} />} />
-          {/* agora /chat NÃO tem slug na URL; o slug é lido do localStorage */}
-          <Route
-            path="/chat"
-            element={<ChatPage theme={currentTheme} onToggleTheme={toggleTheme} />}
-          />
-
-          {/* admin login (público) */}
-          <Route path="/admin/login" element={<AdminLogin />} />
-
-          {/* admin protegido */}
-          <Route
-            path="/admin/*"
-            element={
-              <ProtectedRoute>
-                <AdminDashboard />
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
-      </div>
-    </Router>
+    <BrowserRouter>
+      <Routes>
+        {/* Página inicial: seleção de região */}
+        <Route path="/" element={<RegionSelection />} />
+        {/* Chat principal (exige região no localStorage; valida dentro do componente) */}
+        <Route path="/chat" element={<ChatPage />} />
+        {/* Fallback simples */}
+        <Route path="*" element={<RegionSelection />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
-
-export default App;

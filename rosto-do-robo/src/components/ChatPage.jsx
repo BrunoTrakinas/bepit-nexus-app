@@ -1,460 +1,355 @@
-// src/components/ChatPage.jsx
-import React, { useEffect, useRef, useState } from "react";
+// src/pages/ChatPage.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import SuggestionButtons from "./SuggestionButtons.jsx";
 import apiClient from "../lib/apiClient.js";
-import AvisosModal from "./AvisosModal.jsx";
+import SuggestionButtons from "../components/SuggestionButtons.jsx";
+import AvisosModal from "../components/AvisosModal.jsx"; // abre quando clicar no botão de avisos
 
-export default function ChatPage({ theme, onToggleTheme }) {
+/**
+ * Componente principal do chat do BEPIT.
+ * - Garante região no localStorage (redireciona se faltar)
+ * - Mostra mensagem de boas-vindas dinâmica com sugestão de ver os avisos
+ * - Botão "⚠️ Avisos da Região" para abrir o modal
+ * - Sugestões iniciais e envio de mensagens pro backend
+ */
+export default function ChatPage() {
   const navigate = useNavigate();
 
-  // região vinda do localStorage
-  const [regiao, setRegiao] = useState(null);
-  const [conversationId, setConversationId] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [photos, setPhotos] = useState([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [showAvisos, setShowAvisos] = useState(false);
-
-  const listRef = useRef(null);
-
-  // Carrega a região do localStorage e configura a mensagem de boas-vindas
-  useEffect(() => {
+  // Carrega a região do localStorage:
+  const region = useMemo(() => {
     try {
-      const raw = localStorage.getItem("bepit.regiao");
-      if (!raw) {
-        navigate("/");
-        return;
-      }
-      const obj = JSON.parse(raw);
-      if (!obj || !obj.slug || !obj.nome) {
-        navigate("/");
-        return;
-      }
-      setRegiao(obj);
-
-      // mensagem de boas-vindas dinâmica
-      const welcome = {
-        role: "assistant",
-        text: `Olá! Eu sou o BEPIT, seu concierge IA em ${obj.nome}.`
-      };
-      setMessages([welcome]);
+      const raw = localStorage.getItem("bepit:region");
+      return raw ? JSON.parse(raw) : null;
     } catch {
-      navigate("/");
+      return null;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Rolagem automática ao final quando chegam mensagens/fotos ou estado de "digitando..."
+  // Se não houver região salva, volta para a seleção
   useEffect(() => {
-    if (listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight;
+    if (!region?.slug) {
+      navigate("/", { replace: true });
     }
-  }, [messages, photos, loading]);
+  }, [region, navigate]);
 
-  async function enviarMensagem(textoManual) {
-    if (!regiao || !regiao.slug) return;
+  // ConversationId persistente por região (pra continuar conversas):
+  const [conversationId, setConversationId] = useState(() => {
+    if (!region?.slug) return "";
+    try {
+      const key = `bepit:conv:${region.slug}`;
+      const v = localStorage.getItem(key);
+      return v || "";
+    } catch {
+      return "";
+    }
+  });
 
-    const texto = (textoManual ?? input).trim();
-    if (!texto || loading) return;
+  const saveConversationId = (id) => {
+    if (!region?.slug || !id) return;
+    try {
+      const key = `bepit:conv:${region.slug}`;
+      localStorage.setItem(key, id);
+    } catch {}
+    setConversationId(id);
+  };
 
-    const novaMsgUser = { role: "user", text: texto };
-    setMessages((prev) => [...prev, novaMsgUser]);
+  // Estado do chat:
+  const [messages, setMessages] = useState(() => {
+    const nome = region?.nome || "sua região";
+    const boasVindas =
+      `Olá! Eu sou o BEPIT, seu concierge IA em ${nome}.\n\n` +
+      `Dica: antes de perguntar qualquer coisa, vale conferir os ⚠️ avisos da região — às vezes eles já respondem dúvidas sobre tráfego, horários de passeios, condições do mar, etc. Quando quiser, clique no botão “⚠️ Avisos da Região” aqui em cima.`;
+
+    return [
+      {
+        id: `welcome-${Date.now()}`,
+        role: "assistant",
+        text: boasVindas,
+        meta: { type: "welcome" },
+      },
+    ];
+  });
+
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const listEndRef = useRef(null);
+
+  // Modal de avisos
+  const [avisosOpen, setAvisosOpen] = useState(false);
+
+  // Auto-scroll ao final quando chegam mensagens
+  useEffect(() => {
+    if (listEndRef.current) {
+      listEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [messages]);
+
+  async function enviarMensagem(texto) {
+    if (!region?.slug || !texto?.trim() || isLoading) return;
+
+    const userMsg = {
+      id: `u-${Date.now()}`,
+      role: "user",
+      text: texto.trim(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
     setInput("");
-    setLoading(true);
-    setPhotos([]);
+    setIsLoading(true);
 
     try {
-      const data = await apiClient.enviarMensagemParaChat(regiao.slug, {
-        message: texto,
-        conversationId
-      });
+      const body = {
+        message: texto.trim(),
+        ...(conversationId ? { conversationId } : {}),
+      };
 
-      if (!conversationId && data?.conversationId) {
-        setConversationId(data.conversationId);
-      }
+      const resp = await apiClient.enviarMensagemParaChat(region.slug, body);
+      // Esperado do backend v4.0:
+      // { reply: string, conversationId: string, partners?: [], photoLinks?: [] }
+      const assistantText = resp?.reply || "…";
+      const convId = resp?.conversationId || conversationId || "";
+      if (convId && convId !== conversationId) saveConversationId(convId);
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: data?.reply || "..." }
-      ]);
-      setPhotos(Array.isArray(data?.photoLinks) ? data.photoLinks : []);
+      const assistantMsg = {
+        id: `a-${Date.now()}`,
+        role: "assistant",
+        text: assistantText,
+        meta: {
+          partners: resp?.partners || [],
+          photos: resp?.photoLinks || [],
+          intent: resp?.intent || "",
+        },
+      };
+
+      setMessages((prev) => [...prev, assistantMsg]);
     } catch (e) {
-      const detalhes =
-        e?.data?.error ||
-        e?.message ||
-        "Falha ao enviar sua mensagem. Tente novamente.";
+      const errMsg = e?.message || "Falha ao contatar o BEPIT.";
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", text: `Desculpe, ocorreu um erro: ${detalhes}` }
+        {
+          id: `err-${Date.now()}`,
+          role: "assistant",
+          text: `Ops! ${errMsg}`,
+          meta: { error: true },
+        },
       ]);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   }
 
-  function onEnterEnviar(e) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      enviarMensagem();
+  function onSuggestionClick(textoSugestao) {
+    // Você pode personalizar estes textos para mapear diretamente a intenções:
+    let prompt = textoSugestao;
+
+    // Exemplos simples:
+    if (/restaurante/i.test(textoSugestao)) {
+      prompt = "Onde comer?";
+    } else if (/passeio/i.test(textoSugestao)) {
+      prompt = "Quais passeios de barco você recomenda?";
+    } else if (/praia/i.test(textoSugestao)) {
+      prompt = "Quais praias visitar?";
+    } else if (/dica/i.test(textoSugestao)) {
+      prompt = "Tem dicas locais imperdíveis?";
     }
+
+    enviarMensagem(prompt);
   }
 
-  function onSuggestionClick(texto) {
-    setInput(texto);
-    enviarMensagem(texto);
+  // Defesa: se a região ainda não foi carregada, evita flicker:
+  if (!region?.slug) {
+    return null; // o useEffect já redireciona
   }
-
-  const assistantBubbleBg =
-    theme?.assistantBubble || (theme.background === "#fff" ? "#f5f7fb" : "#20242c");
-  const assistantBorder = theme.background === "#fff" ? "#e6e8ee" : "#2a2f3a";
-  const userBubbleBg = "#0b74de";
-  const userTextColor = "#fff";
 
   return (
     <div
       style={{
+        minHeight: "100vh",
         display: "grid",
         gridTemplateRows: "auto 1fr auto",
-        height: "100vh",
-        overflow: "hidden",
-        backgroundColor: theme.background,
-        color: theme.text,
-        fontFamily: "'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        background: "#f6f7fb",
       }}
     >
-      {/* HEADER */}
+      {/* Header com botão de avisos */}
       <header
         style={{
-          padding: 14,
-          borderBottom: `1px solid ${theme.inputBg}`,
+          position: "sticky",
+          top: 0,
+          zIndex: 5,
+          background: "#ffffff",
+          borderBottom: "1px solid #e5e7eb",
           display: "flex",
-          gap: 12,
           alignItems: "center",
-          backgroundColor: theme.headerBg
+          justifyContent: "space-between",
+          padding: "12px 16px",
         }}
       >
-        <button
-          onClick={() => navigate("/")}
-          style={{
-            background: "none",
-            border: `1px solid ${theme.inputBg}`,
-            color: theme.text,
-            padding: "8px 12px",
-            borderRadius: "10px",
-            cursor: "pointer",
-            fontWeight: 600
-          }}
-        >
-          ← Trocar Região
-        </button>
-
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <img
-            src="/bepit-logo.png"
-            alt="BEPIT"
-            style={{ width: 28, height: 28, objectFit: "contain" }}
-          />
-          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>BEPIT Concierge</div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              {regiao?.nome || "—"}
-            </div>
-          </div>
+        <div style={{ fontWeight: 800 }}>
+          BEPIT · {region?.nome || "Região"}
         </div>
 
-        {/* Botão de Avisos da Região */}
-        <button
-          onClick={() => setShowAvisos(true)}
-          style={{
-            marginLeft: "auto",
-            background: "none",
-            border: `1px solid ${theme.inputBg}`,
-            color: theme.text,
-            padding: "8px 12px",
-            borderRadius: "10px",
-            cursor: "pointer",
-            fontWeight: 700
-          }}
-          title="Ver avisos por cidade"
-        >
-          ⚠️ Avisos da Região
-        </button>
-
-        <div>
+        <div style={{ display: "flex", gap: 8 }}>
           <button
-            onClick={onToggleTheme}
-            style={{
-              background: "none",
-              border: `1px solid ${theme.inputBg}`,
-              color: theme.text,
-              padding: "8px 12px",
-              borderRadius: "10px",
-              cursor: "pointer",
-              fontWeight: 600,
-              marginLeft: 8
-            }}
+            onClick={() => setAvisosOpen(true)}
+            style={btnAvisosStyle}
+            title="Ver avisos públicos da região"
           >
-            {theme.background === "#fff" ? "🌙 Escuro" : "☀️ Claro"}
+            ⚠️ Avisos da Região
           </button>
         </div>
       </header>
 
-      {/* MAIN */}
+      {/* Lista de mensagens */}
       <main
         style={{
-          position: "relative",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden"
+          padding: 16,
+          display: "grid",
+          alignContent: "start",
+          gap: 10,
         }}
       >
-        {/* Botões de sugestão logo abaixo da mensagem de boas-vindas */}
-        <SuggestionButtons
-          onSuggestionClick={onSuggestionClick}
-          isLoading={loading}
-          theme={theme}
-        />
-
-        {/* LISTA DE MENSAGENS */}
-        <div
-          ref={listRef}
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: 16,
-            display: "flex",
-            flexDirection: "column",
-            gap: 10
-          }}
-        >
-          {messages.map((m, idx) => {
-            const isAssistant = m.role !== "user";
-            return (
-              <div
-                key={idx}
-                style={{
-                  display: "flex",
-                  justifyContent: isAssistant ? "flex-start" : "flex-end"
-                }}
-              >
-                <div
-                  style={{
-                    maxWidth: "80%",
-                    borderRadius: 16,
-                    padding: "10px 14px",
-                    boxShadow: isAssistant
-                      ? "0 1px 2px rgba(0,0,0,0.06)"
-                      : "0 1px 2px rgba(0,0,0,0.12)",
-                    backgroundColor: isAssistant ? assistantBubbleBg : userBubbleBg,
-                    border: isAssistant ? `1px solid ${assistantBorder}` : "none",
-                    color: isAssistant ? theme.text : userTextColor
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: 13,
-                      opacity: 0.8,
-                      fontWeight: 600,
-                      marginBottom: 6
-                    }}
-                  >
-                    {isAssistant ? "BEPIT" : "Você"}
-                  </div>
-                  <div
-                    style={{
-                      whiteSpace: "pre-wrap",
-                      fontSize: 15,
-                      lineHeight: 1.6,
-                      fontWeight: 400
-                    }}
-                  >
-                    {m.text}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-
-          {/* INDICADOR DE “DIGITANDO…” */}
-          {loading && (
-            <div style={{ display: "flex", justifyContent: "flex-start" }}>
-              <div
-                style={{
-                  backgroundColor: assistantBubbleBg,
-                  border: `1px solid ${assistantBorder}`,
-                  color: theme.text,
-                  maxWidth: "60%",
-                  borderRadius: 16,
-                  padding: "10px 14px",
-                  boxShadow: "0 1px 2px rgba(0,0,0,0.06)",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 8
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 13,
-                    opacity: 0.8,
-                    fontWeight: 600
-                  }}
-                >
-                  BEPIT
-                </span>
-                <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: 6,
-                      background: theme.text,
-                      opacity: 0.35,
-                      animation: "bepitBlink 1s infinite"
-                    }}
-                  />
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: 6,
-                      background: theme.text,
-                      opacity: 0.35,
-                      animation: "bepitBlink 1s infinite 0.2s"
-                    }}
-                  />
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: 6,
-                      background: theme.text,
-                      opacity: 0.35,
-                      animation: "bepitBlink 1s infinite 0.4s"
-                    }}
-                  />
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* GALERIA DE FOTOS */}
-          {photos?.length > 0 && (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
-                gap: 10,
-                marginTop: 4
-              }}
-            >
-              {photos.map((src, i) => (
-                <a
-                  key={i}
-                  href={src}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{
-                    display: "block",
-                    border: `1px solid ${assistantBorder}`,
-                    borderRadius: 12,
-                    overflow: "hidden",
-                    background: "#000"
-                  }}
-                >
-                  <img
-                    src={src}
-                    alt={`foto-${i + 1}`}
-                    style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }}
-                  />
-                </a>
-              ))}
-            </div>
-          )}
-        </div>
+        {messages.map((m) => (
+          <Bubble key={m.id} role={m.role} text={m.text} meta={m.meta} />
+        ))}
+        <div ref={listEndRef} />
       </main>
 
-      {/* FOOTER */}
+      {/* Caixa de texto + sugestões */}
       <footer
         style={{
-          padding: 14,
-          borderTop: `1px solid ${theme.inputBg}`,
-          backgroundColor: theme.headerBg
+          background: "#ffffff",
+          borderTop: "1px solid #e5e7eb",
         }}
       >
+        {/* Sugestões logo acima do input (sob a 1ª mensagem) */}
+        <SuggestionButtons
+          onSuggestionClick={onSuggestionClick}
+          isLoading={isLoading}
+        />
+
         <div
           style={{
             display: "grid",
             gridTemplateColumns: "1fr auto",
-            gap: 10,
-            alignItems: "end"
+            gap: 8,
+            padding: 12,
           }}
         >
-          <div style={{ display: "grid", gap: 8 }}>
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onEnterEnviar}
-              placeholder={`Pergunte sobre ${regiao?.nome || "a região"}...`}
-              rows={2}
-              style={{
-                resize: "none",
-                padding: 12,
-                borderRadius: 12,
-                border: `1px solid ${theme.inputBg}`,
-                backgroundColor: theme.inputBg,
-                color: theme.text,
-                fontFamily: "'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-                fontSize: 15,
-                lineHeight: 1.5
-              }}
-            />
-            <div style={{ fontSize: 12, opacity: 0.6 }}>
-              Pressione <b>Enter</b> para enviar · <b>Shift + Enter</b> para nova linha
-            </div>
-          </div>
-
-          <button
-            onClick={() => enviarMensagem()}
-            disabled={loading || !input.trim()}
-            style={{
-              padding: "12px 18px",
-              borderRadius: 12,
-              border: "none",
-              background: loading ? "#657786" : "#0b74de",
-              color: "#fff",
-              cursor: loading ? "not-allowed" : "pointer",
-              fontWeight: 600,
-              minWidth: 120,
-              boxShadow: loading ? "none" : "0 6px 12px rgba(11,116,222,0.25)",
-              transition: "transform 0.06s ease"
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Digite sua mensagem…"
+            rows={2}
+            style={inputStyle}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                if (input.trim()) enviarMensagem(input);
+              }
             }}
-            onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.98)")}
-            onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
-            onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          />
+          <button
+            onClick={() => enviarMensagem(input)}
+            disabled={!input.trim() || isLoading}
+            style={enviarStyle}
           >
-            {loading ? "Enviando…" : "Enviar"}
+            {isLoading ? "Enviando…" : "Enviar"}
           </button>
         </div>
       </footer>
 
-      {/* Modal de Avisos */}
+      {/* Modal de avisos (central) */}
       <AvisosModal
-        open={showAvisos}
-        onClose={() => setShowAvisos(false)}
-        regionSlug={regiao?.slug || ""}
-        theme={theme}
+        open={avisosOpen}
+        onClose={() => setAvisosOpen(false)}
+        regionSlug={region.slug}
+        theme={{
+          background: "#fff",
+          text: "#111827",
+          inputBg: "#e5e7eb",
+          headerBg: "#f9fafb",
+          assistantBubble: "#f3f4f6",
+        }}
       />
-
-      {/* ANIMAÇÃO do indicador */}
-      <style>{`
-        @keyframes bepitBlink {
-          0% { opacity: 0.2; transform: translateY(0); }
-          50% { opacity: 0.8; transform: translateY(-2px); }
-          100% { opacity: 0.2; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   );
 }
+
+/* ---------------------------------- UI ---------------------------------- */
+
+function Bubble({ role, text, meta }) {
+  const isUser = role === "user";
+  return (
+    <div
+      style={{
+        display: "grid",
+        justifyContent: isUser ? "end" : "start",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: "min(740px, 92vw)",
+          whiteSpace: "pre-wrap",
+          lineHeight: 1.5,
+          padding: "10px 12px",
+          borderRadius: 12,
+          border: "1px solid #e5e7eb",
+          background: isUser ? "#dbeafe" : "#ffffff",
+        }}
+      >
+        {text}
+      </div>
+
+      {/* Anexos simples — se o backend mandar links de fotos ou parceiros */}
+      {Array.isArray(meta?.photos) && meta.photos.length > 0 && (
+        <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {meta.photos.map((url, i) => (
+            <img
+              key={`${url}-${i}`}
+              src={url}
+              alt="foto"
+              style={{
+                width: 160,
+                height: 100,
+                objectFit: "cover",
+                borderRadius: 10,
+                border: "1px solid #e5e7eb",
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const btnAvisosStyle = {
+  background: "#fef3c7",
+  color: "#92400e",
+  border: "1px solid #fcd34d",
+  borderRadius: 10,
+  padding: "8px 10px",
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const inputStyle = {
+  width: "100%",
+  borderRadius: 10,
+  border: "1px solid #e5e7eb",
+  padding: 10,
+  resize: "vertical",
+  outline: "none",
+  font: "inherit",
+  background: "#fff",
+};
+
+const enviarStyle = {
+  background: "#0ea5e9",
+  color: "#fff",
+  border: "none",
+  borderRadius: 10,
+  padding: "0 16px",
+  fontWeight: 800,
+  cursor: "pointer",
+  minWidth: 110,
+};
