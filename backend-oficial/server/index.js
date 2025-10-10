@@ -223,76 +223,89 @@ async function extrairEntidadesDaBusca(texto) {
   return { category: categoria, city: cidade, terms: [] };
 }
 
-// ===== BUSCA PRINCIPAL (agora com isInitialSearch/excludeIds repassados) =====
-async function ferramentaBuscarParceirosOuDicas({
-  cidadesAtivas,
-  argumentosDaFerramenta,
-  textoOriginal,
-  isInitialSearch = false,
-  excludeIds = []
-}) {
+// ============================== FERRAMENTA DE BUSCA (versão com reforço p/ picanha + logs) =======================
+async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal, isInitialSearch = true, excludeIds = [] }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
   const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
 
+  // 1) Cesta inferida pelas palavras-chave
   const cestaInferida = inferirCestaCategoria(textoOriginal || "");
-  const categoriasDaCesta = cestaInferida ? MAPA_CESTA_PARA_CATEGORIAS_DB[cestaInferida] : null;
 
+  // 2) Resolve cidade (slug)
   const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   let cidadeSlug = "";
   if (cidadeProcurada) {
     const alvo = cidadesValidas.find(
-      c => normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) || normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
+      c => normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) ||
+           normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
     );
     cidadeSlug = alvo?.slug || "";
   }
   if (!cidadeSlug && cidadesValidas.length > 0) {
-    cidadeSlug = cidadesValidas[0].slug;
+    cidadeSlug = cidadesValidas[0].slug; // fallback: 1ª cidade ativa da região
   }
 
+  // 3) Monta lista de categorias baseadas na cesta + explícita
+  const categoriasBaseDaCesta = cestaInferida ? (MAPA_CESTA_PARA_CATEGORIAS_DB[cestaInferida] || []) : [];
   const categoriasAProcurar = [];
   if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
-  if (Array.isArray(categoriasDaCesta)) {
-    for (const cat of categoriasDaCesta) {
-      const cn = normalizarTexto(cat);
-      if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
+  for (const cat of categoriasBaseDaCesta) {
+    const cn = normalizarTexto(cat);
+    if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
+  }
+  // Heurística suave: se “comida” e nada explícito, partimos de “restaurante”
+  if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante");
+
+  // 4) **Reforço específico para picanha** (ou typo piconha):
+  //    Sempre incluir “churrascaria” e “restaurante” entre as categorias quando detectar “picanha/piconha”
+  const textoN = normalizarTexto(textoOriginal || "");
+  const querPicanha = textoN.includes("picanha") || textoN.includes("piconha");
+  if (querPicanha) {
+    for (const fixa of ["churrascaria", "restaurante"]) {
+      if (!categoriasAProcurar.includes(fixa)) categoriasAProcurar.push(fixa);
     }
   }
-  if (categoriasAProcurar.length === 0 && cestaInferida === "comida") categoriasAProcurar.push("restaurante", "churrascaria");
 
-  const textoNormalizado = normalizarTexto(textoOriginal || "");
-  let resultados = [];
+  // 5) LOGS de depuração da busca (apenas console)
+  console.log("[BUSCA] cidadeSlug=", cidadeSlug, "| categoriasAProcurar=", categoriasAProcurar, "| querPicanha=", querPicanha, "| termos=", listaDeTermos);
 
+  // 6) Termo “inteligente” por categoria (prioriza palavra específica no texto)
+  const resultados = [];
   for (const cat of categoriasAProcurar) {
-    // termo inteligente simples
-    let termoDeBusca = PALAVRAS_CHAVE.comida.find(p => textoNormalizado.includes(p));
-    if (!termoDeBusca) termoDeBusca = PALAVRAS_CHAVE.passeios.find(p => textoNormalizado.includes(p));
+    let termoDeBusca = null;
+
+    // prioridade 1: palavras de COMIDA presentes no texto (inclui picanha/piconha)
+    termoDeBusca = PALAVRAS_CHAVE.comida.find(p => textoN.includes(p)) || null;
+    // prioridade 2: se nada, usa a própria categoria
     if (!termoDeBusca) termoDeBusca = cat;
 
+    // Chama a busca tolerante (com paginação inicial aleatória e exclusão de IDs quando aplicável)
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
       term: termoDeBusca,
-      limit: isInitialSearch ? 12 : 8, // a função interna já trata quando isInitialSearch = true
-      isInitialSearch,
-      excludeIds
+      limit: 24,
+      isInitialSearch: Boolean(isInitialSearch),
+      excludeIds: Array.isArray(excludeIds) ? excludeIds : []
     });
+
+    console.log(`[BUSCA] categoria='${cat}' termo='${termoDeBusca}' -> ok=${r.ok} itens=${Array.isArray(r.items) ? r.items.length : 0}`);
+
     if (r.ok && r.items.length > 0) {
-      resultados.push(...r.items);
-      // Na 1ª busca, se já trouxe 3 da primeira categoria, podemos parar cedo
-      if (isInitialSearch && resultados.length >= 3) break;
+      for (const it of r.items) resultados.push(it);
     }
   }
 
-  // Dedup
+  // 7) Dedup por id
   const mapaResultados = new Map(resultados.map(p => [p.id, p]));
   let acumulado = Array.from(mapaResultados.values());
 
-  // Ordena PARCEIRO antes de DICA e limita
+  // 8) Ordena PARCEIRO antes de DICA e limita
   acumulado.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-  const limitados = isInitialSearch ? acumulado.slice(0, 3) : acumulado.slice(0, 8);
+  const limitados = acumulado.slice(0, 8);
 
-  // Analytics leve
+  // 9) Analytics leve
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
@@ -303,9 +316,7 @@ async function ferramentaBuscarParceirosOuDicas({
         categoriasAplicadas: categoriasAProcurar,
         cidadeProcurada,
         cidadeSlug,
-        total_filtrado: limitados.length,
-        isInitialSearch,
-        excludeIds
+        total_filtrado: limitados.length
       }
     });
   } catch {}
@@ -314,9 +325,17 @@ async function ferramentaBuscarParceirosOuDicas({
     ok: true,
     count: limitados.length,
     items: limitados.map(p => ({
-      id: p.id, tipo: p.tipo, nome: p.nome, categoria: p.categoria, descricao: p.descricao,
-      endereco: p.endereco, contato: p.contato, beneficio_bepit: p.beneficio_bepit, faixa_preco: p.faixa_preco,
-      fotos_parceiros: Array.isArray(p.fotos_parceiros) ? p.fotos_parceiros : [], cidade_id: p.cidade_id
+      id: p.id,
+      tipo: p.tipo,
+      nome: p.nome,
+      categoria: p.categoria,
+      descricao: p.descricao,
+      endereco: p.endereco,
+      contato: p.contato,
+      beneficio_bepit: p.beneficio_bepit,
+      faixa_preco: p.faixa_preco,
+      fotos_parceiros: Array.isArray(p.fotos_parceiros) ? p.fotos_parceiros : [],
+      cidade_id: p.cidade_id
     }))
   };
 }
@@ -426,8 +445,8 @@ async function lidarComNovaBusca({
     cidadesAtivas,
     argumentosDaFerramenta: entidades,
     textoOriginal: textoDoUsuario,
-    isInitialSearch,
-    excludeIds
+    isInitialSearch: true,
+  excludeIds: []
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
