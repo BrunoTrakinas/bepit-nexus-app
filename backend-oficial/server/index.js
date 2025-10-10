@@ -678,6 +678,66 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   }
 });
 
+// ------------------------------ AVISOS PÚBLICOS -----------------------------
+aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
+  try {
+    const { slugDaRegiao } = req.params;
+
+    // 1) Validar/pegar a região
+    const { data: regiao, error: erroRegiao } = await supabase
+      .from("regioes")
+      .select("id, ativo, nome, slug")
+      .eq("slug", slugDaRegiao)
+      .single();
+
+    if (erroRegiao || !regiao) {
+      return res.status(404).json({ error: "Região não encontrada." });
+    }
+    if (regiao.ativo === false) {
+      return res.status(403).json({ error: "Região desativada." });
+    }
+
+    // 2) Buscar avisos ativos para a região - ordem preferida: data_publicacao desc
+    let avisos = [];
+    let erroAvisos = null;
+
+    // Primeira tentativa: ordenar por data_publicacao (mais recente primeiro)
+    {
+      const { data, error } = await supabase
+        .from("avisos_publicos")
+        .select("*")
+        .eq("regiao_id", regiao.id)
+        .eq("ativo", true)
+        .order("data_publicacao", { ascending: false });
+      avisos = data || [];
+      erroAvisos = error || null;
+    }
+
+    // Fallback: se a coluna data_publicacao não existir/gerar erro, ordena por created_at
+    if (erroAvisos) {
+      const { data, error } = await supabase
+        .from("avisos_publicos")
+        .select("*")
+        .eq("regiao_id", regiao.id)
+        .eq("ativo", true)
+        .order("created_at", { ascending: false });
+      if (error) {
+        throw error;
+      }
+      avisos = data || [];
+    }
+
+    // 3) Retornar formato esperado pelo front (items)
+    return res.status(200).json({ items: avisos });
+  } catch (erro) {
+    console.error("[/api/avisos/:slugDaRegiao] Erro:", erro);
+    return res
+      .status(500)
+      .json({ error: "Erro interno no servidor ao buscar avisos." });
+  }
+});
+
+
 // ------------------------------ FEEDBACK ------------------------------------
 aplicacaoExpress.post("/api/feedback", async (req, res) => {
   try {
