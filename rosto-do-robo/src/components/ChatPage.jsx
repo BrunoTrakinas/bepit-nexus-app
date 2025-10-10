@@ -1,19 +1,50 @@
-// rosto-do-robo/src/components/ChatPage.jsx
+// src/components/ChatPage.jsx
 import React, { useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import SuggestionButtons from "./SuggestionButtons.jsx";
 import apiClient from "../lib/apiClient.js";
+import AvisosModal from "./AvisosModal.jsx";
 
 export default function ChatPage({ theme, onToggleTheme }) {
-  const { regiaoSlug } = useParams();
   const navigate = useNavigate();
 
+  // região vinda do localStorage
+  const [regiao, setRegiao] = useState(null);
   const [conversationId, setConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [photos, setPhotos] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showAvisos, setShowAvisos] = useState(false);
+
   const listRef = useRef(null);
+
+  // Carrega a região do localStorage e configura a mensagem de boas-vindas
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("bepit.regiao");
+      if (!raw) {
+        navigate("/");
+        return;
+      }
+      const obj = JSON.parse(raw);
+      if (!obj || !obj.slug || !obj.nome) {
+        navigate("/");
+        return;
+      }
+      setRegiao(obj);
+
+      // mensagem de boas-vindas dinâmica
+      const welcome = {
+        role: "assistant",
+        text: `Olá! Eu sou o BEPIT, seu concierge IA em ${obj.nome}.`
+      };
+      setMessages([welcome]);
+    } catch {
+      navigate("/");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Rolagem automática ao final quando chegam mensagens/fotos ou estado de "digitando..."
   useEffect(() => {
@@ -23,6 +54,8 @@ export default function ChatPage({ theme, onToggleTheme }) {
   }, [messages, photos, loading]);
 
   async function enviarMensagem(textoManual) {
+    if (!regiao || !regiao.slug) return;
+
     const texto = (textoManual ?? input).trim();
     if (!texto || loading) return;
 
@@ -33,7 +66,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
     setPhotos([]);
 
     try {
-      const data = await apiClient.enviarMensagemParaChat(regiaoSlug, {
+      const data = await apiClient.enviarMensagemParaChat(regiao.slug, {
         message: texto,
         conversationId
       });
@@ -73,14 +106,6 @@ export default function ChatPage({ theme, onToggleTheme }) {
     enviarMensagem(texto);
   }
 
-  const formatSlug = (slug) => {
-    return (slug || "")
-      .split("-")
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(" ");
-  };
-
-  // Paleta base para as bolhas (usa theme quando possível)
   const assistantBubbleBg =
     theme?.assistantBubble || (theme.background === "#fff" ? "#f5f7fb" : "#20242c");
   const assistantBorder = theme.background === "#fff" ? "#e6e8ee" : "#2a2f3a";
@@ -132,16 +157,32 @@ export default function ChatPage({ theme, onToggleTheme }) {
             style={{ width: 28, height: 28, objectFit: "contain" }}
           />
           <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>
-              BEPIT Concierge
-            </div>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>BEPIT Concierge</div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>
-              {formatSlug(regiaoSlug || "")}
+              {regiao?.nome || "—"}
             </div>
           </div>
         </div>
 
-        <div style={{ marginLeft: "auto" }}>
+        {/* Botão de Avisos da Região */}
+        <button
+          onClick={() => setShowAvisos(true)}
+          style={{
+            marginLeft: "auto",
+            background: "none",
+            border: `1px solid ${theme.inputBg}`,
+            color: theme.text,
+            padding: "8px 12px",
+            borderRadius: "10px",
+            cursor: "pointer",
+            fontWeight: 700
+          }}
+          title="Ver avisos por cidade"
+        >
+          ⚠️ Avisos da Região
+        </button>
+
+        <div>
           <button
             onClick={onToggleTheme}
             style={{
@@ -151,7 +192,8 @@ export default function ChatPage({ theme, onToggleTheme }) {
               padding: "8px 12px",
               borderRadius: "10px",
               cursor: "pointer",
-              fontWeight: 600
+              fontWeight: 600,
+              marginLeft: 8
             }}
           >
             {theme.background === "#fff" ? "🌙 Escuro" : "☀️ Claro"}
@@ -160,8 +202,20 @@ export default function ChatPage({ theme, onToggleTheme }) {
       </header>
 
       {/* MAIN */}
-      <main style={{ position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <SuggestionButtons onSuggestionClick={onSuggestionClick} isLoading={loading} theme={theme} />
+      <main
+        style={{
+          position: "relative",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden"
+        }}
+      >
+        {/* Botões de sugestão logo abaixo da mensagem de boas-vindas */}
+        <SuggestionButtons
+          onSuggestionClick={onSuggestionClick}
+          isLoading={loading}
+          theme={theme}
+        />
 
         {/* LISTA DE MENSAGENS */}
         <div
@@ -285,7 +339,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
             </div>
           )}
 
-          {/* GALERIA DE FOTOS (se houver) */}
+          {/* GALERIA DE FOTOS */}
           {photos?.length > 0 && (
             <div
               style={{
@@ -342,7 +396,7 @@ export default function ChatPage({ theme, onToggleTheme }) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onEnterEnviar}
-              placeholder={`Pergunte sobre a ${formatSlug(regiaoSlug || "")}...`}
+              placeholder={`Pergunte sobre ${regiao?.nome || "a região"}...`}
               rows={2}
               style={{
                 resize: "none",
@@ -384,6 +438,14 @@ export default function ChatPage({ theme, onToggleTheme }) {
           </button>
         </div>
       </footer>
+
+      {/* Modal de Avisos */}
+      <AvisosModal
+        open={showAvisos}
+        onClose={() => setShowAvisos(false)}
+        regionSlug={regiao?.slug || ""}
+        theme={theme}
+      />
 
       {/* ANIMAÇÃO do indicador */}
       <style>{`

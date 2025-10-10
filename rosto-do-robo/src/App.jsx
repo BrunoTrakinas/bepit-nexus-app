@@ -41,15 +41,16 @@ function App() {
         <Routes>
           {/* público */}
           <Route path="/" element={<RegionSelection theme={currentTheme} />} />
+          {/* agora /chat NÃO tem slug na URL; o slug é lido do localStorage */}
           <Route
-            path="/chat/:regiaoSlug"
+            path="/chat"
             element={<ChatPage theme={currentTheme} onToggleTheme={toggleTheme} />}
           />
 
           {/* admin login (público) */}
           <Route path="/admin/login" element={<AdminLogin />} />
 
-          {/* admin protegido: path com wildcard protege qualquer subrota */}
+          {/* admin protegido */}
           <Route
             path="/admin/*"
             element={
@@ -65,4 +66,3 @@ function App() {
 }
 
 export default App;
-
