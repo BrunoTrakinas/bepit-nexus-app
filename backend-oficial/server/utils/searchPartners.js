@@ -7,21 +7,44 @@
 // Requer extensões: unaccent, pg_trgm.
 // ============================================================================
 
-import { supabase } from "../../lib/supabaseClient.js"; // <-- corrigido (um nível acima)
+import { supabase } from "../../lib/supabaseClient.js";
 
-// Normaliza o termo (minúsculo + sem acentos)
+// ---------------------------------------------------------------------------
+// Normaliza o termo (minúsculo + sem acentos) e corrige typos comuns
+// ---------------------------------------------------------------------------
 export function normalizeTerm(s) {
   if (!s) return "";
-  let out = s.toLowerCase();
+  let out = String(s).toLowerCase();
   out = out.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   out = out.replace(/\s+/g, " ").trim();
+
+  // Correções simples por palavra (expanda conforme necessário)
+  const FIX = new Map([
+    ["piconha", "picanha"],
+    ["piconia", "picanha"],
+    ["picania", "picanha"],
+
+    // exemplos de normalização de termos populares com erro
+    ["hambuguer", "hamburguer"],
+    ["hamburquer", "hamburguer"],
+
+    // acentos já foram removidos acima, mas mantemos para referência de termos
+    ["rodizio", "rodizio"],
+    ["acaraje", "acaraje"],
+  ]);
+
+  out = out
+    .split(" ")
+    .map((w) => FIX.get(w) || w)
+    .join(" ");
+
   return out;
 }
 
-/**
- * Resolve o UUID da cidade a partir do slug (via RPC no banco).
- * Retorna null se não encontrar.
- */
+// ---------------------------------------------------------------------------
+// Resolve o UUID da cidade a partir do slug (via RPC no banco).
+// Retorna null se não encontrar.
+// ---------------------------------------------------------------------------
 export async function getCidadeIdBySlug(cidadeSlug) {
   if (!cidadeSlug) return null;
   const { data, error } = await supabase.rpc("cidade_id_by_slug", { p_slug: cidadeSlug });
@@ -32,9 +55,9 @@ export async function getCidadeIdBySlug(cidadeSlug) {
   return data ?? null;
 }
 
-/**
- * Embaralha um array (Fisher–Yates) — ajuda a dar variedade na 1ª busca.
- */
+// ---------------------------------------------------------------------------
+// Embaralha um array in-place (Fisher–Yates) — para variedade na 1ª busca.
+// ---------------------------------------------------------------------------
 function shuffleInPlace(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -42,23 +65,23 @@ function shuffleInPlace(arr) {
   }
 }
 
-/**
- * Busca tolerante via RPC + pós-processamento:
- * - Filtra excludeIds no Node (garante que não repita nas próximas páginas/refinamentos)
- * - Se isInitialSearch = true: amplia o fetch (até 24), embaralha e retorna 3 aleatórios
- * - Senão: respeita o limit normal (default 5) e mantém a ordem retornada pela RPC
- *
- * @param {Object} opts
- *  - cidadeId?: string (uuid)
- *  - cidadeSlug?: string
- *  - categoria: string (ex.: 'churrascaria', 'restaurante' — minúsculas)
- *  - term?: string (termo livre, tolera typos)
- *  - limit?: number (default 10; ignorado quando isInitialSearch=true)
- *  - isInitialSearch?: boolean (default false)
- *  - excludeIds?: string[] (IDs para NÃO retornar)
- *
- * @returns {Promise<{ok: boolean, items?: any[], error?: string}>}
- */
+// ---------------------------------------------------------------------------
+// Busca tolerante via RPC + pós-processamento:
+//  - Filtra excludeIds no Node (evita repetir nas próximas páginas/refinos)
+//  - Se isInitialSearch = true: amplia o fetch (até 24), embaralha e retorna 3
+//  - Senão: respeita o limit normal (default 5) e mantém a ordem da RPC
+//
+// Parâmetros:
+//  - cidadeId?: string (uuid)
+//  - cidadeSlug?: string
+//  - categoria: string (minúsculas, ex.: 'churrascaria', 'restaurante')
+//  - term?: string (termo livre; tolera typos)
+//  - limit?: number (default 10; ignorado quando isInitialSearch=true)
+//  - isInitialSearch?: boolean (default false)
+//  - excludeIds?: string[] (IDs para NÃO retornar)
+//
+// Retorno: { ok: boolean, items?: any[], error?: string }
+// ---------------------------------------------------------------------------
 export async function buscarParceirosTolerante({
   cidadeId,
   cidadeSlug,
@@ -66,7 +89,7 @@ export async function buscarParceirosTolerante({
   term,
   limit = 10,
   isInitialSearch = false,
-  excludeIds = []
+  excludeIds = [],
 }) {
   console.log("\n==================== INICIANDO BUSCA TOLERANTE (v4.0) ====================");
   try {
@@ -104,25 +127,49 @@ export async function buscarParceirosTolerante({
       p_cidade_id: cidadeUUID,
       p_categoria_norm: categoriaNorm,
       p_term_norm: termNorm,
-      p_limit: rpcLimit
+      p_limit: rpcLimit,
     };
 
-    console.log("[DEBUG] Parâmetros RPC search_parceiros:", params, "isInitialSearch=", isInitialSearch, "excludeIds=", excludeIds);
+    console.log(
+      "[DEBUG] Parâmetros RPC search_parceiros:",
+      params,
+      "isInitialSearch=",
+      isInitialSearch,
+      "excludeIds=",
+      excludeIds
+    );
 
-    const { data, error } = await supabase.rpc("search_parceiros", params);
-    if (error) {
-      console.error("[DEBUG] !!! ERRO RPC search_parceiros:", error);
+    // -------- Chamada principal à RPC
+    const rpc = await supabase.rpc("search_parceiros", params);
+    if (rpc.error) {
+      console.error("[DEBUG] !!! ERRO RPC search_parceiros:", rpc.error);
       console.log("====================================================================\n");
       return { ok: false, error: "Falha na busca (RPC)." };
     }
 
-    let items = Array.isArray(data) ? data : [];
-    console.log(`[DEBUG] RPC retornou ${items.length} itens (antes de filtros).`);
+    // Converte para array
+    let rows = Array.isArray(rpc.data) ? rpc.data : [];
+    console.log(`[DEBUG] RPC retornou ${rows.length} itens (antes de filtros).`);
+
+    // -------- Fallback de typo específico: “piconha” -> “picanha”
+    // Se não veio nada e o termo original aparenta ser “piconh…”, re-tenta 1x com "picanha".
+    if (rows.length === 0 && /piconh/i.test(term || "")) {
+      const paramsRetry = { ...params, p_term_norm: "picanha" };
+      console.log("[DEBUG] Fallback typo -> tentando com 'picanha':", paramsRetry);
+      const retry = await supabase.rpc("search_parceiros", paramsRetry);
+      if (!retry.error && Array.isArray(retry.data) && retry.data.length > 0) {
+        rows = retry.data;
+        console.log(`[DEBUG] Fallback recuperou ${rows.length} item(ns).`);
+      }
+    }
+
+    // A partir daqui trabalhamos com "items"
+    let items = rows;
 
     // Excluir IDs já exibidos (se houver)
     const excludeSet = new Set((excludeIds || []).filter(Boolean));
     if (excludeSet.size > 0) {
-      items = items.filter(p => p && p.id && !excludeSet.has(p.id));
+      items = items.filter((p) => p && p.id && !excludeSet.has(p.id));
       console.log(`[DEBUG] Após excludeIds, restaram ${items.length} itens.`);
     }
 
