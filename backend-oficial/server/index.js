@@ -1,10 +1,10 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v4.0
-// - Base: sua v3.5 otimizada (mantido).
-// - Novidades:
-//   * Paginação Inteligente: 1ª busca = 3 aleatórios relevantes (sem repetir depois)
-//   * Fluxo de Refinamento: "outras opções"/"mais" => pergunta critérios + nova busca sem repetir
-// - Rotas e guardrails preservados.
+// - Paginação Inteligente (1ª página: até 3 opções aleatórias do banco)
+// - Fluxo de Refinamento ("mais opções" → pergunta de critérios → nova busca)
+// - Prioridade para carne/picanha (inclui "piconha"): churrascaria + restaurante
+// - Busca tolerante via RPC + pós-processamento (excludeIds / isInitialSearch)
+// - Mantém: /api/admin/*, /api/auth/login, health, diag, feedback
 // ============================================================================
 
 import "dotenv/config";
@@ -12,12 +12,17 @@ import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
+
 import {
   finalizeAssistantResponse,
   buildNoPartnerFallback,
   BEPIT_SYSTEM_PROMPT_APPENDIX
 } from "./utils/bepitGuardrails.js";
-import { buscarParceirosTolerante, normalizeTerm as normalizeSearchTerm } from "./utils/searchPartners.js";
+
+import {
+  buscarParceirosTolerante,
+  normalizeTerm as normalizeSearchTerm
+} from "./utils/searchPartners.js";
 
 // ============================== CONFIG BÁSICA ================================
 const aplicacaoExpress = express();
@@ -85,7 +90,7 @@ async function selecionarModeloREST() {
   const preferencia = [
     envModelo && stripModelsPrefix(envModelo),
     "gemini-1.5-flash-latest",
-    "gemini-1.5-pro-latest",
+    "gemini-1.5-pro-latest"
   ].filter(Boolean);
   for (const alvo of preferencia) if (disponiveis.includes(alvo)) return alvo;
 
@@ -171,7 +176,7 @@ function historicoParaTextoSimples(contents) {
 
 // ============================== HEURÍSTICA DE INTENÇÃO ======================
 const PALAVRAS_CHAVE = {
-  comida: ["restaurante", "restaurantes", "almoço", "almoco", "jantar", "comer", "comida", "picanha", "piconha", "carne", "churrasco", "churrascaria", "pizza", "pizzaria", "peixe", "frutos do mar", "moqueca", "rodizio", "rodízio", "lanchonete", "burger", "hamburguer", "hambúrguer", "bistrô", "bistro"],
+  comida: ["restaurante", "restaurantes", "almoço", "almoco", "jantar", "comer", "comida", "picanha", "piconha", "carne", "churrasco", "pizza", "pizzaria", "peixe", "frutos do mar", "moqueca", "rodizio", "rodízio", "lanchonete", "burger", "hamburguer", "hambúrguer", "bistrô", "bistro"],
   hospedagem: ["pousada", "pousadas", "hotel", "hotéis", "hospedagem", "hostel", "airbnb"],
   bebidas: ["bar", "bares", "chopp", "chope", "drinks", "pub", "boteco"],
   passeios: ["passeio", "passeios", "barco", "lancha", "escuna", "trilha", "trilhas", "tour", "buggy", "quadriciclo", "city tour", "catamarã", "catamara", "mergulho", "snorkel", "gruta", "ilha"],
@@ -187,75 +192,136 @@ function forcarBuscaParceiro(texto) {
   return false;
 }
 
-function inferirCestaCategoria(texto) {
-  const t = normalizarTexto(texto);
-  if (PALAVRAS_CHAVE.comida.some(p => t.includes(p))) return "comida";
-  if (PALAVRAS_CHAVE.hospedagem.some(p => t.includes(p))) return "hospedagem";
-  if (PALAVRAS_CHAVE.bebidas.some(p => t.includes(p))) return "bebidas";
-  if (PALAVRAS_CHAVE.passeios.some(p => t.includes(p))) return "passeios";
-  if (PALAVRAS_CHAVE.praias.some(p => t.includes(p))) return "praias";
-  if (PALAVRAS_CHAVE.transporte.some(p => t.includes(p))) return "transporte";
-  return null;
-}
-
-const MAPA_CESTA_PARA_CATEGORIAS_DB = {
-  comida: ["restaurante", "pizzaria", "churrascaria", "lanchonete", "frutos do mar", "sushi", "padaria", "cafeteria", "bistrô", "bistro", "hamburgueria", "pizza"],
-  bebidas: ["bar", "pub", "cervejaria", "wine bar", "balada", "boteco"],
-  passeios: ["passeio", "passeios", "barco", "lancha", "escuna", "trilha", "buggy", "quadriciclo", "city tour", "catamarã", "catamara", "mergulho", "snorkel", "gruta", "ilha", "tour"],
-  praias: ["praia", "praias", "bandeira azul", "orla"],
-  hospedagem: ["pousada", "hotel", "hostel", "apart", "flat", "resort", "hospedagem"],
-  transporte: ["transfer", "transporte", "aluguel de carro", "locadora", "taxi", "ônibus", "onibus", "rodoviária", "rodoviaria"]
-};
-
-// ============================== FERRAMENTAS E PROMPTS =======================
-
-// NOVA VERSÃO — extrai termos úteis da frase (prioriza picanha/piconha)
+// -------- ENTIDADES (cidade + termos) COM SINAIS DE "CARNE/PICANHA" --------
 async function extrairEntidadesDaBusca(texto) {
   const tNorm = normalizarTexto(texto || "");
 
-  // cidade simples (pode ampliar depois)
+  // Cidade
   let cidade = null;
   if (tNorm.includes("cabo frio")) cidade = "Cabo Frio";
   else if (tNorm.includes("buzios") || tNorm.includes("búzios")) cidade = "Búzios";
   else if (tNorm.includes("arraial")) cidade = "Arraial do Cabo";
+  else if (tNorm.includes("sao pedro") || tNorm.includes("são pedro")) cidade = "São Pedro da Aldeia";
 
-  // termos específicos de comida (em ordem de prioridade)
-  const termosPrioritarios = [
-    "picanha", "piconha", "churrasco", "rodizio", "rodízio", "carne",
-    "peixe", "frutos do mar", "moqueca", "pizza", "hamburguer", "hambúrguer", "sushi", "vista"
+  // Termos úteis p/ ranking
+  const DIC_TERMS = [
+    "picanha","piconha","carne","churrasco","rodizio","rodízio","fraldinha","costela",
+    "barato","barata","familia","família","romantico","romântico","vista","vista para o mar","rodizio",
+    "pizza","peixe","frutos do mar","moqueca","hamburguer","hambúrguer","sushi","japonesa","bistrô","bistro"
   ];
+  const terms = [];
+  for (const w of DIC_TERMS) if (tNorm.includes(normalizarTexto(w))) terms.push(w);
 
-  const termosEncontrados = [];
-  for (const termo of termosPrioritarios) {
-    if (tNorm.includes(normalizarTexto(termo))) termosEncontrados.push(termo);
+  // Cesta macro
+  let category = null;
+  if (["restaurante","comer","comida","picanha","piconha","carne","churrasco","rodizio","rodízio","pizza","pizzaria","peixe","frutos do mar","hamburguer","hambúrguer","bistrô","bistro","sushi","japonesa"].some(k => tNorm.includes(k))) {
+    category = "comida";
+  } else if (["pousada","hotel","hostel","hospedagem","airbnb","apart","flat","resort"].some(k => tNorm.includes(k))) {
+    category = "hospedagem";
+  } else if (["bar","bares","chopp","chope","drinks","pub","boteco"].some(k => tNorm.includes(k))) {
+    category = "bebidas";
+  } else if (["passeio","barco","lancha","escuna","trilha","buggy","quadriciclo","mergulho","snorkel","tour"].some(k => tNorm.includes(k))) {
+    category = "passeios";
+  } else if (["praia","praias","bandeira azul","orla"].some(k => tNorm.includes(k))) {
+    category = "praias";
+  } else if (["transfer","transporte","aluguel de carro","locadora","uber","taxi","ônibus","onibus"].some(k => tNorm.includes(k))) {
+    category = "transporte";
   }
 
-  // cesta macro só para orientar categorias default
-  let categoriaMacro = null;
-  if (PALAVRAS_CHAVE.comida.some(p => tNorm.includes(p))) categoriaMacro = "comida";
-  else if (PALAVRAS_CHAVE.hospedagem.some(p => tNorm.includes(p))) categoriaMacro = "hospedagem";
-  else if (PALAVRAS_CHAVE.bebidas.some(p => tNorm.includes(p))) categoriaMacro = "bebidas";
-  else if (PALAVRAS_CHAVE.passeios.some(p => tNorm.includes(p))) categoriaMacro = "passeios";
-  else if (PALAVRAS_CHAVE.praias.some(p => tNorm.includes(p))) categoriaMacro = "praias";
-  else if (PALAVRAS_CHAVE.transporte.some(p => tNorm.includes(p))) categoriaMacro = "transporte";
-
-  return {
-    category: categoriaMacro,   // macro (usaremos só para orientar)
-    city: cidade,
-    terms: termosEncontrados,   // agora vem “picanha/piconha” etc
-  };
+  return { category, city: cidade, terms };
 }
 
+// ============================== PROMPTS =====================================
+async function analisarIntencaoDoUsuario(textoDoUsuario) {
+  if (forcarBuscaParceiro(textoDoUsuario)) return "busca_parceiro";
 
-// ============================== FERRAMENTA DE BUSCA (versão com reforço p/ picanha + logs) =======================
-// VERSÃO AJUSTADA — usa termo principal correto e prioriza categorias certas
-async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal, isInitialSearch = true, excludeIds = [] }) {
-  const categoriaMacro = (argumentosDaFerramenta?.category || "").trim();
+  // Reduzido (fallback): se não bateu heurística, pergunta ao modelo
+  const prompt = `Classifique a frase do usuário em 'busca_parceiro' ou 'pergunta_geral'. Responda só com a string.\nFrase: "${textoDoUsuario}"`;
+  try {
+    const saida = await geminiGerarTexto(prompt);
+    const txt = (saida || "").trim().toLowerCase();
+    if (txt === "busca_parceiro" || txt === "pergunta_geral") return txt;
+  } catch {}
+  return "pergunta_geral";
+}
+
+async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
+  const historicoTexto = historicoParaTextoSimples(historicoContents);
+  const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
+  const prompt = [
+    "Você é um assistente de consulta de dados. Sua única função é apresentar os resultados encontrados de forma clara e objetiva.",
+    "Apresente os estabelecimentos do [Contexto] em formato de lista. Use os dados fornecidos e nada mais.",
+    "Comece a resposta diretamente com 'Claro, encontrei estas opções para você:' ou frase similar e apresente a lista.",
+    "DEPOIS da lista completa, faça UMA pergunta curta para oferecer mais ajuda (ex.: 'Quer que eu refine por preço ou estilo?').",
+    "",
+    BEPIT_SYSTEM_PROMPT_APPENDIX,
+    "",
+    `[Contexto]: ${contextoParceiros}`,
+    `[Histórico]:\n${historicoTexto}`,
+    `[Região]: ${regiaoNome}`,
+    `[Pergunta]: "${pergunta}"`
+  ].join("\n");
+  return await geminiGerarTexto(prompt);
+}
+
+async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
+  const historicoTexto = historicoParaTextoSimples(historicoContents);
+  const nomeRegiao = regiao?.nome || "Região dos Lagos";
+  const prompt = [
+    `Você é o BEPIT, um concierge amigável e especialista na região de ${nomeRegiao}.`,
+    "Se não houver resultados de parceiros, admita e ofereça ajuda em outros tópicos — sem fingir que tem resultados.",
+    "",
+    BEPIT_SYSTEM_PROMPT_APPENDIX,
+    "",
+    `[Histórico]:\n${historicoTexto}`,
+    `[Pergunta]: "${pergunta}"`
+  ].join("\n");
+  return await geminiGerarTexto(prompt);
+}
+
+function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
+  try {
+    const texto = normalizarTexto(textoDoUsuario);
+    if (!Array.isArray(listaDeParceiros) || listaDeParceiros.length === 0) return null;
+
+    const matchNumero = texto.match(/\b(\d{1,2})(?:º|o|a|\.|°)?\b/);
+    if (matchNumero) {
+      const idx = Number(matchNumero[1]);
+      if (Number.isFinite(idx) && idx >= 1 && idx <= listaDeParceiros.length) return listaDeParceiros[idx - 1];
+    }
+
+    const ordinais = ["primeiro","segundo","terceiro","quarto","quinto","sexto","sétimo","setimo","oitavo"];
+    for (let i = 0; i < ordinais.length; i++) {
+      if (texto.includes(ordinais[i])) {
+        const pos = i + 1;
+        if (pos >= 1 && pos <= listaDeParceiros.length) return listaDeParceiros[pos - 1];
+      }
+    }
+
+    for (const p of listaDeParceiros) {
+      const nome = normalizarTexto(p?.nome || "");
+      if (nome && texto.includes(nome)) return p;
+      const tokens = (nome || "").split(/\s+/).filter(Boolean);
+      const acertos = tokens.filter(t => texto.includes(t)).length;
+      if (acertos >= Math.max(1, Math.ceil(tokens.length * 0.6))) return p;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ============================== BUSCA / REFINO ==============================
+async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal, isInitialSearch = false, excludeIds = [] }) {
+  const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
-  const termosEntrada = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
-  const tNorm = normalizarTexto(textoOriginal || "");
+  const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
 
-  // Cidade → slug
+  const textoN = normalizarTexto(textoOriginal || "");
+  const sinaisCarne = ["picanha","piconha","carne","churrasco","rodizio","rodízio"].some(s => textoN.includes(s));
+  const sinaisVista = ["vista","vista para o mar","beira mar","orla"].some(s => textoN.includes(s));
+
+  // Resolve cidade (slug) a partir da lista ativa
   const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   let cidadeSlug = "";
   if (cidadeProcurada) {
@@ -264,83 +330,88 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     );
     cidadeSlug = alvo?.slug || "";
   }
-  if (!cidadeSlug && cidadesValidas.length > 0) {
-    cidadeSlug = cidadesValidas[0].slug;
-  }
+  if (!cidadeSlug && cidadesValidas.length > 0) cidadeSlug = cidadesValidas[0].slug;
 
-  // Termo principal: priorize palavras “fortes” (picanha/piconha/churrasco/etc) e ignore genéricos
-  const STOPWORDS = new Set(["comer","comida","restaurante","restaurantes","onde","lugar","local","pra","para","em","de"]);
-  const candidatosTermo = [
-    ...termosEntrada,                                   // termos vindos do extrator (ex.: "picanha")
-    ...PALAVRAS_CHAVE.comida.filter(w => tNorm.includes(w)) // mais quaisquer palavras de comida presentes na frase
-  ].map(normalizarTexto).filter(w => w && !STOPWORDS.has(w));
+  // Mapa macro → categorias
+  const MAPA_CESTA_PARA_CATEGORIAS_DB = {
+    comida: ["churrascaria","restaurante","pizzaria","lanchonete","frutos do mar","sushi","padaria","cafeteria","bistrô","bistro","hamburgueria","pizza"],
+    bebidas: ["bar","pub","cervejaria","wine bar","balada","boteco"],
+    passeios: ["passeio","barco","lancha","escuna","trilha","buggy","quadriciclo","city tour","catamarã","catamara","mergulho","snorkel","gruta","ilha","tour"],
+    praias: ["praia","praias","bandeira azul","orla"],
+    hospedagem: ["pousada","hotel","hostel","apart","flat","resort","hospedagem"],
+    transporte: ["transfer","transporte","aluguel de carro","locadora","taxi","ônibus","onibus","rodoviária","rodoviaria"]
+  };
 
-  // escolha do termo principal
-  let termoPrincipal = null;
-  // prioridade: picanha/piconha > churrasc(o|aria)/rodizio > carne > peixe/frutos do mar > pizza/hamburguer/sushi > vista
-  const ordemForca = [
-    "picanha","piconha",
-    "churrasco","churrascaria","rodizio","rodízio",
-    "carne",
-    "peixe","frutos do mar",
-    "pizza","hamburguer","hambúrguer","sushi",
-    "vista"
-  ];
-  for (const alvo of ordemForca) {
-    if (candidatosTermo.includes(alvo)) { termoPrincipal = alvo; break; }
-  }
-  // fallback: se nada forte foi encontrado, tenta a primeira palavra útil (que não seja stopword)
-  if (!termoPrincipal) termoPrincipal = candidatosTermo.find(w => !STOPWORDS.has(w)) || "";
-
-  // Categorias a procurar:
-  // - Se detectar picanha/piconha/carne/churrasco => prioriza churrascaria e restaurante
-  // - Caso contrário, usa mapeamento da cesta macro (ou cai em “restaurante” como default)
+  // ------------- PRIORIZAÇÃO INTELIGENTE -------------
+  // Base inicial
   let categoriasAProcurar = [];
-  const pedeCarne = ["picanha","piconha","carne","churrasco","rodizio","rodízio"].some(w => tNorm.includes(w));
-  if (pedeCarne) {
-    categoriasAProcurar = ["churrascaria","restaurante"];
-  } else if (categoriaMacro && MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaMacro]) {
-    categoriasAProcurar = [...MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaMacro]];
-  } else {
-    categoriasAProcurar = ["restaurante"]; // default sensato
+  if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
+
+  // Macro "comida" com sinais de carne → prioriza churrascaria+restaurante
+  if (categoriaProcurada === "comida" || (!categoriaProcurada && MAPA_CESTA_PARA_CATEGORIAS_DB.comida)) {
+    if (sinaisCarne) {
+      categoriasAProcurar = ["churrascaria","restaurante"];
+    } else if (categoriasAProcurar.length === 0) {
+      categoriasAProcurar = ["restaurante"];
+    }
+    for (const cat of MAPA_CESTA_PARA_CATEGORIAS_DB.comida) {
+      const cn = normalizarTexto(cat);
+      if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
+    }
   }
 
-  // Evite duplicatas mantendo ordem de prioridade
-  categoriasAProcurar = categoriasAProcurar
-    .map(normalizarTexto)
-    .filter((v, i, arr) => arr.indexOf(v) === i);
+  if (categoriasAProcurar.length === 0 && categoriaProcurada && MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada]) {
+    categoriasAProcurar = MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada].map(normalizarTexto);
+  }
 
-  // Executa buscas (primeira leva com isInitialSearch=true envia mais “largas”)
-  let resultados = [];
+  // Termo “inteligente”
+  let termoDeBusca = null;
+  if (sinaisCarne) termoDeBusca = "picanha";
+  else if (sinaisVista) termoDeBusca = "vista";
+  else {
+    const termosConhecidos = ["pizza","peixe","rodizio","frutos do mar","moqueca","hamburguer","sushi","bistrô","bistro","barato","família","romântico","vista"];
+    const achou = termosConhecidos.find(k => textoN.includes(normalizarTexto(k)));
+    if (achou) termoDeBusca = achou;
+  }
+  if (!termoDeBusca && categoriasAProcurar.length > 0) termoDeBusca = categoriasAProcurar[0];
+
+  // Execução de buscas
+  const agregados = [];
+  const vistos = new Set();
   for (const cat of categoriasAProcurar) {
-    console.log(`[BUSCA] categoria='${cat}' termo='${termoPrincipal || ""}' -> start`);
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
-      term: termoPrincipal || "",     // agora vai “picanha” em vez de “comer”
-      limit: isInitialSearch ? 24 : 8,
+      term: termoDeBusca,
+      limit: 8,
       isInitialSearch,
       excludeIds
     });
-    console.log(`[BUSCA] categoria='${cat}' termo='${termoPrincipal || ""}' -> ok=${r.ok} itens=${r.ok ? r.items.length : "err"}`);
-    if (r.ok && r.items.length > 0) resultados.push(...r.items);
+    if (r.ok && Array.isArray(r.items)) {
+      for (const it of r.items) {
+        if (it?.id && !vistos.has(it.id)) {
+          vistos.add(it.id);
+          agregados.push(it);
+        }
+      }
+    }
+    if (isInitialSearch && agregados.length >= 3) break;
+    if (!isInitialSearch && agregados.length >= 8) break;
   }
 
-  // Dedup e ordena: PARCEIRO antes de DICA
-  const mapa = new Map(resultados.map(p => [p.id, p]));
-  const unicos = Array.from(mapa.values());
-  unicos.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-  const limitados = unicos.slice(0, 8);
+  agregados.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
+  const limitados = isInitialSearch ? agregados.slice(0, 3) : agregados.slice(0, 8);
 
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
       payload: {
-        termosEntrada,
-        termoPrincipal,
-        categoriaMacro,
-        categoriasAplicadas: categoriasAProcurar,
+        termos: listaDeTermos,
+        categoriaProcurada,
         cidadeProcurada,
+        isInitialSearch,
+        excludeIds,
+        categoriasTentadas: categoriasAProcurar,
         total_filtrado: limitados.length,
         cidadeSlug
       }
@@ -366,113 +437,15 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   };
 }
 
-// PROMPTS (mantidos, com instruções de listar parceiros)
-async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
-  const historicoTexto = historicoParaTextoSimples(historicoContents);
-  const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
-  const prompt = [
-    "Você é um assistente de consulta de dados. Sua única função é apresentar os resultados encontrados de forma clara e objetiva.",
-    "Apresente os estabelecimentos do [Contexto] em formato de lista. Use os dados fornecidos e nada mais.",
-    "Comece a resposta diretamente com 'Claro, encontrei estas opções para você:' ou uma frase similar e apresente a lista.",
-    "DEPOIS de apresentar a lista completa, você PODE fazer uma pergunta curta para oferecer mais ajuda, como 'Alguma delas te interessou mais?' ou 'Posso ajudar com mais detalhes sobre alguma delas?'.",
-    "",
-    BEPIT_SYSTEM_PROMPT_APPENDIX,
-    "",
-    `[Contexto]: ${contextoParceiros}`,
-    `[Histórico]:\n${historicoTexto}`,
-    `[Região]: ${regiaoNome}`,
-    `[Pergunta]: "${pergunta}"`
-  ].join("\n");
-  return await geminiGerarTexto(prompt);
-}
-
-async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
-  const historicoTexto = historicoParaTextoSimples(historicoContents);
-  const nomeRegiao = regiao?.nome || "Região dos Lagos";
-  const prompt = [
-    `Você é o BEPIT, um concierge amigável e especialista na região de ${nomeRegiao}.`,
-    "Sua principal função é responder perguntas gerais sobre a região ou, se não souber a resposta, admitir honestamente.",
-    "Se a pergunta for sobre indicações específicas (restaurante, hotel, passeio) e você foi chamado sem uma lista de contexto, significa que não foram encontrados resultados. Neste caso, informe ao usuário que você não possui cadastros para aquela solicitação específica, mas que pode ajudar com outras coisas.",
-    "NUNCA finja que tem resultados fazendo perguntas para refinar uma busca que já falhou.",
-    "",
-    BEPIT_SYSTEM_PROMPT_APPENDIX,
-    "",
-    `[Histórico]:\n${historicoTexto}`,
-    `[Pergunta]: "${pergunta}"`
-  ].join("\n");
-  return await geminiGerarTexto(prompt);
-}
-
-async function analisarIntencaoDoUsuario(textoDoUsuario) {
-  if (forcarBuscaParceiro(textoDoUsuario)) return "busca_parceiro";
-
-  const prompt = `Sua única tarefa é analisar a frase do usuário e classificá-la em uma das seguintes categorias: 'busca_parceiro', 'pergunta_geral'. Responda apenas com a string da categoria. Frase: "${textoDoUsuario}"`;
-  const saida = await geminiGerarTexto(prompt);
-  const text = (saida || "").trim().toLowerCase();
-
-  const classes = new Set(["busca_parceiro", "pergunta_geral"]);
-  const r = classes.has(text) ? text : "pergunta_geral";
-
-  if (r !== "busca_parceiro" && forcarBuscaParceiro(textoDoUsuario)) {
-    return "busca_parceiro";
-  }
-  return r;
-}
-
-function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
-  try {
-    const texto = normalizarTexto(textoDoUsuario);
-    if (!Array.isArray(listaDeParceiros) || listaDeParceeiros.length === 0) return null;
-  } catch {}
-  try {
-    const texto = normalizarTexto(textoDoUsuario);
-    if (!Array.isArray(listaDeParceiros) || listaDeParceiros.length === 0) return null;
-
-    const matchNumero = texto.match(/\b(\d{1,2})(?:º|o|a|\.|°)?\b/);
-    if (matchNumero) {
-      const idx = Number(matchNumero[1]);
-      if (Number.isFinite(idx) && idx >= 1 && idx <= listaDeParceiros.length) return listaDeParceiros[idx - 1];
-    }
-
-    const ordinais = ["primeiro", "segundo", "terceiro", "quarto", "quinto", "sexto", "sétimo", "setimo", "oitavo"];
-    for (let i = 0; i < ordinais.length; i++) {
-      if (texto.includes(ordinais[i])) {
-        const pos = i + 1;
-        if (pos >= 1 && pos <= listaDeParceiros.length) return listaDeParceiros[pos - 1];
-      }
-    }
-
-    for (const p of listaDeParceiros) {
-      const nome = normalizarTexto(p?.nome || "");
-      if (nome && texto.includes(nome)) return p;
-      const tokens = (nome || "").split(/\s+/).filter(Boolean);
-      const acertos = tokens.filter(t => texto.includes(t)).length;
-      if (acertos >= Math.max(1, Math.ceil(tokens.length * 0.6))) return p;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// ====== NOVO FLUXO: chamada de busca com paginação inteligente/refinamento ====
-async function lidarComNovaBusca({
-  textoDoUsuario,
-  historicoGemini,
-  regiao,
-  cidadesAtivas,
-  idDaConversa,
-  isInitialSearch = false,
-  excludeIds = []
-}) {
+async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa, isInitialSearch = true, excludeIds = [] }) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
 
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
     cidadesAtivas,
     argumentosDaFerramenta: entidades,
     textoOriginal: textoDoUsuario,
-    isInitialSearch: true,
-  excludeIds: []
+    isInitialSearch,
+    excludeIds
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
@@ -490,7 +463,6 @@ async function lidarComNovaBusca({
         topico_atual: entidades?.category || null
       }).eq("id", idDaConversa);
     } catch {}
-
     return { respostaFinal, parceirosSugeridos };
   } else {
     const respostaModelo = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
@@ -505,7 +477,6 @@ async function lidarComNovaBusca({
 
 // ============================== ROTAS =======================================
 
-// ------------------------------ CHAT ----------------------------------------
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
@@ -526,7 +497,17 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     if (!conversationId || typeof conversationId !== "string" || !conversationId.trim()) {
       conversationId = randomUUID();
       try {
-        await supabase.from("conversas").insert({ id: conversationId, regiao_id: regiao.id });
+        await supabase.from("conversas").insert({
+          id: conversationId,
+          regiao_id: regiao.id,
+          parceiro_em_foco: null,
+          parceiros_sugeridos: [],
+          ultima_pergunta_usuario: null,
+          ultima_resposta_ia: null,
+          preferencia_indicacao: null,
+          topico_atual: null,
+          aguardando_refinamento: false
+        });
       } catch (e) {
         return res.status(500).json({ error: "Erro ao criar conversa.", internal: e });
       }
@@ -536,7 +517,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     try {
       const { data: conv } = await supabase
         .from("conversas")
-        .select("id, parceiro_em_foco, parceiros_sugeridos, aguardando_refinamento")
+        .select("id, parceiro_em_foco, preferencia_indicacao, topico_atual, parceiros_sugeridos, aguardando_refinamento")
         .eq("id", conversationId)
         .maybeSingle();
       conversaAtual = conv || null;
@@ -544,7 +525,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     const historicoGemini = await construirHistoricoParaGemini(conversationId, 12);
 
-    // ================= INÍCIO: NOVO FLUXO DE REFINAMENTO ===================
+    // --- INÍCIO DO NOVO FLUXO DE REFINAMENTO ---
     if (conversaAtual?.aguardando_refinamento) {
       const criteriosDeBusca = textoDoUsuario;
       const parceirosJaSugeridos = Array.isArray(conversaAtual.parceiros_sugeridos)
@@ -561,19 +542,12 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         excludeIds: parceirosJaSugeridos
       });
 
-      try {
-        await supabase.from("conversas").update({ aguardando_refinamento: false }).eq("id", conversationId);
-      } catch {}
+      await supabase.from("conversas").update({ aguardando_refinamento: false }).eq("id", conversationId);
 
       const fotos = (r.parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
-      return res.status(200).json({
-        reply: r.respostaFinal,
-        photoLinks: fotos,
-        conversationId,
-        partners: r.parceirosSugeridos
-      });
+      return res.status(200).json({ reply: r.respostaFinal, photoLinks: fotos, conversationId, partners: r.parceirosSugeridos });
     }
-    // ================== FIM: NOVO FLUXO DE REFINAMENTO =====================
+    // --- FIM DO NOVO FLUXO DE REFINAMENTO ---
 
     // Seleção direta por "1º/2º" ou nome
     const candidatos = Array.isArray(conversaAtual?.parceiros_sugeridos) ? conversaAtual.parceiros_sugeridos : [];
@@ -592,13 +566,17 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
       let interactionId = null;
       try {
-        const { data: nova } = await supabase.from("interacoes").insert({
-          regiao_id: regiao.id,
-          conversation_id: conversationId,
-          pergunta_usuario: textoDoUsuario,
-          resposta_ia: respostaCurtaSegura,
-          parceiros_sugeridos: [parceiroSelecionado]
-        }).select("id").single();
+        const { data: nova } = await supabase
+          .from("interacoes")
+          .insert({
+            regiao_id: regiao.id,
+            conversation_id: conversationId,
+            pergunta_usuario: textoDoUsuario,
+            resposta_ia: respostaCurtaSegura,
+            parceiros_sugeridos: [parceiroSelecionado]
+          })
+          .select("id")
+          .single();
         interactionId = nova?.id || null;
       } catch (e) {
         console.warn("[INTERACOES] Falha ao salvar (seleção):", e?.message || e);
@@ -615,41 +593,42 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // ↓↓↓ NOVO: detecção de pedido por "mais/outras opções"
-    const palavrasDeRefinamento = ["outras opções", "outras", "mais opções", "mais", "não gostei", "nao gostei", "outra sugestão", "outra sugestao"];
+    // --- DETECÇÃO "MAIS OPÇÕES" / REFINAMENTO ---
+    const palavrasDeRefinamento = ["outras opções","mais","nao gostei","não gostei","outra sugestao","outra sugestão","outras"];
     const pediuRefinamento = palavrasDeRefinamento.some(p => normalizarTexto(textoDoUsuario).includes(p));
+
     if (pediuRefinamento && Array.isArray(conversaAtual?.parceiros_sugeridos) && conversaAtual.parceiros_sugeridos.length > 0) {
-      const perguntaRefinamento = "Ok! Para te ajudar a encontrar a opção ideal, o que você procura? (Ex.: mais barato, ambiente família, vista para o mar, rodízio, etc.)";
+      await supabase.from("conversas").update({ aguardando_refinamento: true }).eq("id", conversationId);
+
+      const perguntaRefinamento = "Ok! Para te ajudar a encontrar a opção ideal, o que você procura? (ex.: mais barato, ambiente para família, rodízio, vista para o mar, etc.)";
+
       try {
-        await supabase.from("conversas").update({ aguardando_refinamento: true }).eq("id", conversationId);
         await supabase.from("interacoes").insert({
           regiao_id: regiao.id,
           conversation_id: conversationId,
           pergunta_usuario: textoDoUsuario,
           resposta_ia: perguntaRefinamento
         });
-      } catch (e) {
-        console.warn("[REFINAMENTO] Falha ao registrar estado:", e?.message || e);
-      }
+      } catch {}
+
       return res.status(200).json({ reply: perguntaRefinamento, conversationId });
     }
 
-    // Intenção
+    // Intenção + busca
     const intent = await analisarIntencaoDoUsuario(textoDoUsuario);
     let respostaFinal = "";
     let parceirosSugeridos = [];
 
     switch (intent) {
       case "busca_parceiro": {
-        // PRIMEIRA BUSCA: paginação inteligente (3 aleatórios)
         const r = await lidarComNovaBusca({
           textoDoUsuario,
           historicoGemini,
           regiao,
           cidadesAtivas,
           idDaConversa: conversationId,
-          isInitialSearch: true,
-          excludeIds: []
+          isInitialSearch: true,   // 1ª página → 3 aleatórios
+          excludeIds: []           // nada a excluir na 1ª página
         });
         respostaFinal = r.respostaFinal;
         parceirosSugeridos = r.parceirosSugeridos;
@@ -691,14 +670,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     }
 
     const fotos = (parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
-    return res.status(200).json({
-      reply: respostaFinal,
-      interactionId,
-      photoLinks: fotos,
-      conversationId,
-      intent,
-      partners: parceirosSugeridos
-    });
+    return res.status(200).json({ reply: respostaFinal, interactionId, photoLinks: fotos, conversationId, intent, partners: parceirosSugeridos });
 
   } catch (erro) {
     console.error("[/api/chat/:slugDaRegiao] Erro:", erro);
