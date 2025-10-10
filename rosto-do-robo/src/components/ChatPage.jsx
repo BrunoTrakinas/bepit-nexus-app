@@ -1,258 +1,264 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import AvisosModal from "./AvisosModal.jsx";
 import SuggestionButtons from "./SuggestionButtons.jsx";
 
-// Chamada ao backend
-async function enviarMensagemParaChat(slug, body) {
-  const base = import.meta.env.VITE_API_BASE_URL || "";
-  const url = `${base}/api/chat/${encodeURIComponent(slug)}`;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
+// Helper tema persistente
+function useTheme() {
+  useEffect(() => {
+    const saved = localStorage.getItem("bepit_theme") || "light";
+    document.documentElement.classList.toggle("dark", saved === "dark");
+  }, []);
+  const toggle = () => {
+    const next = document.documentElement.classList.contains("dark") ? "light" : "dark";
+    document.documentElement.classList.toggle("dark", next === "dark");
+    localStorage.setItem("bepit_theme", next);
+  };
+  return { toggle };
+}
 
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`Falha no chat: ${resp.status} ${resp.statusText} ${t}`);
-  }
-  return await resp.json();
+// Boas-vindas dinâmicas com sugestão de checar avisos
+function makeWelcome(regionName) {
+  const nome = regionName || "sua região";
+  return `Olá! Eu sou o BEPIT, seu concierge IA em ${nome}.
+Antes de perguntar, recomendo tocar em “Avisos da Região” para ver alertas e novidades recentes. Como posso te ajudar?`;
+}
+
+// Typing Indicator (3 pontinhos)
+function TypingDots() {
+  return (
+    <span className="inline-flex gap-1 items-center">
+      <span className="w-2 h-2 rounded-full bg-current opacity-60 animate-pulse"></span>
+      <span className="w-2 h-2 rounded-full bg-current opacity-60 animate-[pulse_1s_0.2s_infinite]"></span>
+      <span className="w-2 h-2 rounded-full bg-current opacity-60 animate-[pulse_1s_0.4s_infinite]"></span>
+    </span>
+  );
 }
 
 export default function ChatPage() {
-  const [region, setRegion] = useState(null);          // { slug, name }
-  const [messages, setMessages] = useState([]);        // { id, role: 'assistant'|'user', text, photos?: string[] }
-  const [isLoading, setIsLoading] = useState(false);
-  const [conversationId, setConversationId] = useState(null);
-  const [showAvisos, setShowAvisos] = useState(false);
+  const navigate = useNavigate();
+  const { toggle } = useTheme();
 
-  const inputRef = useRef(null);
-  const endRef = useRef(null);
-
-  // Garante região do localStorage; se não houver, volta para seleção
-  useEffect(() => {
+  // Região selecionada (obrigatória)
+  const region = useMemo(() => {
     try {
-      const raw = localStorage.getItem("bepit:region");
-      if (!raw) {
-        window.location.replace("/");
-        return;
-      }
-      const parsed = JSON.parse(raw);
-      if (!parsed?.slug || !parsed?.name) {
-        window.location.replace("/");
-        return;
-      }
-      setRegion(parsed);
-
-      // carrega conversationId salvo para a região (se existir)
-      const convKey = `bepit:conv:${parsed.slug}`;
-      const savedConv = localStorage.getItem(convKey);
-      if (savedConv) setConversationId(savedConv);
+      return JSON.parse(localStorage.getItem("bepit_region") || "null");
     } catch {
-      window.location.replace("/");
+      return null;
     }
   }, []);
 
-  // Mensagem de boas-vindas (inclui sugestão de checar avisos)
-  const welcomeMessage = useMemo(() => {
-    const nome = region?.name || "sua região";
-    return (
-      `Olá! Eu sou o BEPIT, seu concierge IA em ${nome}.\n\n` +
-      `Dica rápida: antes de perguntar, vale checar se existem **avisos da região** (obras, interdições, bandeira de praia, eventos). ` +
-      `Clique em "⚠️ Avisos da Região" no topo quando quiser.`
-    );
-  }, [region]);
-
-  // Inicializa o chat com a mensagem de boas-vindas
+  // Bloqueia acesso sem região
   useEffect(() => {
-    if (!region) return;
-    setMessages([
-      { id: crypto.randomUUID(), role: "assistant", text: welcomeMessage }
-    ]);
-  }, [region, welcomeMessage]);
+    if (!region?.slug || !region?.nome) navigate("/");
+  }, [region, navigate]);
 
-  // Scroll automático sempre que a lista muda
+  // conversationId persistente
+  const [conversationId, setConversationId] = useState(() => {
+    const saved = localStorage.getItem("bepit_conversation_id");
+    if (saved) return saved;
+    const gen = crypto?.randomUUID?.() || String(Date.now());
+    localStorage.setItem("bepit_conversation_id", gen);
+    return gen;
+  });
+
+  // Estado do modal de avisos
+  const [showAvisos, setShowAvisos] = useState(false);
+
+  // Lista de mensagens e input
+  const [messages, setMessages] = useState(() => {
+    const initial = [];
+    if (region?.nome) {
+      initial.push({ id: "welcome", from: "assistant", text: makeWelcome(region.nome) });
+    }
+    return initial;
+  });
+  const [input, setInput] = useState("");
+
+  // Loading/typing
+  const [isTyping, setIsTyping] = useState(false);
+
+  // Auto-scroll
+  const scrollRef = useRef(null);
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, isLoading]);
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, isTyping]);
 
-  async function handleSend(text) {
-    if (!region || !text?.trim()) return;
-    const msg = text.trim();
+  // Envia uma mensagem
+  const sendMessage = async (text) => {
+    const content = text.trim();
+    if (!content || !region?.slug) return;
 
-    // Renderiza a mensagem do usuário
-    const userMsg = { id: crypto.randomUUID(), role: "user", text: msg };
-    setMessages(prev => [...prev, userMsg]);
-    setIsLoading(true);
+    // Add mensagem do usuário
+    const userMsg = { id: `u-${Date.now()}`, from: "user", text: content };
+    setMessages((prev) => [...prev, userMsg]);
+    setInput("");
+    setIsTyping(true);
 
     try {
-      const body = { message: msg };
-      if (conversationId) body.conversationId = conversationId;
+      const url = `${API_BASE}/api/chat/${encodeURIComponent(region.slug)}`;
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: content, conversationId })
+      });
 
-      const json = await enviarMensagemParaChat(region.slug, body);
+      const json = await resp.json().catch(() => ({}));
+      const reply = (json && json.reply) ? String(json.reply) : "Desculpe, não consegui obter uma resposta agora.";
 
-      // Guarda conversationId para a região
+      // Add resposta
+      setMessages((prev) => [...prev, { id: `a-${Date.now()}`, from: "assistant", text: reply }]);
+
+      // Atualiza conversationId se backend devolver outro (opcional)
       if (json?.conversationId && json.conversationId !== conversationId) {
+        localStorage.setItem("bepit_conversation_id", json.conversationId);
         setConversationId(json.conversationId);
-        localStorage.setItem(`bepit:conv:${region.slug}`, json.conversationId);
       }
-
-      // Resposta do assistente
-      const iaMsg = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        text: json?.reply || "Não consegui responder agora. Tente novamente.",
-        photos: Array.isArray(json?.photoLinks) ? json.photoLinks : []
-      };
-      setMessages(prev => [...prev, iaMsg]);
     } catch (e) {
-      console.error("[Chat] Erro:", e);
-      setMessages(prev => [
+      setMessages((prev) => [
         ...prev,
-        { id: crypto.randomUUID(), role: "assistant", text: "Tive um problema para responder agora. Você pode tentar novamente?" }
+        {
+          id: `a-${Date.now()}`,
+          from: "assistant",
+          text: "Tive um problema de rede ao falar com o servidor. Tente novamente."
+        }
       ]);
     } finally {
-      setIsLoading(false);
-      if (inputRef.current) {
-        inputRef.current.value = "";
-        inputRef.current.focus();
-      }
+      setIsTyping(false);
     }
-  }
+  };
 
-  function handleSuggestionClick(hint) {
-    if (isLoading || !hint) return;
-    handleSend(hint);
-  }
+  const onSubmit = (e) => {
+    e.preventDefault();
+    sendMessage(input);
+  };
 
-  if (!region) return null; // evita flicker antes do redirect/storage
+  const onSuggestionClick = (text) => sendMessage(text);
 
   return (
-    <div style={{ minHeight: "100vh", display: "grid", gridTemplateRows: "auto 1fr auto", background: "#f6f7fb" }}>
+    <div className="min-h-screen bg-neutral-50 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100 flex flex-col">
       {/* Header */}
-      <header style={{ position: "sticky", top: 0, background: "#fff", borderBottom: "1px solid #e5e7eb", zIndex: 10 }}>
-        <div style={{ maxWidth: 980, margin: "0 auto", padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ fontWeight: 700, fontSize: 18 }}>BEPIT • {region.name}</div>
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+      <header className="border-b border-neutral-200 dark:border-neutral-800 bg-white/80 dark:bg-neutral-950/80 backdrop-blur sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => navigate("/")}
+              className="px-3 py-2 rounded-xl bg-neutral-200 hover:bg-neutral-300 dark:bg-neutral-800 dark:hover:bg-neutral-700 transition"
+              title="Trocar região"
+            >
+              ← Voltar
+            </button>
+            <img
+              src="/bepit-logo.png"
+              alt="BEPIT"
+              className="h-8 w-auto"
+              onError={(e) => { e.currentTarget.style.display = "none"; }}
+            />
+            <div className="font-medium">
+              BEPIT • {region?.nome || "Região"}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
             <button
               onClick={() => setShowAvisos(true)}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 10,
-                border: "1px solid #e5e7eb",
-                background: "#fff",
-                cursor: "pointer",
-                fontSize: 14
-              }}
-              title="Abrir avisos da região"
+              className="px-3 py-2 rounded-xl bg-amber-100 text-amber-900 hover:bg-amber-200 dark:bg-amber-500/20 dark:text-amber-300 dark:hover:bg-amber-500/30 transition"
+              title="Avisos públicos da região"
             >
               ⚠️ Avisos da Região
+            </button>
+            <button
+              onClick={toggle}
+              className="px-3 py-2 rounded-xl bg-neutral-200 hover:bg-neutral-300 dark:bg-neutral-800 dark:hover:bg-neutral-700 transition"
+              title="Alternar tema"
+            >
+              🌓
             </button>
           </div>
         </div>
       </header>
 
-      {/* Corpo do chat */}
-      <main style={{ maxWidth: 980, width: "100%", margin: "0 auto", padding: 16 }}>
-        <div style={{ display: "grid", gap: 14 }}>
-          {messages.map(m => (
-            <div key={m.id} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
-              <div
-                style={{
-                  maxWidth: "80%",
-                  whiteSpace: "pre-wrap",
-                  background: m.role === "user" ? "#0ea5e9" : "#fff",
-                  color: m.role === "user" ? "#fff" : "#111827",
-                  border: m.role === "user" ? "1px solid #0ea5e9" : "1px solid #e5e7eb",
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  boxShadow: "0 6px 18px rgba(0,0,0,0.05)"
-                }}
-              >
-                {m.text}
-                {Array.isArray(m.photos) && m.photos.length > 0 && (
-                  <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {m.photos.map((src, i) => (
-                      <img
-                        key={`${m.id}-photo-${i}`}
-                        src={src}
-                        alt="foto"
-                        style={{ width: 140, height: 100, objectFit: "cover", borderRadius: 8, border: "1px solid #e5e7eb" }}
-                        loading="lazy"
-                      />
-                    ))}
-                  </div>
-                )}
+      {/* Área do chat */}
+      <main className="flex-1">
+        <div className="max-w-4xl mx-auto px-4">
+          {/* Lista de mensagens */}
+          <div
+            ref={scrollRef}
+            className="mt-4 h-[calc(100vh-220px)] overflow-y-auto pr-1"
+          >
+            {messages.map((m) => (
+              <div key={m.id} className={`w-full flex ${m.from === "user" ? "justify-end" : "justify-start"} mb-3`}>
+                <div
+                  className={`max-w-[85%] rounded-2xl px-4 py-3 whitespace-pre-wrap leading-relaxed shadow-sm
+                  ${m.from === "user"
+                    ? "bg-blue-600 text-white rounded-br-sm"
+                    : "bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-bl-sm"}`}
+                >
+                  {m.text}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
 
-          {/* Sugestões iniciais (abaixo da mensagem de boas-vindas) */}
-          <SuggestionButtons
-            isLoading={isLoading}
-            onSuggestionClick={handleSuggestionClick}
-            suggestions={[
-              "Onde comer?",
-              "Passeios de barco",
-              "Praias com estrutura",
-              "Churrascaria com picanha"
-            ]}
-          />
+            {/* Typing indicator */}
+            {isTyping && (
+              <div className="w-full flex justify-start mb-3">
+                <div className="max-w-[85%] rounded-2xl px-4 py-3 shadow-sm bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800">
+                  <TypingDots />
+                </div>
+              </div>
+            )}
 
-          <div ref={endRef} />
+            {/* Sugestões (só enquanto está “no começo”) */}
+            {messages.length <= 1 && (
+              <div className="mt-3">
+                <SuggestionButtons
+                  onSelect={onSuggestionClick}
+                  options={[
+                    "Onde comer?",
+                    "Passeios de barco",
+                    "Melhores praias para família",
+                    "Churrascaria com picanha"
+                  ]}
+                />
+              </div>
+            )}
+          </div>
         </div>
       </main>
 
       {/* Input */}
-      <footer style={{ background: "#fff", borderTop: "1px solid #e5e7eb", position: "sticky", bottom: 0 }}>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!inputRef.current) return;
-            handleSend(inputRef.current.value);
-          }}
-          style={{ maxWidth: 980, margin: "0 auto", padding: 12, display: "flex", gap: 8 }}
-        >
-          <input
-            ref={inputRef}
-            type="text"
-            placeholder="Escreva sua pergunta…"
-            autoFocus
-            style={{
-              flex: 1,
-              padding: "12px 14px",
-              borderRadius: 12,
-              border: "1px solid #e5e7eb",
-              fontSize: 15
-            }}
-          />
-          <button
-            type="submit"
-            disabled={isLoading}
-            style={{
-              padding: "12px 18px",
-              borderRadius: 12,
-              background: isLoading ? "#93c5fd" : "#0ea5e9",
-              color: "#fff",
-              border: "none",
-              cursor: isLoading ? "default" : "pointer",
-              fontSize: 15,
-              fontWeight: 600
-            }}
-          >
-            {isLoading ? "Enviando…" : "Enviar"}
-          </button>
-        </form>
+      <footer className="border-t border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
+        <div className="max-w-4xl mx-auto px-4 py-3">
+          <form onSubmit={onSubmit} className="flex gap-2">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={`Envie uma mensagem para o BEPIT em ${region?.nome || "sua região"}…`}
+              className="flex-1 rounded-2xl px-4 py-3 bg-neutral-100 dark:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <button
+              type="submit"
+              className="px-4 py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition"
+              disabled={!input.trim()}
+            >
+              Enviar
+            </button>
+          </form>
+        </div>
       </footer>
 
       {/* Modal de avisos */}
-      <AvisosModal
-        open={showAvisos}
-        onClose={() => setShowAvisos(false)}
-        regionSlug={region.slug}
-        theme="light"
-      />
+      {showAvisos && (
+        <AvisosModal
+          regionSlug={region?.slug}
+          onClose={() => setShowAvisos(false)}
+        />
+      )}
     </div>
   );
 }
