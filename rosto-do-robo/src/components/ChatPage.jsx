@@ -1,261 +1,300 @@
+// src/components/ChatPage.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import AvisosModal from "./AvisosModal";
+import AvisosModal from "./AvisosModal.jsx";
+import ThemeToggleButton from "./ThemeToggleButton.jsx";
+import SuggestionButtons from "./SuggestionButtons.jsx";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "https://bepit-nexus-backend.onrender.com";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 export default function ChatPage() {
-  const [region, setRegion] = useState(() => {
+  // ------------------- Região (pega do localStorage) -------------------
+  const [regiao, setRegiao] = useState(() => {
     try {
-      const raw = localStorage.getItem("bepit_region");
+      const raw = localStorage.getItem("bepit_regiao");
       return raw ? JSON.parse(raw) : null;
     } catch {
       return null;
     }
   });
 
-  useEffect(() => {
-    if (!region) window.location.replace("/");
-  }, [region]);
-
-  const [isDark, setIsDark] = useState(() => {
-    try {
-      const raw = localStorage.getItem("bepit_theme");
-      return raw ? raw === "dark" : true;
-    } catch {
-      return true;
-    }
-  });
-  useEffect(() => {
-    const html = document.documentElement;
-    if (isDark) {
-      html.classList.add("dark");
-      localStorage.setItem("bepit_theme", "dark");
-    } else {
-      html.classList.remove("dark");
-      localStorage.setItem("bepit_theme", "light");
-    }
-  }, [isDark]);
-
-  // --- NOVO: cache de avisos para abrir modal instantâneo
-  const [avisosCache, setAvisosCache] = useState(null);
-  const [avisosLoading, setAvisosLoading] = useState(false);
-  const [isAvisosOpen, setIsAvisosOpen] = useState(false);
-
-  async function fetchAvisos() {
-    if (!region?.slug || avisosLoading) return;
-    try {
-      setAvisosLoading(true);
-      const resp = await fetch(`${API_BASE}/api/avisos/${encodeURIComponent(region.slug)}`);
-      const json = await resp.json();
-      setAvisosCache(Array.isArray(json?.items) ? json.items : []);
-    } catch {
-      setAvisosCache([]);
-    } finally {
-      setAvisosLoading(false);
-    }
-  }
-
-  // Prefetch ao montar a tela (deixa pronto para abrir rápido)
-  useEffect(() => {
-    if (region?.slug) fetchAvisos();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [region?.slug]);
-
+  // ------------------- Estado do chat -------------------
   const [messages, setMessages] = useState(() => {
-    const nomeRegiao = region?.name || "sua região";
-    const welcome = `Olá! Eu sou o BEPIT, seu concierge IA em ${nomeRegiao}. Dica: antes de qualquer pergunta, vale checar os ⚠️ Avisos da Região — às vezes eles já respondem dúvidas importantes de hoje.`;
-    return [{ id: "welcome", role: "assistant", text: welcome, ts: Date.now() }];
-  });
-  const [input, setInput] = useState("");
+    // Mensagem de recepção dinâmica com sugestão de conferir avisos
+    const nome = (() => {
+      try {
+        const raw = localStorage.getItem("bepit_regiao");
+        return raw ? JSON.parse(raw)?.nome : "sua região";
+      } catch {
+        return "sua região";
+      }
+    })();
 
-  const quickChips = useMemo(
+    return [
+      {
+        id: "welcome",
+        role: "assistant",
+        text:
+          `Olá! Eu sou o BEPIT, seu concierge IA em ${nome}. ` +
+          `Dica: antes de qualquer pergunta, vale checar os ⚠️ Avisos da Região — ` +
+          `às vezes eles já respondem dúvidas importantes de hoje.`,
+      },
+    ];
+  });
+
+  const [input, setInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [avisosOpen, setAvisosOpen] = useState(false);
+
+  // chips fixos
+  const chipsRef = useRef(null);
+  const listRef = useRef(null);
+  const bottomRef = useRef(null);
+
+  const conversationIdRef = useRef(null);
+
+  // ------------------- Guard rail: sem região -> volta -------------------
+  useEffect(() => {
+    if (!regiao || !regiao.slug) {
+      window.location.replace("/");
+    }
+  }, [regiao]);
+
+  // ------------------- Autoscroll -------------------
+  const scrollToBottom = () => {
+    if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
+  };
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isTyping]);
+
+  // ------------------- Chips de sugestões -------------------
+  const suggestionItems = useMemo(
     () => [
-      { id: "chip-rest", label: "🍽️ Restaurantes", text: "Quero opções de restaurantes" },
-      { id: "chip-passeios", label: "⛵ Passeios", text: "Quais passeios de barco você recomenda?" },
-      { id: "chip-praias", label: "🏖️ Praias", text: "Quais praias imperdíveis?" },
-      { id: "chip-dicas", label: "💡 Dicas", text: "Dicas rápidas para hoje" }
+      { label: "🍽️ Restaurantes", text: "Quero onde comer em " + (regiao?.nome || "Região") },
+      { label: "⛵ Passeios", text: "Quais passeios de barco estão disponíveis?" },
+      { label: "🏖️ Praias", text: "Quais praias para família perto?" },
+      { label: "💡 Dicas", text: "Dicas rápidas para hoje" },
     ],
-    []
+    [regiao?.nome]
   );
 
-  const endRef = useRef(null);
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  const handleSuggestion = (text) => {
+    setInput(text);
+    // opcionalmente já envia:
+    // handleSend(text);
+  };
 
-  async function handleSend() {
-    const text = input.trim();
-    if (!text) return;
+  // ------------------- Envio -------------------
+  const handleSend = async (forcedText) => {
+    const text = (forcedText ?? input).trim();
+    if (!text || !regiao?.slug || isSending) return;
 
-    const userMsg = { id: crypto.randomUUID(), role: "user", text, ts: Date.now() };
-    setMessages(prev => [...prev, userMsg]);
+    setIsSending(true);
+    setIsTyping(true);
+
+    // adiciona mensagem do usuário
+    const userMsg = { id: crypto.randomUUID(), role: "user", text };
+    setMessages((prev) => [...prev, userMsg]);
     setInput("");
 
-    const typingId = crypto.randomUUID();
-    setMessages(prev => [...prev, { id: typingId, role: "assistant_typing", text: "•••", ts: Date.now() }]);
-
     try {
-      const slug = region?.slug || "regiao-dos-lagos";
-      const resp = await fetch(`${API_BASE}/api/chat/${encodeURIComponent(slug)}`, {
+      // garante conversationId estável
+      if (!conversationIdRef.current) {
+        conversationIdRef.current = crypto.randomUUID();
+      }
+
+      const url = `${API_BASE}/api/chat/${regiao.slug}`;
+      const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text })
+        body: JSON.stringify({
+          message: text,
+          conversationId: conversationIdRef.current,
+        }),
       });
-      const data = await resp.json();
-      setMessages(prev => prev.filter(m => m.id !== typingId));
-      const reply = (data && data.reply) ? String(data.reply) : "Desculpe, não consegui responder agora.";
-      setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: reply, ts: Date.now() }]);
-    } catch {
-      setMessages(prev => prev.filter(m => m.id !== typingId));
-      setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: "Ops! Falha de conexão. Tente novamente.", ts: Date.now() }]);
+
+      const data = await resp.json().catch(() => ({}));
+      const replyText =
+        (data && data.reply) ||
+        "Tive um problema para responder agora. Pode tentar novamente?";
+
+      const botMsg = { id: crypto.randomUUID(), role: "assistant", text: replyText };
+      setMessages((prev) => [...prev, botMsg]);
+    } catch (e) {
+      const botMsg = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        text: "Falha de conexão. Verifique sua internet e tente novamente.",
+      };
+      setMessages((prev) => [...prev, botMsg]);
+    } finally {
+      setIsSending(false);
+      setIsTyping(false);
+      scrollToBottom();
     }
-  }
+  };
 
-  function handleChip(text) {
-    setInput(text);
-  }
-
-  if (!region) return null;
-
+  // ------------------- Render -------------------
   return (
-    <div className="min-h-dvh bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-50 flex flex-col">
-      {/* Cabeçalho */}
-      <header className="border-b border-neutral-200/70 dark:border-neutral-800 sticky top-0 z-40 bg-white/80 dark:bg-neutral-900/80 backdrop-blur">
-        <div className="max-w-5xl mx-auto px-4 py-3 grid grid-cols-3 items-center">
-          {/* Esquerda */}
-          <div className="flex items-center gap-3 justify-start">
+    <div className="relative min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
+      {/* Cabeçalho: grid em 3 colunas SOMENTE no mobile;
+          em >=sm mantemos o layout do desktop via classes sm:* existentes */}
+      <header className="sticky top-0 z-30 border-b bg-white/80 dark:bg-neutral-900/80 backdrop-blur px-2 sm:px-4 py-2">
+        <div className="grid grid-cols-3 items-center sm:flex sm:items-center sm:justify-between">
+          {/* ESQUERDA (mobile: col 1) */}
+          <div className="min-w-0 flex items-center gap-2 sm:gap-3">
             <button
-              type="button"
-              onClick={() => window.location.replace("/")}
-              className="px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition"
-              aria-label="Voltar"
-              title="Voltar"
+              onClick={() => window.location.href = "/"}
+              className="shrink-0 inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-white/70 dark:bg-neutral-800/70 hover:bg-white dark:hover:bg-neutral-800"
             >
-              ← Voltar
+              <span className="text-lg leading-none">←</span>
+              <span className="text-sm sm:text-base">Voltar</span>
             </button>
+
             <img
               src="/bepit-logo.png"
               alt="BEPIT"
-              className="h-8 w-8 rounded-md object-contain"
-              draggable="false"
+              className="shrink-0 h-7 w-7 sm:h-8 sm:w-8 rounded-full"
             />
-            <div className="text-xl font-semibold tracking-tight">BEPIT</div>
+            <span className="shrink-0 font-semibold text-base sm:text-lg tracking-wide">
+              BEPIT
+            </span>
           </div>
 
-          {/* Centro */}
-          <div className="flex items-center justify-center text-base sm:text-lg font-medium truncate">
-            {region?.name || "Região"}
+          {/* CENTRO (mobile: col 2) */}
+          <div className="min-w-0 flex justify-center sm:flex-1">
+            <h1
+              className="max-w-[60vw] sm:max-w-none text-center font-medium text-sm sm:text-base whitespace-nowrap overflow-hidden text-ellipsis"
+              title={regiao?.nome || ""}
+            >
+              {regiao?.nome || "Região"}
+            </h1>
           </div>
 
-          {/* Direita */}
-          <div className="flex items-center gap-3 justify-end">
+          {/* DIREITA (mobile: col 3) */}
+          <div className="min-w-0 flex items-center justify-end gap-2 sm:gap-3">
             <button
-              type="button"
-              onMouseEnter={fetchAvisos}   // prefetch ao passar o mouse
-              onFocus={fetchAvisos}
-              onClick={() => {
-                // abre o modal imediatamente; os dados já vão estar em cache (ou chegam em seguida)
-                setIsAvisosOpen(true);
-                if (!avisosCache && !avisosLoading) fetchAvisos();
-              }}
-              className="px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition flex items-center gap-2"
-              aria-label="Abrir avisos da região"
-              title="Avisos da Região"
+              onClick={() => setAvisosOpen(true)}
+              className="shrink-0 inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-white/70 dark:bg-neutral-800/70 hover:bg-white dark:hover:bg-neutral-800"
             >
-              <span className="text-lg">⚠️</span>
-              <span className="hidden sm:inline">{avisosLoading ? "Carregando..." : "Avisos"}</span>
+              <span className="text-lg leading-none">⚠️</span>
+              <span className="hidden sm:inline text-sm">Avisos</span>
             </button>
-
-            <button
-              type="button"
-              onClick={() => setIsDark(d => !d)}
-              className="px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition"
-              aria-label="Alternar tema"
-              title="Alternar claro/escuro"
-            >
-              {isDark ? "🌙" : "☀️"}
-            </button>
+            <ThemeToggleButton />
           </div>
         </div>
 
-        {/* Chips (fixos no topo) */}
-        <div className="max-w-5xl mx-auto px-4 pb-3">
-          <div className="flex flex-wrap items-center justify-center gap-2">
-            {quickChips.map(chip => (
-              <button
-                key={chip.id}
-                type="button"
-                onClick={() => handleChip(chip.text)}
-                className="px-3 py-1.5 rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-700 text-sm transition"
-              >
-                {chip.label}
-              </button>
-            ))}
-          </div>
+        {/* CHIPS — ficam sempre visíveis (também sticky) */}
+        <div
+          ref={chipsRef}
+          className="mt-2 flex w-full items-center justify-center gap-2 flex-wrap"
+        >
+          {suggestionItems.map((s) => (
+            <button
+              key={s.label}
+              onClick={() => handleSuggestion(s.text)}
+              className="px-4 py-2 rounded-full border bg-white/70 dark:bg-neutral-800/70 hover:bg-white dark:hover:bg-neutral-800"
+              title={s.text}
+            >
+              {s.label}
+            </button>
+          ))}
         </div>
       </header>
 
-      {/* Chat */}
-      <main className="flex-1">
-        <div className="max-w-5xl mx-auto px-4 py-4">
-          <div className="space-y-3">
-            {messages.map(msg => {
-              if (msg.role === "assistant_typing") {
-                return (
-                  <div key={msg.id} className="flex">
-                    <div className="px-3 py-2 rounded-2xl bg-neutral-100 dark:bg-neutral-800 animate-pulse">•••</div>
-                  </div>
-                );
-              }
-              const isUser = msg.role === "user";
-              return (
-                <div key={msg.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                  <div
-                    className={`max-w-[85%] sm:max-w-[70%] px-4 py-2 rounded-2xl ${
-                      isUser
-                        ? "bg-blue-600 text-white rounded-br-sm"
-                        : "bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-50 rounded-bl-sm"
-                    }`}
-                  >
-                    <div className="whitespace-pre-wrap leading-relaxed">{msg.text}</div>
-                  </div>
-                </div>
-              );
-            })}
-            <div ref={endRef} />
-          </div>
+      {/* LISTA DE MENSAGENS */}
+      <main
+        ref={listRef}
+        className="
+          relative
+          px-3 sm:px-4
+          pt-3
+          pb-[calc(88px+env(safe-area-inset-bottom))]   /* espaço para o input fixo */
+          sm:pb-[calc(96px+env(safe-area-inset-bottom))]
+          max-w-5xl mx-auto
+        "
+      >
+        <div className="space-y-3">
+          {messages.map((m) => (
+            <div
+              key={m.id}
+              className={`
+                max-w-[92%] sm:max-w-[70%]
+                ${m.role === "user"
+                  ? "ml-auto bg-blue-600 text-white"
+                  : "mr-auto bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100"}
+                rounded-2xl px-4 py-3 shadow-sm border border-black/5 dark:border-white/10
+              `}
+            >
+              <p className="leading-relaxed">{m.text}</p>
+            </div>
+          ))}
+
+          {isTyping && (
+            <div className="mr-auto bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 rounded-2xl px-4 py-3 border border-black/5 dark:border-white/10 w-24">
+              <span className="inline-flex gap-1">
+                <span className="animate-bounce">•</span>
+                <span className="animate-bounce [animation-delay:100ms]">•</span>
+                <span className="animate-bounce [animation-delay:200ms]">•</span>
+              </span>
+            </div>
+          )}
+
+          <div ref={bottomRef} />
         </div>
       </main>
 
-      {/* Input */}
-      <footer className="sticky bottom-0 z-40 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-t border-neutral-200/70 dark:border-neutral-800">
-        <div className="max-w-5xl mx-auto px-3 sm:px-4 py-2">
-          <div className="flex items-center gap-2">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleSend(); }}
-              placeholder="Escreva sua mensagem..."
-              className="flex-1 h-10 sm:h-11 px-3 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 outline-none focus:ring-2 focus:ring-blue-500/40"
-            />
-            <button
-              type="button"
-              onClick={handleSend}
-              className="h-10 sm:h-11 px-4 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition"
-            >
-              Enviar
-            </button>
-          </div>
-        </div>
-      </footer>
+      {/* INPUT FIXO NA BASE (com área segura) */}
+      <div
+        className="
+          fixed inset-x-0 bottom-0 z-30
+          bg-white/85 dark:bg-neutral-900/85 backdrop-blur
+          border-t
+          px-3 sm:px-4 py-2
+          pb-[calc(10px+env(safe-area-inset-bottom))]
+        "
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSend();
+          }}
+          className="max-w-5xl mx-auto flex items-center gap-2"
+        >
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Escreva sua mensagem…"
+            className="
+              flex-1 rounded-2xl px-4 py-3
+              bg-neutral-100 dark:bg-neutral-800
+              border border-neutral-200 dark:border-neutral-700
+              outline-none focus:ring-2 focus:ring-blue-500
+            "
+          />
+          <button
+            type="submit"
+            disabled={isSending || !input.trim()}
+            className="
+              inline-flex items-center justify-center
+              rounded-xl px-5 py-3
+              bg-blue-600 text-white font-medium
+              disabled:opacity-50 disabled:cursor-not-allowed
+              hover:bg-blue-700
+            "
+          >
+            Enviar
+          </button>
+        </form>
+      </div>
 
-      {/* Modal de Avisos (abre com cache inicial) */}
-      {isAvisosOpen && (
+      {/* MODAL DE AVISOS */}
+      {avisosOpen && (
         <AvisosModal
-          regionSlug={region?.slug}
-          onClose={() => setIsAvisosOpen(false)}
-          apiBase={API_BASE}
-          initialItems={avisosCache || []}
+          slugDaRegiao={regiao?.slug}
+          onClose={() => setAvisosOpen(false)}
         />
       )}
     </div>

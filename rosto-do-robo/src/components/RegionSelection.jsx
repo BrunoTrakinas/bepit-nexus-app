@@ -1,82 +1,85 @@
-import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+// src/components/RegionSelection.jsx
+import React from "react";
+import ThemeToggleButton from "./ThemeToggleButton.jsx";
 
 /**
- * Página de seleção da região
- * - Centraliza vertical e horizontalmente: logo, título e botões das regiões
- * - Persiste o tema (claro/escuro) em localStorage
- * - Ao clicar em uma região, salva { slug, name } e navega para /chat
+ * Seleção de Região
+ * - Centraliza logo, título "BEPIT", subtítulo "Escolha sua Região" e os botões das regiões.
+ * - Salva { slug, nome } no localStorage com a chave "bepit_regiao".
+ * - Redireciona para /chat após a seleção.
+ * - Mantém compatibilidade mobile/tablet/desktop e modo escuro.
  */
 
-const REGIONS = [
-  { slug: "regiao-dos-lagos", name: "Região dos Lagos" },
-  // adicione outras regiões aqui quando necessário
+const REGIOES_DISPONIVEIS = [
+  { slug: "regiao-dos-lagos", nome: "Região dos Lagos" },
+  // Adicione mais regiões aqui quando quiser:
+  // { slug: "costa-verde", nome: "Costa Verde" },
+  // { slug: "serra-fluminense", nome: "Serra Fluminense" },
 ];
 
-const THEME_KEY = "bepit_theme";
-const REGION_KEY = "bepit_region";
-
 export default function RegionSelection() {
-  const navigate = useNavigate();
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || "light");
-
-  // aplica/remover classe 'dark' no html
-  useEffect(() => {
-    const root = document.documentElement;
-    if (theme === "dark") root.classList.add("dark");
-    else root.classList.remove("dark");
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
-
-  // seletor de tema (opcional na tela)
-  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
-
-  const handleSelect = (region) => {
-    localStorage.setItem(REGION_KEY, JSON.stringify(region));
-    navigate("/chat");
-  };
+  function handleSelect(regiao) {
+    try {
+      localStorage.setItem("bepit_regiao", JSON.stringify(regiao));
+    } catch {
+      // ignore
+    }
+    // redireciona
+    window.location.href = "/chat";
+  }
 
   return (
-    <div className="min-h-screen bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
-      {/* Container centralizado vertical/horizontal */}
-      <div className="mx-auto max-w-xl px-4 min-h-screen flex flex-col items-center justify-center gap-8">
-        {/* Logo */}
+    <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 relative">
+      {/* Topbar mínima: apenas o ThemeToggle à direita (não atrapalha o centro) */}
+      <div className="absolute right-3 top-3 sm:right-4 sm:top-4 z-20">
+        <ThemeToggleButton />
+      </div>
+
+      {/* Conteúdo centralizado vertical e horizontal */}
+      <div className="max-w-3xl mx-auto px-4 w-full min-h-screen flex flex-col items-center justify-center">
+        {/* LOGO */}
         <img
           src="/bepit-logo.png"
           alt="BEPIT"
-          className="w-20 h-20 rounded-full shadow-sm"
-          draggable="false"
+          className="h-16 w-16 sm:h-20 sm:w-20 rounded-full shadow-sm mb-4"
         />
 
-        {/* Títulos */}
-        <div className="text-center">
-          <h1 className="text-3xl font-bold tracking-tight">BEPIT Nexus</h1>
-          <p className="text-base mt-2 opacity-80">Escolha sua Região</p>
-        </div>
+        {/* TÍTULO */}
+        <h1 className="text-2xl sm:text-3xl font-bold tracking-wide mb-1">
+          BEPIT Nexus
+        </h1>
 
-        {/* Lista de regiões */}
-        <div className="w-full flex flex-col gap-3">
-          {REGIONS.map((r) => (
+        {/* SUBTÍTULO */}
+        <p className="text-base sm:text-lg opacity-80 mb-8">
+          Escolha sua Região
+        </p>
+
+        {/* BOTÕES DAS REGIÕES */}
+        <div className="w-full max-w-md flex flex-col items-stretch gap-3">
+          {REGIOES_DISPONIVEIS.map((r) => (
             <button
               key={r.slug}
               onClick={() => handleSelect(r)}
-              className="w-full py-3 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition text-center font-medium"
+              className="
+                w-full
+                rounded-xl border border-neutral-200 dark:border-neutral-700
+                bg-white/80 dark:bg-neutral-800/80
+                hover:bg-white dark:hover:bg-neutral-800
+                px-5 py-4
+                text-center
+                text-base sm:text-lg font-medium
+                shadow-sm
+                transition
+                focus:outline-none focus:ring-2 focus:ring-blue-500
+              "
             >
-              {r.name}
+              {r.nome}
             </button>
           ))}
         </div>
 
-        {/* Alternador de tema (opcional aqui) */}
-        <button
-          onClick={toggleTheme}
-          className="mt-2 inline-flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-2 text-sm bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition"
-          aria-label="Alternar tema"
-          type="button"
-        >
-          <span className="text-lg">🌓</span>
-          {theme === "dark" ? "Modo claro" : "Modo escuro"}
-        </button>
+        {/* Espaço seguro inferior p/ iOS/Android */}
+        <div className="h-[env(safe-area-inset-bottom)]" />
       </div>
     </div>
   );

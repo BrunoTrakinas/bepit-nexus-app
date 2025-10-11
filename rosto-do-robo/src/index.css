@@ -1,31 +1,61 @@
 /* src/index.css — Tailwind v4 */
 @import "tailwindcss";
 
-/* Importante no v4:
-   Quando <html> tiver class="dark", as classes `dark:` ficam ativas */
+/* MUITO IMPORTANTE no v4:
+   Diz ao Tailwind: “quando <html> tiver class='dark', ative as classes 'dark:' ” */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* ====== Mobile / iOS helpers ====== */
+/* ====== Ajustes Globais (seguros) ====== */
 
-/* Safe areas (iOS notch / home indicator) via CSS env() */
 :root {
-  --safe-top: env(safe-area-inset-top);
-  --safe-right: env(safe-area-inset-right);
-  --safe-bottom: env(safe-area-inset-bottom);
-  --safe-left: env(safe-area-inset-left);
+  color-scheme: light dark;
 }
 
-/* Rolagem com inércia no iOS para áreas roláveis */
-.scroll-smooth-touch {
-  -webkit-overflow-scrolling: touch;
+/* Corpo com fundo neutro coerente em ambos os temas */
+html, body, #root {
+  height: 100%;
 }
 
-/* Suaviza scroll geral quando suportado */
+body {
+  @apply bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100;
+}
+
+/* Suaviza focos padrão */
+:where(button, a, input, textarea, select) {
+  outline: none;
+}
+
+/* Rola suave (mensagens do chat + navegação) */
 html {
   scroll-behavior: smooth;
 }
 
-body {
-  margin: 0;
-  min-height: 100dvh; /* usa dvh p/ corrigir 100vh no Safari móvel */
+/* Scrollbar discreta (suportado em webkit) */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,.15);
+  border-radius: 8px;
+}
+.dark *::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.15);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Corrige “bouncing” do input no iOS quando teclado abre */
+@supports (padding: max(0px)) {
+  .safe-bottom {
+    padding-bottom: max( env(safe-area-inset-bottom), 12px );
+  }
+}
+
+/* Utilitário opcional para truncar textos longos (títulos de região etc.) */
+.truncate-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
