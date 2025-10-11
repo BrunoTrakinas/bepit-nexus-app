@@ -2,59 +2,63 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 
 /**
- * RegionSelection.jsx
- * - Tela de escolha de região
- * - Centraliza LOGO (bepit-logo.png), "Bepit Nexus", subtítulo e lista de regiões
- * - Ao selecionar, salva { slug, name } em localStorage e redireciona para /chat
+ * Tela de seleção de região
+ * - Logo centralizada em tamanho padrão (sem zoom exagerado)
+ * - Títulos centralizados
+ * - Botões de regiões empilhados, responsivos
+ * - Ao selecionar: salva no localStorage e navega para /chat
  */
 export default function RegionSelection() {
   const navigate = useNavigate();
 
-  // Ajuste/expanda aqui suas regiões reais
-  const regioes = [
-    { slug: "regiao-dos-lagos", name: "Região dos Lagos" },
-    // { slug: "outra-regiao", name: "Outra Região" },
+  // Ajuste/expanda conforme for adicionando mais regiões
+  const regions = [
+    { name: "Região dos Lagos", slug: "regiao-dos-lagos" },
+    // { name: "Outra Região", slug: "outra-regiao" },
   ];
 
-  function onSelectRegion(region) {
+  function handleSelectRegion(region) {
     try {
-      localStorage.setItem("bepit_region", JSON.stringify(region));
+      localStorage.setItem(
+        "bepit_region",
+        JSON.stringify({ slug: region.slug, name: region.name })
+      );
     } catch {}
     navigate("/chat");
   }
 
   return (
-    <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-950 px-4">
-      <div className="w-full max-w-lg text-center">
-        {/* LOGO centralizada — 500% do tamanho base */}
-        <div className="flex justify-center mb-4">
-          <img
-            src="/bepit-logo.png"
-            alt="BEPIT"
-            className="w-40 h-40 md:w-48 md:h-48 lg:w-52 lg:h-52"
-            style={{ transform: "scale(5)", transformOrigin: "center" }}
-          />
+    <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex items-center justify-center px-4">
+      <div className="w-full max-w-2xl flex flex-col items-center gap-6 md:gap-8">
+
+        {/* Logo em tamanho padrão */}
+        <img
+          src="/bepit-logo.png"
+          alt="BEPIT logo"
+          className="w-24 h-24 md:w-28 md:h-28 object-contain select-none pointer-events-none"
+          draggable="false"
+        />
+
+        {/* Títulos */}
+        <div className="text-center">
+          <h1 className="font-semibold tracking-tight text-3xl md:text-4xl">
+            Bepit Nexus
+          </h1>
+          <p className="mt-2 text-base md:text-lg text-neutral-600 dark:text-neutral-300">
+            Escolha sua Região
+          </p>
         </div>
 
-        {/* Título principal */}
-        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-800 dark:text-slate-100 mb-2">
-          Bepit Nexus
-        </h1>
-
-        {/* Subtítulo */}
-        <p className="text-lg md:text-xl text-slate-600 dark:text-slate-300 mb-6">
-          Escolha sua Região
-        </p>
-
-        {/* Lista de regiões (vertical, centralizada) */}
-        <div className="space-y-3">
-          {regioes.map((r) => (
+        {/* Lista de regiões */}
+        <div className="w-full max-w-md flex flex-col gap-3">
+          {regions.map((r) => (
             <button
               key={r.slug}
-              onClick={() => onSelectRegion(r)}
-              className="w-full py-4 rounded-2xl bg-white dark:bg-slate-800 shadow hover:shadow-md transition
-                         border border-slate-200 dark:border-slate-700 text-lg font-medium
-                         text-slate-800 dark:text-slate-100"
+              onClick={() => handleSelectRegion(r)}
+              className="w-full rounded-2xl px-5 py-4 text-base md:text-lg font-medium
+                         bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700
+                         shadow-sm hover:shadow-md hover:border-neutral-300 dark:hover:border-neutral-600
+                         transition-all"
             >
               {r.name}
             </button>
