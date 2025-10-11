@@ -679,73 +679,64 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 });
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
+// Deixe esta rota logo após os /health, antes de /feedback
 aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
-    const debug = String(req.query.debug || "") === "1";
 
-    // 1) Região
+    // 1) Validar a região
     const { data: regiao, error: erroRegiao } = await supabase
       .from("regioes")
-      .select("id, ativo, nome, slug")
+      .select("id, slug, nome")
       .eq("slug", slugDaRegiao)
       .single();
 
     if (erroRegiao || !regiao) {
-      if (debug) console.error("[avisos] região erro:", erroRegiao);
       return res.status(404).json({ error: "Região não encontrada." });
     }
-    if (regiao.ativo === false) {
-      return res.status(403).json({ error: "Região desativada." });
-    }
 
-    // 2) Buscar avisos ativos (sem ORDER BY para evitar erro de coluna inexistente)
-    const { data, error: erroAvisos } = await supabase
+    // 2) Buscar avisos ativos da região + join leve com cidades
+    //    Se a FK estiver declarada, esse select funciona:
+    //    cidades:cidade_id (nome, slug)
+    const { data: avisos, error: erroAvisos } = await supabase
       .from("avisos_publicos")
-      .select("*")
+      .select(`
+        id,
+        regiao_id,
+        cidade_id,
+        titulo,
+        descricao,
+        prioridade,
+        periodo_inicio,
+        periodo_fim,
+        ativo,
+        created_at,
+        cidades:cidade_id (nome, slug)
+      `)
       .eq("regiao_id", regiao.id)
-      .eq("ativo", true);
+      .eq("ativo", true)
+      .order("periodo_inicio", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(200); // limite de segurança
 
     if (erroAvisos) {
-      if (debug) console.error("[avisos] erro consulta avisos:", erroAvisos);
-      return res
-        .status(500)
-        .json({ error: "Falha ao consultar avisos da região." });
+      throw erroAvisos;
     }
 
-    const avisos = Array.isArray(data) ? data : [];
+    // 3) Mapear para incluir campos planos cidade_nome / cidade_slug
+    const items = (avisos || []).map(a => ({
+      ...a,
+      cidade_nome: a?.cidades?.nome || null,
+      cidade_slug: a?.cidades?.slug || null,
+    }));
 
-    // 3) Ordenar em memória pelo campo disponível (mais recente primeiro)
-    const pickDate = (row) =>
-      row?.data_publicacao ??
-      row?.created_at ??
-      row?.periodo_inicio ??
-      row?.updated_at ??
-      null;
+    // 4) Cache curtinho (60s) para aliviar o backend em múltiplos cliques
+    res.setHeader("Cache-Control", "public, max-age=60");
 
-    avisos.sort((a, b) => {
-      const da = pickDate(a);
-      const db = pickDate(b);
-      if (!da && !db) return 0;
-      if (!da) return 1;
-      if (!db) return -1;
-      // mais recente primeiro
-      return Date.parse(db) - Date.parse(da);
-    });
-
-    // 4) Retorno
-    return res.status(200).json({ items: avisos });
+    return res.status(200).json({ items });
   } catch (erro) {
-    console.error("[/api/avisos/:slugDaRegiao] Erro inesperado:", erro);
-    const debug = String(req.query.debug || "") === "1";
-    if (debug) {
-      return res
-        .status(500)
-        .json({ error: "Erro interno ao buscar avisos.", internal: String(erro?.message || erro) });
-    }
-    return res
-      .status(500)
-      .json({ error: "Erro interno no servidor ao buscar avisos." });
+    console.error("[/api/avisos/:slugDaRegiao] Erro:", erro);
+    return res.status(500).json({ error: "Erro interno no servidor ao buscar avisos." });
   }
 });
 
