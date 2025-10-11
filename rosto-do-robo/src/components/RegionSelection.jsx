@@ -1,86 +1,81 @@
-// src/components/RegionSelection.jsx
-import React from "react";
+import React, { useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import ThemeToggleButton from "./ThemeToggleButton.jsx";
 
 /**
- * Seleção de Região
- * - Centraliza logo, título "BEPIT", subtítulo "Escolha sua Região" e os botões das regiões.
- * - Salva { slug, nome } no localStorage com a chave "bepit_regiao".
- * - Redireciona para /chat após a seleção.
- * - Mantém compatibilidade mobile/tablet/desktop e modo escuro.
+ * Tela de seleção de região
+ * - Logo centralizada
+ * - “Bepit Nexus” + “Escolha sua Região” centralizados
+ * - Cartões (botões) de regiões centralizados, um embaixo do outro (responsivo)
+ * - Botão de tema no topo direito
  */
-
-const REGIOES_DISPONIVEIS = [
-  { slug: "regiao-dos-lagos", nome: "Região dos Lagos" },
-  // Adicione mais regiões aqui quando quiser:
-  // { slug: "costa-verde", nome: "Costa Verde" },
-  // { slug: "serra-fluminense", nome: "Serra Fluminense" },
-];
-
 export default function RegionSelection() {
-  function handleSelect(regiao) {
+  const navigate = useNavigate();
+
+  // Exemplo de regiões disponíveis (ajuste conforme seu backend)
+  const regions = [
+    { slug: "regiao-dos-lagos", nome: "Região dos Lagos" },
+    // adicione outras regiões aqui quando estiverem ativas
+  ];
+
+  // Se já existe região no storage, manter ou forçar seleção novamente? Aqui mantemos.
+  useEffect(() => {
+    // nada obrigatório aqui por enquanto
+  }, []);
+
+  const handleSelect = (region) => {
     try {
-      localStorage.setItem("bepit_regiao", JSON.stringify(regiao));
-    } catch {
-      // ignore
-    }
-    // redireciona
-    window.location.href = "/chat";
-  }
+      localStorage.setItem("bepit_region", JSON.stringify(region));
+    } catch {}
+    navigate("/chat");
+  };
 
   return (
-    <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 relative">
-      {/* Topbar mínima: apenas o ThemeToggle à direita (não atrapalha o centro) */}
-      <div className="absolute right-3 top-3 sm:right-4 sm:top-4 z-20">
+    <div className="min-h-screen bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      {/* Top bar com toggle de tema */}
+      <div className="w-full flex items-center justify-end px-4 py-3">
         <ThemeToggleButton />
       </div>
 
-      {/* Conteúdo centralizado vertical e horizontal */}
-      <div className="max-w-3xl mx-auto px-4 w-full min-h-screen flex flex-col items-center justify-center">
-        {/* LOGO */}
-        <img
-          src="/bepit-logo.png"
-          alt="BEPIT"
-          className="h-16 w-16 sm:h-20 sm:w-20 rounded-full shadow-sm mb-4"
-        />
+      {/* Conteúdo centralizado */}
+      <main className="max-w-3xl mx-auto px-4">
+        <div className="flex flex-col items-center justify-center text-center gap-6 sm:gap-8 pt-10 pb-16">
+          {/* Logo */}
+          <img
+            src="/bepit-logo.png"
+            alt="BEPIT"
+            className="h-20 w-20 sm:h-24 sm:w-24 md:h-28 md:w-28 rounded-full shadow"
+          />
 
-        {/* TÍTULO */}
-        <h1 className="text-2xl sm:text-3xl font-bold tracking-wide mb-1">
-          BEPIT Nexus
-        </h1>
+          {/* Título “Bepit Nexus” */}
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight">
+            Bepit Nexus
+          </h1>
 
-        {/* SUBTÍTULO */}
-        <p className="text-base sm:text-lg opacity-80 mb-8">
-          Escolha sua Região
-        </p>
+          {/* Subtítulo */}
+          <p className="text-base sm:text-lg md:text-xl text-slate-600 dark:text-slate-300">
+            Escolha sua Região
+          </p>
 
-        {/* BOTÕES DAS REGIÕES */}
-        <div className="w-full max-w-md flex flex-col items-stretch gap-3">
-          {REGIOES_DISPONIVEIS.map((r) => (
-            <button
-              key={r.slug}
-              onClick={() => handleSelect(r)}
-              className="
-                w-full
-                rounded-xl border border-neutral-200 dark:border-neutral-700
-                bg-white/80 dark:bg-neutral-800/80
-                hover:bg-white dark:hover:bg-neutral-800
-                px-5 py-4
-                text-center
-                text-base sm:text-lg font-medium
-                shadow-sm
-                transition
-                focus:outline-none focus:ring-2 focus:ring-blue-500
-              "
-            >
-              {r.nome}
-            </button>
-          ))}
+          {/* Lista de regiões */}
+          <div className="w-full max-w-md flex flex-col items-stretch gap-3 mt-2">
+            {regions.map((r) => (
+              <button
+                key={r.slug}
+                onClick={() => handleSelect(r)}
+                className="
+                  w-full rounded-2xl border border-slate-200 bg-white px-5 py-4 text-lg font-semibold
+                  shadow-sm hover:shadow transition
+                  text-center
+                  dark:border-slate-700 dark:bg-slate-900
+                "
+              >
+                {r.nome}
+              </button>
+            ))}
+          </div>
         </div>
-
-        {/* Espaço seguro inferior p/ iOS/Android */}
-        <div className="h-[env(safe-area-inset-bottom)]" />
-      </div>
+      </main>
     </div>
   );
 }
