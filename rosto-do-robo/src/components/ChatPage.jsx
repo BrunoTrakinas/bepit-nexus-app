@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import ThemeToggleButton from "./ThemeToggleButton.jsx";
 import AvisosModal from "./AvisosModal.jsx";
 import { supabase } from "../lib/supabaseClient.js";
@@ -75,6 +76,8 @@ function inferTopic(text) {
 }
 
 export default function ChatPage() {
+  const navigate = useNavigate();
+
   // Região do localStorage
   const regionInfo = useMemo(() => {
     try {
@@ -285,52 +288,49 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
   return (
     <div className="min-h-dvh bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex flex-col">
       {/* Cabeçalho */}
-      {/* === HEADER (apenas este bloco substitui o seu header atual) === */}
-<header className="sticky top-0 z-40 grid grid-cols-[auto,1fr,auto] items-center gap-2 border-b border-neutral-200 bg-white/95 px-3 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4 sm:py-3">
-  {/* ESQUERDA: Voltar + Logo + BEPIT */}
-  <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-    <button
-      onClick={() => navigate("/")}
-      className="rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
-      aria-label="Voltar para seleção de região"
-    >
-      ← Voltar
-    </button>
+      <header className="sticky top-0 z-40 grid grid-cols-[auto,1fr,auto] items-center gap-2 border-b border-neutral-200 bg-white/95 px-3 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4 sm:py-3">
+        {/* ESQUERDA: Voltar + Logo + BEPIT */}
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+          <button
+            onClick={() => navigate("/")}
+            className="rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
+            aria-label="Voltar para seleção de região"
+          >
+            ← Voltar
+          </button>
 
-    <img
-      src="/bepit-logo.png"
-      alt="BEPIT"
-      className="h-7 w-7 shrink-0 rounded-full sm:h-8 sm:w-8"
-    />
-    <span className="shrink-0 text-base font-semibold sm:text-lg md:text-xl">
-      BEPIT
-    </span>
-  </div>
+          <img
+            src="/bepit-logo.png"
+            alt="BEPIT"
+            className="h-7 w-7 shrink-0 rounded-full sm:h-8 sm:w-8"
+          />
+          <span className="shrink-0 text-base font-semibold sm:text-lg md:text-xl">
+            BEPIT
+          </span>
+        </div>
 
-  {/* CENTRO: Nome da região (trunca no mobile) */}
-  <div className="min-w-0 text-center">
-    <div className="mx-auto max-w-[70vw] truncate text-sm font-medium sm:max-w-[60vw] sm:text-base md:text-lg">
-      {region?.nome || region?.name || "Região"}
-    </div>
-  </div>
+        {/* CENTRO: Nome da região (trunca no mobile) */}
+        <div className="min-w-0 text-center">
+          <div className="mx-auto max-w-[70vw] truncate text-sm font-medium sm:max-w-[60vw] sm:text-base md:text-lg">
+            {regionName}
+          </div>
+        </div>
 
-  {/* DIREITA: Avisos + Tema */}
-  <div className="flex items-center justify-end gap-2 sm:gap-3">
-    <button
-      onClick={() => setIsAvisosOpen(true)}
-      className="flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
-      aria-label="Abrir avisos da região"
-    >
-      <span className="text-base">⚠️</span>
-      <span className="hidden sm:inline">Avisos</span>
-    </button>
-    <ThemeToggleButton />
-  </div>
-</header>
-{/* === /HEADER === */}
+        {/* DIREITA: Avisos + Tema */}
+        <div className="flex items-center justify-end gap-2 sm:gap-3">
+          <button
+            onClick={openAvisosModal}
+            className="flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
+            aria-label="Abrir avisos da região"
+          >
+            <span className="text-base">⚠️</span>
+            <span className="hidden sm:inline">Avisos</span>
+          </button>
+          <ThemeToggleButton />
+        </div>
+      </header>
 
-
-      {/* CHIPS FIXOS (textos mais claros para “evitar resposta única”) */}
+      {/* CHIPS FIXOS */}
       <div className="sticky top-16 sm:top-20 z-20 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto w-full max-w-5xl px-3 sm:px-4 py-2">
           <div className="flex flex-wrap items-center justify-center gap-2">
