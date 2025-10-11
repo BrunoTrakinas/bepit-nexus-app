@@ -18,14 +18,11 @@ export default function RegionSelection() {
     // adicione outras regiões aqui quando estiverem ativas
   ];
 
-  // Se já existe região no storage, manter ou forçar seleção novamente? Aqui mantemos.
-  useEffect(() => {
-    // nada obrigatório aqui por enquanto
-  }, []);
-
   const handleSelect = (region) => {
     try {
-      localStorage.setItem("bepit_region", JSON.stringify(region));
+      // grava de forma compatível com telas que leem "name" OU "nome"
+      const payload = { ...region, name: region?.nome || region?.name };
+      localStorage.setItem("bepit_region", JSON.stringify(payload));
     } catch {}
     navigate("/chat");
   };
@@ -70,7 +67,7 @@ export default function RegionSelection() {
                   dark:border-slate-700 dark:bg-slate-900
                 "
               >
-                {r.nome}
+                {r.nome || r.name}
               </button>
             ))}
           </div>

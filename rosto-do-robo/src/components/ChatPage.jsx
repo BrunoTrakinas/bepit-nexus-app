@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ThemeToggleButton from "./ThemeToggleButton.jsx";
 import AvisosModal from "./AvisosModal.jsx";
+import { supabase } from "../lib/supabaseClient.js";
 
-/**
- * Helper local – fetch com timeout (mantém compatibilidade sem precisar de arquivo extra)
- */
+/** Fetch com timeout para chamadas HTTP do chat */
 async function fetchWithTimeout(resource, options = {}) {
   const { timeout = 20000, ...rest } = options;
   const controller = new AbortController();
@@ -19,8 +18,43 @@ async function fetchWithTimeout(resource, options = {}) {
   }
 }
 
+/** Resolve o ID da região:
+ *  1) usa o que estiver salvo (id/regiao_id/region_id)
+ *  2) se não houver, procura por slug em `regioes_publicas` e salva de volta
+ */
+async function resolveRegionId(regionInfo) {
+  const saved =
+    regionInfo?.id ||
+    regionInfo?.regiao_id ||
+    regionInfo?.region_id ||
+    null;
+
+  if (saved) return String(saved);
+
+  const slug = regionInfo?.slug;
+  if (!slug) return null;
+
+  const { data, error } = await supabase
+    .from("regioes_publicas")
+    .select("id, slug")
+    .eq("slug", slug)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("[Região] Falha ao resolver id por slug:", error.message);
+    return null;
+  }
+  if (!data?.id) return null;
+
+  try {
+    const merged = { ...regionInfo, id: data.id, regiao_id: data.id, region_id: data.id };
+    localStorage.setItem("bepit_region", JSON.stringify(merged));
+  } catch {}
+  return String(data.id);
+}
+
 export default function ChatPage() {
-  // 1) Região do localStorage
+  // Região do localStorage
   const regionInfo = useMemo(() => {
     try {
       return JSON.parse(localStorage.getItem("bepit_region") || "{}");
@@ -29,18 +63,18 @@ export default function ChatPage() {
     }
   }, []);
 
-  const apiBase = import.meta.env.VITE_API_BASE_URL || "";
+  const apiBase   = import.meta.env.VITE_API_BASE_URL || "";
   const regionSlug = regionInfo?.slug || "";
-  const regionName = regionInfo?.name || "Região";
+  const regionName = regionInfo?.name || regionInfo?.nome || "Região dos Lagos";
 
-  // Se não tem região salva, volta para a seleção
+  // Se não tem região salva, volta para seleção
   useEffect(() => {
     if (!regionSlug) {
       window.location.replace("/");
     }
   }, [regionSlug]);
 
-  // 2) Estado do chat
+  // Estado do chat
   const [messages, setMessages] = useState(() => {
     const welcome = `Olá! Eu sou o BEPIT, seu concierge IA em ${regionName}.
 Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo importante acontecendo na região. Como posso te ajudar hoje?`;
@@ -55,15 +89,19 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
   });
   const [userInput, setUserInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [showAvisos, setShowAvisos] = useState(false);
 
-  // 3) Auto-scroll
+  // Avisos (Supabase)
+  const [showAvisos, setShowAvisos] = useState(false);
+  const [avisosLoading, setAvisosLoading] = useState(false);
+  const [avisos, setAvisos] = useState([]);
+
+  // Auto-scroll
   const endRef = useRef(null);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isTyping, showAvisos]);
 
-  // 4) Ações de UI
+  // Ações de UI
   const openAvisosModal = () => setShowAvisos(true);
   const closeAvisosModal = () => setShowAvisos(false);
 
@@ -83,21 +121,16 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     const text = (rawText ?? userInput).trim();
     if (!text || !regionSlug) return;
 
-    // 1. exibe mensagem do usuário
     pushMessage({ role: "user", text });
-
-    // 2. mostra indicador "digitando..."
     setIsTyping(true);
 
     try {
-      // 3. chama backend
       const url = `${apiBase.replace(/\/$/, "")}/api/chat/${encodeURIComponent(regionSlug)}`;
       const resp = await fetchWithTimeout(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text,
-          // conversa nova a cada carga de página (ou plugar seu conversationId atual aqui)
           conversationId: crypto.randomUUID()
         }),
         timeout: 20000
@@ -111,7 +144,6 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         replyText = `Tive um problema ao buscar uma resposta (HTTP ${resp.status}).`;
       }
 
-      // 4. adiciona a resposta do assistente
       pushMessage({ role: "assistant", text: replyText });
     } catch (e) {
       pushMessage({
@@ -130,19 +162,57 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     sendMessage();
   };
 
-  // 5) Render
+  // ======= Conectividade do botão AVISOS com Supabase (USANDO A VIEW) =======
+  async function carregarAvisos() {
+    setAvisosLoading(true);
+    try {
+      const regionId = await resolveRegionId(regionInfo);
+      if (!regionId) {
+        setAvisos([]);
+        return;
+      }
+
+      // Consulta a VIEW e inclui cidade_nome para o modal agrupar por cidade
+      const { data, error } = await supabase
+        .from("avisos_publicos_view")
+        .select("id, regiao_id, cidade_id, cidade_nome, titulo, descricao, periodo_inicio, periodo_fim, ativo, prioridade, tipo_aviso, created_at")
+        .eq("ativo", true)
+        .eq("regiao_id", regionId)
+        .order("periodo_inicio", { ascending: false })
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      setAvisos(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.warn("[Avisos] Falha ao carregar:", err?.message || err);
+      setAvisos([]);
+    } finally {
+      setAvisosLoading(false);
+    }
+  }
+
+  // Sempre que abrir o modal, carrega avisos
+  useEffect(() => {
+    if (showAvisos) {
+      carregarAvisos();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAvisos, regionSlug]);
+
+  // Render
   return (
     <div className="min-h-dvh bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex flex-col">
-      {/* ============ Cabeçalho (ESQ / CENTRO / DIR) ============ */}
+      {/* Cabeçalho */}
       <header className="sticky top-0 z-30 bg-white/80 dark:bg-neutral-900/80 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto w-full max-w-5xl px-3 sm:px-4">
-          <div className="grid grid-cols-3 items-center h-14 sm:h-16">
+          <div className="grid grid-cols-3 items-center h-16 sm:h-20">
             {/* ESQUERDA: Voltar + logo + BEPIT */}
-            <div className="flex items-center gap-2 sm:gap-3">
+            <div className="flex items-center gap-3 sm:gap-4">
               <button
                 type="button"
                 onClick={() => window.history.back()}
-                className="inline-flex items-center justify-center rounded-full border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                className="inline-flex items-center justify-center rounded-full border border-neutral-300 dark:border-neutral-700 px-4 py-2 text-base hover:bg-neutral-100 dark:hover:bg-neutral-800"
                 aria-label="Voltar"
                 title="Voltar"
               >
@@ -152,31 +222,31 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
               <img
                 src="/bepit-logo.png"
                 alt="BEPIT"
-                className="h-6 w-6 sm:h-7 sm:w-7 rounded"
+                className="h-10 w-10 sm:h-12 sm:w-12 rounded"
                 loading="lazy"
               />
-              <span className="font-bold text-neutral-900 dark:text-neutral-100 text-base sm:text-lg">
+              <span className="font-extrabold text-neutral-900 dark:text-neutral-100 text-lg sm:text-2xl">
                 BEPIT
               </span>
             </div>
 
-            {/* CENTRO: Nome da Região */}
+            {/* CENTRO: Nome da Região (dinâmico) */}
             <div className="flex items-center justify-center">
-              <span className="truncate font-semibold text-neutral-800 dark:text-neutral-200 text-sm sm:text-base">
+              <span className="truncate font-bold text-neutral-800 dark:text-neutral-200 text-base sm:text-xl">
                 {regionName}
               </span>
             </div>
 
             {/* DIREITA: Avisos + Tema */}
-            <div className="flex items-center justify-end gap-2 sm:gap-3">
+            <div className="flex items-center justify-end gap-2 sm:gap-4">
               <button
                 type="button"
                 onClick={openAvisosModal}
-                className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 text-amber-800 px-3 py-1.5 text-sm hover:bg-amber-100 dark:border-amber-600 dark:bg-amber-900/30 dark:text-amber-200"
+                className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 text-amber-800 px-4 py-2 text-base hover:bg-amber-100 dark:border-amber-600 dark:bg-amber-900/30 dark:text-amber-200"
                 title="Avisos da Região"
               >
-                <span>⚠️</span>
-                <span className="hidden sm:inline">Avisos</span>
+                <span className="text-xl leading-none">⚠️</span>
+                <span className="hidden sm:inline font-semibold">Avisos</span>
               </button>
               <ThemeToggleButton />
             </div>
@@ -184,14 +254,14 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         </div>
       </header>
 
-      {/* ============ CHIPS FIXOS (sempre visíveis) ============ */}
-      <div className="sticky top-14 sm:top-16 z-20 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
+      {/* CHIPS FIXOS */}
+      <div className="sticky top-16 sm:top-20 z-20 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto w-full max-w-5xl px-3 sm:px-4 py-2">
           <div className="flex flex-wrap items-center justify-center gap-2">
             <button
               type="button"
               onClick={() => handleQuickAsk("Quero opções de restaurantes")}
-              className="inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+              className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Restaurantes"
             >
               🍽️ <span>Restaurantes</span>
@@ -200,7 +270,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
             <button
               type="button"
               onClick={() => handleQuickAsk("Quero sugestões de passeios (barco, trilha, bugre)")}
-              className="inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+              className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Passeios"
             >
               🚤 <span>Passeios</span>
@@ -209,7 +279,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
             <button
               type="button"
               onClick={() => handleQuickAsk("Quais são as melhores praias agora?")}
-              className="inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+              className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Praias"
             >
               🏖️ <span>Praias</span>
@@ -218,7 +288,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
             <button
               type="button"
               onClick={() => handleQuickAsk("Quero dicas gerais de hoje")}
-              className="inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+              className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Dicas"
             >
               💡 <span>Dicas</span>
@@ -227,10 +297,9 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         </div>
       </div>
 
-      {/* ============ ÁREA DO CHAT ============ */}
+      {/* ÁREA DO CHAT */}
       <main className="flex-1">
         <div className="mx-auto w-full max-w-5xl px-3 sm:px-4">
-          {/* Espaço para não ficar escondido atrás do input fixo (mobile) */}
           <div className="pt-3 sm:pt-4 pb-24 sm:pb-28">
             {messages.map((m) => (
               <div
@@ -250,7 +319,6 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
               </div>
             ))}
 
-            {/* Indicador “digitando…” */}
             {isTyping && (
               <div className="mb-3 sm:mb-4 flex justify-start">
                 <div className="max-w-[70%] rounded-2xl px-4 py-2 bg-neutral-100 dark:bg-neutral-800">
@@ -268,7 +336,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         </div>
       </main>
 
-      {/* ============ INPUT (sempre visível no mobile) ============ */}
+      {/* INPUT */}
       <div className="sticky bottom-0 z-30 bg-white/95 dark:bg-neutral-900/95 backdrop-blur border-t border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto w-full max-w-5xl px-3 sm:px-4 py-2 sm:py-3">
           <form onSubmit={onSubmit} className="flex items-end gap-2">
@@ -297,12 +365,14 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         </div>
       </div>
 
-      {/* ============ MODAL DE AVISOS ============ */}
+      {/* MODAL DE AVISOS */}
       {showAvisos && (
         <AvisosModal
           open={showAvisos}
           onClose={closeAvisosModal}
-          regionSlug={regionSlug}
+          loading={avisosLoading}
+          avisos={avisos}
+          onRefresh={carregarAvisos}
         />
       )}
     </div>
