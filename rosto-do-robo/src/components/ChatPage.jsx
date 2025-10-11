@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom";
 import ThemeToggleButton from "./ThemeToggleButton.jsx";
 import AvisosModal from "./AvisosModal.jsx";
-import { fetchWithTimeout } from "../lib/fetchWithTimeout.js";
+
 
 /**
  * Página do chat
