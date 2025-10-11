@@ -3,7 +3,7 @@ import ThemeToggleButton from "./ThemeToggleButton.jsx";
 import AvisosModal from "./AvisosModal.jsx";
 import { supabase } from "../lib/supabaseClient.js";
 
-/** Fetch com timeout para chamadas HTTP do chat */
+/** HTTP com timeout para chamadas ao backend do chat */
 async function fetchWithTimeout(resource, options = {}) {
   const { timeout = 20000, ...rest } = options;
   const controller = new AbortController();
@@ -74,6 +74,37 @@ export default function ChatPage() {
     }
   }, [regionSlug]);
 
+  // ===== Conversa: ID persistente por região =====
+  // Recupera/gera um conversationId que persiste por região
+  const initialConversationId = useMemo(() => {
+    try {
+      const savedId = localStorage.getItem("bepit_conversation_id");
+      const savedRegion = localStorage.getItem("bepit_conversation_region");
+      if (savedId && savedRegion === regionSlug) return savedId;
+      const fresh = crypto.randomUUID();
+      localStorage.setItem("bepit_conversation_id", fresh);
+      localStorage.setItem("bepit_conversation_region", regionSlug || "");
+      return fresh;
+    } catch {
+      return crypto.randomUUID();
+    }
+  }, [regionSlug]);
+
+  const [conversationId, setConversationId] = useState(initialConversationId);
+
+  // Se a região mudar durante a sessão, renova o conversationId
+  useEffect(() => {
+    const savedRegion = localStorage.getItem("bepit_conversation_region");
+    if (savedRegion !== regionSlug) {
+      const fresh = crypto.randomUUID();
+      setConversationId(fresh);
+      try {
+        localStorage.setItem("bepit_conversation_id", fresh);
+        localStorage.setItem("bepit_conversation_region", regionSlug || "");
+      } catch {}
+    }
+  }, [regionSlug]);
+
   // Estado do chat
   const [messages, setMessages] = useState(() => {
     const welcome = `Olá! Eu sou o BEPIT, seu concierge IA em ${regionName}.
@@ -109,14 +140,14 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     setMessages((prev) => [...prev, { ...msg, id: msg.id || crypto.randomUUID(), ts: Date.now() }]);
   };
 
-  // “Chips” — perguntas rápidas
+  // “Chips” — perguntas rápidas (passa pelo mesmo fluxo do sendMessage)
   const handleQuickAsk = (text) => {
     if (!text) return;
     setUserInput("");
     sendMessage(text);
   };
 
-  // Enviar mensagem
+  // Enviar mensagem (agora preserva conversationId estável)
   const sendMessage = async (rawText) => {
     const text = (rawText ?? userInput).trim();
     if (!text || !regionSlug) return;
@@ -131,7 +162,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text,
-          conversationId: crypto.randomUUID()
+          conversationId // <-- mantém o mesmo id durante a sessão por região
         }),
         timeout: 20000
       });
@@ -162,7 +193,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     sendMessage();
   };
 
-  // ======= Conectividade do botão AVISOS com Supabase (USANDO A VIEW) =======
+  // ======= Avisos (via VIEW) =======
   async function carregarAvisos() {
     setAvisosLoading(true);
     try {
@@ -172,7 +203,6 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         return;
       }
 
-      // Consulta a VIEW e inclui cidade_nome para o modal agrupar por cidade
       const { data, error } = await supabase
         .from("avisos_publicos_view")
         .select("id, regiao_id, cidade_id, cidade_nome, titulo, descricao, periodo_inicio, periodo_fim, ativo, prioridade, tipo_aviso, created_at")
@@ -192,7 +222,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     }
   }
 
-  // Sempre que abrir o modal, carrega avisos
+  // Quando abrir o modal, carrega avisos
   useEffect(() => {
     if (showAvisos) {
       carregarAvisos();

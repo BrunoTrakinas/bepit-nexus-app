@@ -9,9 +9,14 @@ import React, { useEffect, useState } from "react";
 export default function ThemeToggleButton() {
   const [theme, setTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
-    const saved = window.localStorage.getItem("theme");
-    if (saved === "dark" || saved === "light") return saved;
-    const prefersDark = window.matchMedia?.matchMedia("(prefers-color-scheme: dark)").matches;
+    try {
+      const saved = window.localStorage.getItem("theme");
+      if (saved === "dark" || saved === "light") return saved;
+    } catch {}
+    // ✅ Correção: usar window.matchMedia corretamente e de forma defensiva
+    const prefersDark =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches;
     return prefersDark ? "dark" : "light";
   });
 
@@ -19,10 +24,12 @@ export default function ThemeToggleButton() {
     const root = document.documentElement;
     if (theme === "dark") root.classList.add("dark");
     else root.classList.remove("dark");
-    try { window.localStorage.setItem("theme", theme); } catch {}
+    try {
+      window.localStorage.setItem("theme", theme);
+    } catch {}
   }, [theme]);
 
-  const toggle = () => setTheme(t => (t === "dark" ? "light" : "dark"));
+  const toggle = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
   const isDark = theme === "dark";
 
   return (
