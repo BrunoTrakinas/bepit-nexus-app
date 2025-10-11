@@ -5,7 +5,7 @@ import { supabase } from "../lib/supabaseClient.js";
 
 /** HTTP com timeout para chamadas ao backend do chat */
 async function fetchWithTimeout(resource, options = {}) {
-  const { timeout = 20000, ...rest } = options;
+  const { timeout = 45000, ...rest } = options; // ⬅️ 45s para dar folga ao backend
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
@@ -63,7 +63,7 @@ export default function ChatPage() {
     }
   }, []);
 
-  const apiBase   = import.meta.env.VITE_API_BASE_URL || "";
+  const apiBase    = import.meta.env.VITE_API_BASE_URL || "";
   const regionSlug = regionInfo?.slug || "";
   const regionName = regionInfo?.name || regionInfo?.nome || "Região dos Lagos";
 
@@ -147,7 +147,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     sendMessage(text);
   };
 
-  // Enviar mensagem (agora preserva conversationId estável)
+  // Enviar mensagem (preserva conversationId estável + chaves alternativas)
   const sendMessage = async (rawText) => {
     const text = (rawText ?? userInput).trim();
     if (!text || !regionSlug) return;
@@ -157,20 +157,49 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
     try {
       const url = `${apiBase.replace(/\/$/, "")}/api/chat/${encodeURIComponent(regionSlug)}`;
+
+      // Payload envia o id em 3 chaves — servidor usa a que conhecer.
+      const payload = {
+        message: text,
+        conversationId,               // nome comum
+        threadId: conversationId,     // alternativa comum
+        sessionId: conversationId     // outra alternativa comum
+      };
+
+      if (import.meta.env.DEV) {
+        console.debug("[Chat →]", url, payload);
+      }
+
       const resp = await fetchWithTimeout(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          conversationId // <-- mantém o mesmo id durante a sessão por região
-        }),
-        timeout: 20000
+        body: JSON.stringify(payload),
+        timeout: 45000
       });
 
       let replyText = "Desculpe, não consegui obter uma resposta agora.";
       if (resp.ok) {
         const data = await resp.json().catch(() => ({}));
-        if (data?.reply) replyText = String(data.reply);
+
+        // Se o backend devolver algum id oficial de conversa, passamos a usá-lo.
+        const serverId =
+          data?.conversationId || data?.threadId || data?.sessionId || null;
+        if (serverId && typeof serverId === "string" && serverId !== conversationId) {
+          setConversationId(serverId);
+          try {
+            localStorage.setItem("bepit_conversation_id", serverId);
+            localStorage.setItem("bepit_conversation_region", regionSlug || "");
+          } catch {}
+          if (import.meta.env.DEV) {
+            console.debug("[Chat] server conversation id ->", serverId);
+          }
+        }
+
+        if (data?.reply) {
+          replyText = String(data.reply);
+        } else if (data?.message) {
+          replyText = String(data.message);
+        }
       } else {
         replyText = `Tive um problema ao buscar uma resposta (HTTP ${resp.status}).`;
       }
@@ -182,6 +211,9 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         text:
           "Ops, a conexão parece ter oscilado. Tente novamente em instantes. Se preferir, descreva com mais detalhes o que deseja."
       });
+      if (import.meta.env.DEV) {
+        console.warn("[Chat erro]", e);
+      }
     } finally {
       setIsTyping(false);
       setUserInput("");
