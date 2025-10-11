@@ -3,13 +3,22 @@ import React, { useEffect, useMemo, useState } from "react";
 /**
  * Modal de avisos públicos por região
  * - Busca: GET /api/avisos/:slugDaRegiao  -> { items: [...] }
+ * - Recebe initialItems (prefetch) para abrir instantâneo
  * - Abas dinâmicas por cidade; “Geral” quando cidade_id = null
  */
-export default function AvisosModal({ regionSlug, onClose, apiBase }) {
-  const [loading, setLoading] = useState(true);
-  const [avisos, setAvisos] = useState([]);
+export default function AvisosModal({ regionSlug, onClose, apiBase, initialItems = [] }) {
+  const [loading, setLoading] = useState(false);
+  const [avisos, setAvisos] = useState(initialItems || []);
   const [activeTab, setActiveTab] = useState("geral"); // “geral” = avisos sem cidade
 
+  // Se initialItems mudar (primeira abertura), sincroniza
+  useEffect(() => {
+    if (Array.isArray(initialItems)) {
+      setAvisos(initialItems);
+    }
+  }, [initialItems]);
+
+  // Fetch em background para atualizar após abrir (se necessário)
   useEffect(() => {
     let mounted = true;
     async function run() {
@@ -19,23 +28,32 @@ export default function AvisosModal({ regionSlug, onClose, apiBase }) {
         const resp = await fetch(`${apiBase}/api/avisos/${encodeURIComponent(slug)}`);
         const data = await resp.json();
         if (!mounted) return;
-        setAvisos(Array.isArray(data?.items) ? data.items : []);
+        const items = Array.isArray(data?.items) ? data.items : [];
+        setAvisos(items);
       } catch {
         if (!mounted) return;
-        setAvisos([]);
       } finally {
         if (mounted) setLoading(false);
       }
     }
-    run();
+    // Só busca se ainda não temos nada (ou se quiser atualizar sempre, force run())
+    if (!initialItems || initialItems.length === 0) {
+      run();
+    } else {
+      // atualiza em background depois de abrir
+      run();
+    }
     return () => { mounted = false; };
-  }, [regionSlug, apiBase]);
+  }, [regionSlug, apiBase]); // (intenção: atualizar se slug mudar)
 
-  // Agrupa por cidade (null => "geral")
+  // Agrupa por cidade (null => "geral") usando campos já enviados pelo backend
   const grupos = useMemo(() => {
-    const map = new Map(); // key: string (slug da cidade ou "geral")
+    const map = new Map(); // key: string (slug da cidade, nome da cidade ou "geral")
     for (const a of avisos) {
-      const key = a.cidade_id ? (a.cidade_nome || a.cidade_id) : "geral";
+      const key =
+        a.cidade_id
+          ? (a.cidade_slug || a.cidade_nome || a.cidade_id)
+          : "geral";
       if (!map.has(key)) map.set(key, []);
       map.get(key).push(a);
     }
@@ -46,28 +64,27 @@ export default function AvisosModal({ regionSlug, onClose, apiBase }) {
   function prioridadeRank(p) {
     const v = String(p || "").toLowerCase();
     if (v.includes("alta")) return 3;
-    if (v.includes("media")) return 2;
-    if (v.includes("média")) return 2;
+    if (v.includes("media") || v.includes("média")) return 2;
     return 1; // baixa ou outro
   }
 
   const tabs = useMemo(() => {
     const arr = [];
-    // “Geral” sempre primeiro, se houver
     if (grupos.has("geral")) {
       arr.push({ id: "geral", label: "Geral" });
     }
-    // Demais grupos (cidades)
     for (const key of grupos.keys()) {
       if (key === "geral") continue;
-      arr.push({ id: key, label: key });
+      // usar nome legível se tivermos
+      const sample = grupos.get(key)?.[0];
+      const label = sample?.cidade_nome || key;
+      arr.push({ id: key, label });
     }
     if (!arr.length) arr.push({ id: "geral", label: "Geral" });
     return arr;
   }, [grupos]);
 
   useEffect(() => {
-    // Garantir que activeTab exista
     const exists = tabs.some(t => t.id === activeTab);
     if (!exists) setActiveTab(tabs[0]?.id || "geral");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -75,7 +92,6 @@ export default function AvisosModal({ regionSlug, onClose, apiBase }) {
 
   const lista = useMemo(() => {
     const arr = grupos.get(activeTab) || grupos.get("geral") || [];
-    // ordena
     return arr
       .slice()
       .sort((a, b) => {
@@ -97,7 +113,7 @@ export default function AvisosModal({ regionSlug, onClose, apiBase }) {
         aria-label="Fechar avisos"
         title="Fechar"
       />
-      {/* Caixa do modal */}
+      {/* Caixa */}
       <div className="relative z-[1000] w-[95vw] max-w-3xl max-h-[90vh] overflow-hidden rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-xl">
         {/* Cabeçalho */}
         <div className="px-4 py-3 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
@@ -144,6 +160,7 @@ export default function AvisosModal({ regionSlug, onClose, apiBase }) {
                   <div className="text-sm opacity-80 mb-1">
                     {a.periodo_inicio ? new Date(a.periodo_inicio).toLocaleString() : ""}
                     {a.periodo_fim ? ` — ${new Date(a.periodo_fim).toLocaleString()}` : ""}
+                    {a.cidade_nome ? ` · ${a.cidade_nome}` : ""}
                   </div>
                   <div className="text-base font-semibold mb-1">
                     {a.titulo || "Aviso"}
