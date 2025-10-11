@@ -1,262 +1,186 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import AvisosModal from "./AvisosModal";
 
-function AvisosModal({ open, onClose, regionSlug }) {
-  const [loading, setLoading] = useState(false);
-  const [tabs, setTabs] = useState([]);
-  const [active, setActive] = useState(0);
+const REGION_KEY = "bepit_region";
+const THEME_KEY = "bepit_theme";
 
+// helper de scroll
+const useAutoScroll = (dep) => {
+  const ref = useRef(null);
   useEffect(() => {
-    if (!open) return;
-    let cancel = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const base = import.meta.env.VITE_API_BASE_URL || "";
-        const url = `${base}/api/avisos/${regionSlug}`;
-        const r = await fetch(url);
-        const json = await r.json();
-        const data = Array.isArray(json?.data) ? json.data : [];
-
-        const grupos = new Map();
-        for (const a of data) {
-          const chave = a?.cidade_nome || a?.cidade || a?.cidade_slug || "Geral";
-          if (!grupos.has(chave)) grupos.set(chave, []);
-          grupos.get(chave).push(a);
-        }
-        const arr = Array.from(grupos.entries()).map(([cidade, itens]) => ({
-          cidade,
-          itens: itens.sort((a, b) =>
-            String(b?.created_at || "").localeCompare(String(a?.created_at || ""))
-          ),
-        }));
-
-        if (!cancel) {
-          setTabs(arr);
-          setActive(0);
-        }
-      } catch {
-        if (!cancel) setTabs([]);
-      } finally {
-        if (!cancel) setLoading(false);
-      }
-    })();
-    return () => { cancel = true; };
-  }, [open, regionSlug]);
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
-      <div className="w-full max-w-2xl rounded-2xl bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 shadow-lg">
-        <div className="flex items-center justify-between p-4 border-b border-neutral-200 dark:border-neutral-800">
-          <h3 className="text-lg font-semibold">Avisos da Região</h3>
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 rounded-full bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition text-sm"
-          >
-            Fechar
-          </button>
-        </div>
-
-        <div className="px-4 pt-3">
-          <div className="flex flex-wrap gap-2">
-            {tabs.map((t, i) => (
-              <button
-                key={t.cidade + i}
-                onClick={() => setActive(i)}
-                className={`px-3 py-1.5 rounded-full border text-sm transition ${
-                  active === i
-                    ? "bg-blue-600 text-white border-blue-600"
-                    : "bg-white dark:bg-neutral-800 border-neutral-200 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-700"
-                }`}
-              >
-                {t.cidade}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="p-4 max-h-[60vh] overflow-y-auto">
-          {loading ? (
-            <div className="text-sm text-neutral-500">Carregando avisos…</div>
-          ) : tabs.length === 0 ? (
-            <div className="text-sm text-neutral-500">Nenhum aviso ativo no momento.</div>
-          ) : (
-            <ul className="space-y-3">
-              {(tabs[active]?.itens || []).map((av) => (
-                <li
-                  key={av.id}
-                  className="rounded-xl border border-neutral-200 dark:border-neutral-800 p-3 bg-white dark:bg-neutral-900"
-                >
-                  <div className="text-sm font-medium">{av.titulo || "Aviso"}</div>
-                  {av.descricao ? (
-                    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1 whitespace-pre-line">
-                      {av.descricao}
-                    </p>
-                  ) : null}
-                  {av.periodo_inicio || av.periodo_fim ? (
-                    <div className="text-xs text-neutral-500 mt-2">
-                      {av.periodo_inicio ? `Início: ${av.periodo_inicio}` : ""}
-                      {av.periodo_inicio && av.periodo_fim ? " · " : ""}
-                      {av.periodo_fim ? `Fim: ${av.periodo_fim}` : ""}
-                    </div>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+    const el = ref.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [dep]);
+  return ref;
+};
 
 export default function ChatPage() {
   const navigate = useNavigate();
-
-  const region = useMemo(() => {
+  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || "light");
+  const [region, setRegion] = useState(() => {
     try {
-      const raw = localStorage.getItem("bepit_region");
-      const parsed = raw ? JSON.parse(raw) : null;
-      return parsed && parsed.slug && parsed.name ? parsed : null;
+      const raw = localStorage.getItem(REGION_KEY);
+      return raw ? JSON.parse(raw) : null;
     } catch {
       return null;
     }
-  }, []);
+  });
 
+  // redireciona se não houver região
   useEffect(() => {
-    if (!region) navigate("/");
+    if (!region?.slug) navigate("/");
   }, [region, navigate]);
 
-  const [theme, setTheme] = useState(() => {
-    try {
-      const t = localStorage.getItem("bepit_theme");
-      return t === "dark" || t === "light" ? t : "light";
-    } catch {
-      return "light";
-    }
-  });
+  // aplica tema
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
+    const root = document.documentElement;
+    if (theme === "dark") root.classList.add("dark");
+    else root.classList.remove("dark");
+    localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
-  function toggleTheme() {
-    const next = theme === "dark" ? "light" : "dark";
-    setTheme(next);
-    try { localStorage.setItem("bepit_theme", next); } catch {}
-  }
 
-  const [messages, setMessages] = useState(() => {
-    const name = region?.name || "Região";
-    const welcome =
-      `Olá! Eu sou o BEPIT, seu concierge IA em ${name}. ` +
-      `Dica: antes de perguntar, vale a pena conferir os avisos da região — ` +
-      `pode ter interdições, maré, trânsito ou eventos que impactam sua experiência.`;
-    return [{ id: "welcome", from: "bot", text: welcome, ts: Date.now() }];
-  });
+  // mensagens
+  const welcome = useMemo(() => {
+    const rname = region?.name || "sua região";
+    return `Olá! Eu sou o BEPIT, seu concierge IA em ${rname}. Dica: antes de perguntar, vale a pena conferir os avisos da região — pode ter interdições, maré, trânsito ou eventos que impactam sua experiência.`;
+  }, [region]);
+
+  const [messages, setMessages] = useState(() => [
+    { id: "welcome", from: "bot", text: welcome, ts: Date.now() },
+  ]);
+
+  // atualiza welcome se região mudar
+  useEffect(() => {
+    setMessages((prev) => {
+      if (prev.length === 0 || prev[0].id !== "welcome") return prev;
+      const clone = [...prev];
+      clone[0] = { ...clone[0], text: welcome };
+      return clone;
+    });
+  }, [welcome]);
 
   const [input, setInput] = useState("");
-  const [typing, setTyping] = useState(false);
-  const scrollRef = useRef(null);
+  const [loading, setLoading] = useState(false);
+  const [showAvisos, setShowAvisos] = useState(false);
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: 999999, behavior: "smooth" });
-  }, [messages, typing]);
+  const listRef = useAutoScroll(messages);
 
-  async function sendMessage(text) {
-    const content = (text ?? input ?? "").trim();
-    if (!content || !region) return;
-    const userMsg = { id: crypto.randomUUID(), from: "user", text: content, ts: Date.now() };
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
+
+  const sendMessage = async (text) => {
+    if (!text.trim() || !region?.slug) return;
+    const userMsg = { id: crypto.randomUUID(), from: "user", text, ts: Date.now() };
     setMessages((m) => [...m, userMsg]);
     setInput("");
-    setTyping(true);
+    setLoading(true);
 
     try {
-      const base = import.meta.env.VITE_API_BASE_URL || "";
-      const url = `${base}/api/chat/${region.slug}`;
-      const r = await fetch(url, {
+      const resp = await fetch(`${API_BASE}/api/chat/${region.slug}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: content }),
+        body: JSON.stringify({ message: text }),
       });
-      const json = await r.json();
-      const reply = json?.reply || "Desculpe, não consegui responder agora.";
-      const botMsg = { id: crypto.randomUUID(), from: "bot", text: reply, ts: Date.now() };
-      setMessages((m) => [...m, botMsg]);
-    } catch {
-      const botMsg = { id: crypto.randomUUID(), from: "bot", text: "Algo saiu do previsto ao tentar falar com o servidor.", ts: Date.now() };
-      setMessages((m) => [...m, botMsg]);
+      const json = await resp.json();
+      const reply = json?.reply || "Algo deu errado. Tente novamente.";
+      setMessages((m) => [...m, { id: crypto.randomUUID(), from: "bot", text: reply, ts: Date.now() }]);
+    } catch (e) {
+      setMessages((m) => [
+        ...m,
+        { id: crypto.randomUUID(), from: "bot", text: "Erro de conexão. Tente novamente.", ts: Date.now() },
+      ]);
     } finally {
-      setTyping(false);
+      setLoading(false);
     }
-  }
+  };
 
-  const suggestions = ["Restaurantes", "Passeios", "Praias", "Dicas"];
-  function handleChipClick(label) { sendMessage(label); }
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    sendMessage(input);
+  };
 
-  const [avisosOpen, setAvisosOpen] = useState(false);
+  // chips (sempre no topo)
+  const chips = [
+    "Restaurantes",
+    "Passeios",
+    "Praias",
+    "Dicas",
+  ];
 
-  if (!region) return null;
+  // tamanho maior no cabeçalho (logo, nome, região)
+  const headerLogoClasses = "w-9 h-9 md:w-10 md:h-10";          // aumentado
+  const headerBrandClasses = "text-lg md:text-xl font-bold";     // aumentado
+  const headerRegionClasses = "text-base md:text-lg font-semibold"; // aumentado
 
   return (
-    <div
-      className="min-h-[100svh] bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex flex-col"
-      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
-    >
-      {/* HEADER */}
-      <header className="sticky top-0 z-50 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto max-w-5xl px-3 sm:px-4">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center h-14">
-            {/* ESQUERDA */}
-            <div className="flex items-center gap-3 justify-start">
+    <div className="min-h-[100svh] bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex flex-col">
+      {/* Cabeçalho */}
+      <header className="sticky top-0 z-50 border-b border-neutral-200 dark:border-neutral-800 bg-white/80 dark:bg-neutral-900/80 backdrop-blur">
+        <div className="max-w-5xl mx-auto px-3 sm:px-4">
+          <div className="grid grid-cols-3 items-center h-16">
+            {/* Esquerda: Voltar + Logo + BEPIT */}
+            <div className="flex items-center gap-3">
               <button
+                type="button"
                 onClick={() => navigate("/")}
-                className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 px-3 py-1.5 text-sm hover:shadow transition"
+                className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-1.5 text-sm bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition"
               >
                 ← Voltar
               </button>
+
               <div className="flex items-center gap-2">
-                <img src="/bepit-logo.png" alt="BEPIT" className="w-7 h-7 rounded-full object-cover" />
-                <span className="font-semibold tracking-tight hidden sm:inline">BEPIT</span>
+                <img
+                  src="/bepit-logo.png"
+                  alt="BEPIT"
+                  className={`${headerLogoClasses} rounded-full`}
+                  draggable="false"
+                />
+                <span className={headerBrandClasses}>BEPIT</span>
               </div>
             </div>
 
-            {/* CENTRO */}
-            <div className="flex items-center justify-center">
-              <div className="text-sm sm:text-base font-medium truncate">{region.name}</div>
+            {/* Centro: Nome da região */}
+            <div className="flex justify-center">
+              <div className={headerRegionClasses}>
+                {region?.name || "Região"}
+              </div>
             </div>
 
-            {/* DIREITA */}
-            <div className="flex items-center gap-2 justify-end">
+            {/* Direita: Avisos + tema */}
+            <div className="flex justify-end items-center gap-2">
               <button
-                onClick={() => setAvisosOpen(true)}
-                className="inline-flex items-center gap-2 rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 px-3 py-1.5 text-sm hover:shadow transition"
+                type="button"
+                onClick={() => setShowAvisos(true)}
+                className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-1.5 text-sm bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition"
               >
-                <span>⚠️</span> <span className="hidden sm:inline">Avisos</span>
+                <span className="text-base">⚠️</span> Avisos
               </button>
+
               <button
-                onClick={toggleTheme}
+                type="button"
+                onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+                className="inline-flex items-center justify-center rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-1.5 text-sm bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition"
                 aria-label="Alternar tema"
-                className="inline-flex items-center gap-2 rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 px-3 py-1.5 text-sm hover:shadow transition"
               >
-                <span className="text-base">{theme === "dark" ? "☀️" : "🌙"}</span>
-                <span className="hidden sm:inline">{theme === "dark" ? "Claro" : "Escuro"}</span>
+                🌓
               </button>
             </div>
           </div>
         </div>
 
-        {/* CHIPS (centralizados e sticky) */}
-        <div className="sticky top-14 z-40 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
-          <div className="mx-auto max-w-5xl px-3 sm:px-4 py-2">
-            <div className="flex flex-wrap items-center justify-center gap-2">
-              {suggestions.map((s) => (
+        {/* Chips fixos (centralizados) */}
+        <div className="border-t border-neutral-200 dark:border-neutral-800 bg-white/80 dark:bg-neutral-900/80">
+          <div className="max-w-5xl mx-auto px-3 sm:px-4">
+            <div className="flex justify-center gap-2 py-2">
+              {chips.map((c) => (
                 <button
-                  key={s}
-                  onClick={() => handleChipClick(s)}
-                  className="px-4 py-2 rounded-full text-sm font-medium bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 hover:shadow transition"
+                  key={c}
+                  type="button"
+                  onClick={() => sendMessage(c)}
+                  className="px-3 py-1.5 rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 text-sm"
                 >
-                  {s}
+                  {c}
                 </button>
               ))}
             </div>
@@ -264,61 +188,68 @@ export default function ChatPage() {
         </div>
       </header>
 
-      {/* MENSAGENS */}
-      <div
-        ref={scrollRef}
-        className="mx-auto w-full max-w-3xl flex-1 overflow-y-auto px-3 sm:px-4 py-4 space-y-3 pb-28"
+      {/* Lista de mensagens */}
+      <main
+        ref={listRef}
+        className="flex-1 overflow-y-auto max-w-5xl w-full mx-auto px-3 sm:px-4 pt-4 pb-28"
       >
-        {messages.map((m) => (
-          <div key={m.id} className={`w-full flex ${m.from === "user" ? "justify-end" : "justify-start"}`}>
+        <div className="flex flex-col gap-3">
+          {messages.map((m) => (
             <div
-              className={`max-w-[85%] md:max-w-[70%] rounded-2xl border shadow-sm px-4 py-3 leading-relaxed ${
+              key={m.id}
+              className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-3 shadow-sm ${
                 m.from === "user"
-                  ? "bg-blue-600 text-white border-blue-600"
-                  : "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border-neutral-200 dark:border-neutral-800"
+                  ? "self-end bg-blue-600 text-white"
+                  : "self-start bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700"
               }`}
             >
-              {m.text}
+              <div className="whitespace-pre-wrap leading-relaxed">{m.text}</div>
             </div>
-          </div>
-        ))}
+          ))}
 
-        {typing && (
-          <div className="w-full flex justify-start">
-            <div className="max-w-[70%] rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-800 px-4 py-3">
+          {loading && (
+            <div className="self-start max-w-[70%] rounded-2xl px-4 py-3 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
               <span className="inline-flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-neutral-400 animate-bounce [animation-delay:-0ms]" />
-                <span className="w-2 h-2 rounded-full bg-neutral-400 animate-bounce [animation-delay:120ms]" />
-                <span className="w-2 h-2 rounded-full bg-neutral-400 animate-bounce [animation-delay:240ms]" />
+                <span className="animate-bounce">•</span>
+                <span className="animate-bounce [animation-delay:120ms]">•</span>
+                <span className="animate-bounce [animation-delay:240ms]">•</span>
               </span>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      </main>
 
-      {/* INPUT (sempre visível) */}
+      {/* Input fixo (com safe-area) */}
       <form
-        onSubmit={(e) => { e.preventDefault(); sendMessage(); }}
-        className="sticky bottom-0 z-50 border-t border-neutral-200 dark:border-neutral-800 bg-white/95 dark:bg-neutral-900/95 backdrop-blur"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        onSubmit={handleSubmit}
+        className="sticky bottom-0 z-50 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-t border-neutral-200 dark:border-neutral-800"
       >
-        <div className="mx-auto max-w-3xl px-3 sm:px-4 py-3 flex items-center gap-2">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Digite sua mensagem…"
-            className="flex-1 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-800 px-4 py-2.5 outline-none focus:ring-2 ring-blue-500/40"
-          />
-          <button
-            type="submit"
-            className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm transition"
-          >
-            Enviar
-          </button>
+        <div className="max-w-5xl mx-auto px-3 sm:px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className="flex gap-2">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Digite sua mensagem…"
+              className="flex-1 rounded-xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500/50"
+            />
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-4 py-3 rounded-xl bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-60"
+            >
+              Enviar
+            </button>
+          </div>
         </div>
       </form>
 
-      <AvisosModal open={avisosOpen} onClose={() => setAvisosOpen(false)} regionSlug={region.slug} />
+      {/* Modal de Avisos */}
+      {showAvisos && (
+        <AvisosModal
+          regionSlug={region?.slug}
+          onClose={() => setShowAvisos(false)}
+        />
+      )}
     </div>
   );
 }
