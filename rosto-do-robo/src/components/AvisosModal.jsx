@@ -1,207 +1,165 @@
-// src/components/AvisosModal.jsx
 import React, { useEffect, useMemo, useState } from "react";
 
-export default function AvisosModal({ open, onClose, regionSlug, theme }) {
-  const [loading, setLoading] = useState(false);
-  const [avisos, setAvisos] = useState([]); // estrutura: [{ cidade: "Cabo Frio", titulo, texto, created_at }, ...]
-  const [erro, setErro] = useState("");
-  const [abaAtiva, setAbaAtiva] = useState("Geral");
-
-  const border = theme?.inputBg || "#e5e7eb";
-  const fg = theme?.text || "#222";
-  const bg = theme?.background || "#fff";
-  const headerBg = theme?.headerBg || "#f8f8f8";
+/**
+ * Modal de avisos públicos por região
+ * - Busca: GET /api/avisos/:slugDaRegiao  -> { items: [...] }
+ * - Abas dinâmicas por cidade; “Geral” quando cidade_id = null
+ */
+export default function AvisosModal({ regionSlug, onClose, apiBase }) {
+  const [loading, setLoading] = useState(true);
+  const [avisos, setAvisos] = useState([]);
+  const [activeTab, setActiveTab] = useState("geral"); // “geral” = avisos sem cidade
 
   useEffect(() => {
-    if (!open) return;
-
-    let cancelado = false;
-    async function carregar() {
-      setLoading(true);
-      setErro("");
+    let mounted = true;
+    async function run() {
       try {
-        // endpoint do backend v4.0 que você criará (GET /api/avisos/:slug)
-        const resp = await fetch(`/api/avisos/${encodeURIComponent(regionSlug)}`, {
-          method: "GET",
-          headers: { "Content-Type": "application/json" }
-        });
-        if (!resp.ok) {
-          throw new Error(`Falha HTTP ${resp.status}`);
-        }
+        setLoading(true);
+        const slug = regionSlug || "regiao-dos-lagos";
+        const resp = await fetch(`${apiBase}/api/avisos/${encodeURIComponent(slug)}`);
         const data = await resp.json();
-        if (!cancelado) {
-          // supondo data = { items: [ { cidade: "Cabo Frio", titulo, texto, created_at }, ... ] }
-          setAvisos(Array.isArray(data?.items) ? data.items : []);
-        }
-      } catch (e) {
-        if (!cancelado) {
-          setErro(e?.message || "Falha ao carregar avisos.");
-        }
+        if (!mounted) return;
+        setAvisos(Array.isArray(data?.items) ? data.items : []);
+      } catch {
+        if (!mounted) return;
+        setAvisos([]);
       } finally {
-        if (!cancelado) setLoading(false);
+        if (mounted) setLoading(false);
       }
     }
+    run();
+    return () => { mounted = false; };
+  }, [regionSlug, apiBase]);
 
-    carregar();
-    return () => {
-      cancelado = true;
-    };
-  }, [open, regionSlug]);
-
-  // cria abas dinâmicas por cidade; sempre inclui "Geral"
-  const abas = useMemo(() => {
-    const cidades = new Set(["Geral"]);
+  // Agrupa por cidade (null => "geral")
+  const grupos = useMemo(() => {
+    const map = new Map(); // key: string (slug da cidade ou "geral")
     for (const a of avisos) {
-      if (a?.cidade && String(a.cidade).trim()) cidades.add(a.cidade);
+      const key = a.cidade_id ? (a.cidade_nome || a.cidade_id) : "geral";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(a);
     }
-    return Array.from(cidades);
+    return map;
   }, [avisos]);
 
-  const avisosDaAba = useMemo(() => {
-    if (abaAtiva === "Geral") {
-      return avisos.filter((a) => !a?.cidade || !String(a.cidade).trim());
-    }
-    return avisos.filter((a) => String(a?.cidade || "").trim() === abaAtiva);
-  }, [abaAtiva, avisos]);
+  // Ordenação por prioridade (alta > media > baixa) e por periodo_inicio desc
+  function prioridadeRank(p) {
+    const v = String(p || "").toLowerCase();
+    if (v.includes("alta")) return 3;
+    if (v.includes("media")) return 2;
+    if (v.includes("média")) return 2;
+    return 1; // baixa ou outro
+  }
 
-  if (!open) return null;
+  const tabs = useMemo(() => {
+    const arr = [];
+    // “Geral” sempre primeiro, se houver
+    if (grupos.has("geral")) {
+      arr.push({ id: "geral", label: "Geral" });
+    }
+    // Demais grupos (cidades)
+    for (const key of grupos.keys()) {
+      if (key === "geral") continue;
+      arr.push({ id: key, label: key });
+    }
+    if (!arr.length) arr.push({ id: "geral", label: "Geral" });
+    return arr;
+  }, [grupos]);
+
+  useEffect(() => {
+    // Garantir que activeTab exista
+    const exists = tabs.some(t => t.id === activeTab);
+    if (!exists) setActiveTab(tabs[0]?.id || "geral");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs.length]);
+
+  const lista = useMemo(() => {
+    const arr = grupos.get(activeTab) || grupos.get("geral") || [];
+    // ordena
+    return arr
+      .slice()
+      .sort((a, b) => {
+        const pr = prioridadeRank(b.prioridade) - prioridadeRank(a.prioridade);
+        if (pr !== 0) return pr;
+        const tA = new Date(a.periodo_inicio || a.created_at || 0).getTime();
+        const tB = new Date(b.periodo_inicio || b.created_at || 0).getTime();
+        return tB - tA;
+      });
+  }, [grupos, activeTab]);
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.4)",
-        display: "grid",
-        placeItems: "center",
-        zIndex: 1000
-      }}
-    >
-      <div
-        style={{
-          width: "min(920px, 95vw)",
-          maxHeight: "85vh",
-          borderRadius: 14,
-          overflow: "hidden",
-          background: bg,
-          color: fg,
-          border: `1px solid ${border}`,
-          display: "grid",
-          gridTemplateRows: "auto auto 1fr"
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            padding: 14,
-            background: headerBg,
-            borderBottom: `1px solid ${border}`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 10
-          }}
-        >
-          <div style={{ fontWeight: 700, fontSize: 18 }}>
-            ⚠️ Avisos da Região
-          </div>
+    <div className="fixed inset-0 z-[999] flex items-center justify-center">
+      {/* Backdrop */}
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/50"
+        aria-label="Fechar avisos"
+        title="Fechar"
+      />
+      {/* Caixa do modal */}
+      <div className="relative z-[1000] w-[95vw] max-w-3xl max-h-[90vh] overflow-hidden rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-xl">
+        {/* Cabeçalho */}
+        <div className="px-4 py-3 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+          <div className="text-lg font-semibold">⚠️ Avisos da Região</div>
           <button
+            type="button"
             onClick={onClose}
-            style={{
-              background: "none",
-              border: `1px solid ${border}`,
-              color: fg,
-              padding: "6px 10px",
-              borderRadius: 10,
-              cursor: "pointer",
-              fontWeight: 600
-            }}
+            className="px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition"
           >
             Fechar
           </button>
         </div>
 
         {/* Abas */}
-        <div
-          style={{
-            padding: "10px 12px",
-            borderBottom: `1px solid ${border}`,
-            display: "flex",
-            gap: 8,
-            flexWrap: "wrap",
-            background: bg
-          }}
-        >
-          {abas.map((nome) => {
-            const ativa = abaAtiva === nome;
-            return (
+        <div className="px-4 pt-3">
+          <div className="flex flex-wrap gap-2">
+            {tabs.map(t => (
               <button
-                key={nome}
-                onClick={() => setAbaAtiva(nome)}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 10,
-                  border: `1px solid ${ativa ? "#3b82f6" : border}`,
-                  background: ativa ? "#3b82f6" : "transparent",
-                  color: ativa ? "#fff" : fg,
-                  cursor: "pointer",
-                  fontWeight: 600
-                }}
+                key={t.id}
+                type="button"
+                onClick={() => setActiveTab(t.id)}
+                className={`px-3 py-1.5 rounded-full border text-sm transition ${
+                  activeTab === t.id
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-50 border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                }`}
               >
-                {nome}
+                {t.label}
               </button>
-            );
-          })}
+            ))}
+          </div>
         </div>
 
         {/* Conteúdo */}
-        <div
-          style={{
-            overflowY: "auto",
-            padding: 16,
-            display: "grid",
-            gap: 12
-          }}
-        >
-          {loading && <div>Carregando avisos…</div>}
-          {erro && !loading && (
-            <div style={{ color: "#b91c1c" }}>{erro}</div>
-          )}
-          {!loading && !erro && avisosDaAba.length === 0 && (
-            <div style={{ opacity: 0.7 }}>Nenhum aviso para esta aba.</div>
-          )}
-          {!loading &&
-            !erro &&
-            avisosDaAba.map((a, i) => (
-              <div
-                key={`${a?.id || i}-${a?.titulo || "aviso"}`}
-                style={{
-                  border: `1px solid ${border}`,
-                  borderRadius: 12,
-                  padding: 12,
-                  background: theme?.assistantBubble || "#f6f7fb"
-                }}
-              >
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                  {a?.titulo || "Aviso"}
-                </div>
-                {a?.cidade && (
-                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
-                    Cidade: {a.cidade}
+        <div className="px-4 pb-4 pt-2 overflow-y-auto max-h-[65vh]">
+          {loading ? (
+            <div className="py-10 text-center text-sm opacity-80">Carregando avisos…</div>
+          ) : lista.length === 0 ? (
+            <div className="py-10 text-center text-sm opacity-80">Nenhum aviso no momento.</div>
+          ) : (
+            <ul className="space-y-3">
+              {lista.map((a) => (
+                <li key={a.id} className="p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
+                  <div className="text-sm opacity-80 mb-1">
+                    {a.periodo_inicio ? new Date(a.periodo_inicio).toLocaleString() : ""}
+                    {a.periodo_fim ? ` — ${new Date(a.periodo_fim).toLocaleString()}` : ""}
                   </div>
-                )}
-                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-                  {a?.texto || "—"}
-                </div>
-                {a?.created_at && (
-                  <div style={{ fontSize: 12, opacity: 0.6, marginTop: 8 }}>
-                    Publicado em: {new Date(a.created_at).toLocaleString()}
+                  <div className="text-base font-semibold mb-1">
+                    {a.titulo || "Aviso"}
+                    {a.prioridade ? (
+                      <span className="ml-2 text-xs px-2 py-0.5 rounded-full border border-neutral-300 dark:border-neutral-700">
+                        {String(a.prioridade).toUpperCase()}
+                      </span>
+                    ) : null}
                   </div>
-                )}
-              </div>
-            ))}
+                  <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                    {a.descricao || ""}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
     </div>
