@@ -4,12 +4,30 @@ import App from "./App.jsx";
 import "./index.css";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 
+// Polyfill defensivo para ambientes que não expõem window.matchMedia
+(function ensureMatchMedia() {
+  if (typeof window === "undefined") return;
+  if (typeof window.matchMedia === "function") return;
+  window.matchMedia = function matchMediaPolyfill(query) {
+    return {
+      media: String(query || ""),
+      matches: false,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() { return false; }
+    };
+  };
+})();
+
 const rootElement = document.getElementById("root");
 
 if (!rootElement) {
   // Fallback de segurança caso o #root não exista no index.html
   const msg =
-    "Elemento #root não encontrado no index.html. Verifique se existe <div id=\"root\"></div>.";
+    'Elemento #root não encontrado no index.html. Verifique se existe <div id="root"></div>.';
   console.error(msg);
   const body = document.body || document.getElementsByTagName("body")[0];
   const warn = document.createElement("pre");
