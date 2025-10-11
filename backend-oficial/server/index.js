@@ -679,13 +679,16 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 });
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
+// Resposta SEMPRE no formato: { data: [...] }
+// Inclui cidade_nome quando houver cidade_id (join com cidades)
 aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
 
+    // 1) Valida/resolve a região
     const { data: regiao, error: erroRegiao } = await supabase
       .from("regioes")
-      .select("id, slug, nome")
+      .select("id")
       .eq("slug", slugDaRegiao)
       .single();
 
@@ -693,8 +696,8 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
       return res.status(404).json({ error: "Região não encontrada." });
     }
 
-    // 1) Tenta ativos
-    let { data: avisos, error: erroAvisos } = await supabase
+    // 2) Busca avisos ativos da região + join em cidades para obter cidade_nome
+    const { data: avisos, error: erroAvisos } = await supabase
       .from("avisos_publicos")
       .select(`
         id,
@@ -702,60 +705,34 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
         cidade_id,
         titulo,
         descricao,
-        prioridade,
         periodo_inicio,
         periodo_fim,
         ativo,
         created_at,
-        cidades:cidade_id (nome, slug)
+        cidades:cidade_id ( nome )
       `)
       .eq("regiao_id", regiao.id)
       .eq("ativo", true)
-      .order("periodo_inicio", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(200);
+      .order("periodo_inicio", { ascending: false, nullsFirst: false })
+      .order("created_at", { ascending: false, nullsFirst: false });
 
     if (erroAvisos) throw erroAvisos;
 
-    let fallbackUsado = false;
-
-    // 2) Se nenhum ativo, tenta sem o filtro ativo (ajuda a diagnosticar)
-    if (!avisos || avisos.length === 0) {
-      const resp2 = await supabase
-        .from("avisos_publicos")
-        .select(`
-          id,
-          regiao_id,
-          cidade_id,
-          titulo,
-          descricao,
-          prioridade,
-          periodo_inicio,
-          periodo_fim,
-          ativo,
-          created_at,
-          cidades:cidade_id (nome, slug)
-        `)
-        .eq("regiao_id", regiao.id)
-        .order("periodo_inicio", { ascending: false })
-        .order("created_at", { ascending: false })
-        .limit(50);
-
-      if (resp2.error) throw resp2.error;
-      avisos = resp2.data || [];
-      fallbackUsado = avisos.length > 0;
-    }
-
-    const items = (avisos || []).map(a => ({
-      ...a,
+    // 3) Normaliza para shape estável + adiciona cidade_nome (quando houver)
+    const normalized = (avisos || []).map(a => ({
+      id: a.id,
+      regiao_id: a.regiao_id,
+      cidade_id: a.cidade_id,
       cidade_nome: a?.cidades?.nome || null,
-      cidade_slug: a?.cidades?.slug || null,
-      debug_inativo: fallbackUsado ? (a.ativo !== true) : undefined
+      titulo: a.titulo,
+      descricao: a.descricao,
+      periodo_inicio: a.periodo_inicio,
+      periodo_fim: a.periodo_fim,
+      ativo: a.ativo === true,
+      created_at: a.created_at
     }));
 
-    // Cache curto
-    res.setHeader("Cache-Control", "public, max-age=60");
-    return res.status(200).json({ items });
+    return res.status(200).json({ data: normalized });
   } catch (erro) {
     console.error("[/api/avisos/:slugDaRegiao] Erro:", erro);
     return res.status(500).json({ error: "Erro interno no servidor ao buscar avisos." });
