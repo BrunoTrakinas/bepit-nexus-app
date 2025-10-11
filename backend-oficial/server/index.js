@@ -1,6 +1,8 @@
 // ============================================================================
-// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v4.0
-// - Paginação Inteligente (1ª página: até 3 opções aleatórias do banco)
+// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v4.1
+// - Correção crítica: preservar conversationId vindo do frontend, com validação
+// - Limite dinâmico: "me dê 5 restaurantes", "quero 10 sugestões", etc.
+// - Paginação Inteligente (1ª página: até N opções aleatórias do banco; N = dinâmico ou 3)
 // - Fluxo de Refinamento ("mais opções" → pergunta de critérios → nova busca)
 // - Prioridade para carne/picanha (inclui "piconha"): churrascaria + restaurante
 // - Busca tolerante via RPC + pós-processamento (excludeIds / isInitialSearch)
@@ -137,6 +139,24 @@ function normalizarTexto(texto) {
   return String(texto || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 }
 
+/**
+ * Extrai um limite numérico solicitado na mensagem do usuário.
+ * Exemplos aceitos: "quero 5 opções", "me dê 10 sugestões", "2 passeios", "5 restaurantes".
+ * Limite de segurança: 1..15
+ */
+function extrairLimiteDaMensagem(texto) {
+  if (!texto) return null;
+  const match = String(texto).match(/\b(?:quero|me dê|me de|gostaria de|veja)?\s*(\d{1,2})\s+(opç(?:ões|oes)|sugest(?:ões|oes)|indicaç(?:ões|oes)|exemplos|passeios|restaurantes)\b/i);
+  if (match && match[1]) {
+    const num = parseInt(match[1], 10);
+    if (Number.isFinite(num) && num >= 1 && num <= 15) {
+      console.log(`[RAIO-X] Limite dinâmico de ${num} encontrado na mensagem.`);
+      return num;
+    }
+  }
+  return null;
+}
+
 async function construirHistoricoParaGemini(conversationId, limite = 12) {
   try {
     const { data, error } = await supabase
@@ -235,7 +255,7 @@ async function extrairEntidadesDaBusca(texto) {
 async function analisarIntencaoDoUsuario(textoDoUsuario) {
   if (forcarBuscaParceiro(textoDoUsuario)) return "busca_parceiro";
 
-  // Reduzido (fallback): se não bateu heurística, pergunta ao modelo
+  // Fallback simples via modelo
   const prompt = `Classifique a frase do usuário em 'busca_parceiro' ou 'pergunta_geral'. Responda só com a string.\nFrase: "${textoDoUsuario}"`;
   try {
     const saida = await geminiGerarTexto(prompt);
@@ -245,8 +265,22 @@ async function analisarIntencaoDoUsuario(textoDoUsuario) {
   return "pergunta_geral";
 }
 
+function historicoParaTextoSimplesWrapper(hc) {
+  try {
+    return (hc || [])
+      .map(b => {
+        const role = b?.role || "user";
+        const text = (b?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
+        return `- ${role}: ${text}`;
+      })
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
 async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
-  const historicoTexto = historicoParaTextoSimples(historicoContents);
+  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
   const prompt = [
     "Você é um assistente de consulta de dados. Sua única função é apresentar os resultados encontrados de forma clara e objetiva.",
@@ -265,7 +299,7 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
 }
 
 async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
-  const historicoTexto = historicoParaTextoSimples(historicoContents);
+  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const nomeRegiao = regiao?.nome || "Região dos Lagos";
   const prompt = [
     `Você é o BEPIT, um concierge amigável e especialista na região de ${nomeRegiao}.`,
@@ -312,10 +346,16 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
 }
 
 // ============================== BUSCA / REFINO ==============================
-async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFerramenta, textoOriginal, isInitialSearch = false, excludeIds = [] }) {
+async function ferramentaBuscarParceirosOuDicas({
+  cidadesAtivas,
+  argumentosDaFerramenta,
+  textoOriginal,
+  isInitialSearch = false,
+  excludeIds = [],
+  limiteDinamico = null
+}) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
-  const listaDeTermos = Array.isArray(argumentosDaFerramenta?.terms) ? argumentosDaFerramenta.terms : [];
 
   const textoN = normalizarTexto(textoOriginal || "");
   const sinaisCarne = ["picanha","piconha","carne","churrasco","rodizio","rodízio"].some(s => textoN.includes(s));
@@ -332,7 +372,7 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   }
   if (!cidadeSlug && cidadesValidas.length > 0) cidadeSlug = cidadesValidas[0].slug;
 
-  // Mapa macro → categorias
+  // Mapa macro → categorias DB
   const MAPA_CESTA_PARA_CATEGORIAS_DB = {
     comida: ["churrascaria","restaurante","pizzaria","lanchonete","frutos do mar","sushi","padaria","cafeteria","bistrô","bistro","hamburgueria","pizza"],
     bebidas: ["bar","pub","cervejaria","wine bar","balada","boteco"],
@@ -342,12 +382,10 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
     transporte: ["transfer","transporte","aluguel de carro","locadora","taxi","ônibus","onibus","rodoviária","rodoviaria"]
   };
 
-  // ------------- PRIORIZAÇÃO INTELIGENTE -------------
-  // Base inicial
+  // Priorização inteligente
   let categoriasAProcurar = [];
   if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
 
-  // Macro "comida" com sinais de carne → prioriza churrascaria+restaurante
   if (categoriaProcurada === "comida" || (!categoriaProcurada && MAPA_CESTA_PARA_CATEGORIAS_DB.comida)) {
     if (sinaisCarne) {
       categoriasAProcurar = ["churrascaria","restaurante"];
@@ -359,7 +397,6 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
       if (!categoriasAProcurar.includes(cn)) categoriasAProcurar.push(cn);
     }
   }
-
   if (categoriasAProcurar.length === 0 && categoriaProcurada && MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada]) {
     categoriasAProcurar = MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada].map(normalizarTexto);
   }
@@ -378,15 +415,19 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   // Execução de buscas
   const agregados = [];
   const vistos = new Set();
+  const alvoInicial = Math.max(1, Math.min(15, Number(limiteDinamico || 3))); // limite dinâmico para a 1ª página
+
   for (const cat of categoriasAProcurar) {
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
       term: termoDeBusca,
-      limit: 8,
-      isInitialSearch,
-      excludeIds
+      limit: Math.max(alvoInicial, 8), // RPC usa limite mais alto; corte final é feito depois
+      isInitialSearch: isInitialSearch,
+      excludeIds: excludeIds,
+      limiteDinamico: limiteDinamico || null
     });
+
     if (r.ok && Array.isArray(r.items)) {
       for (const it of r.items) {
         if (it?.id && !vistos.has(it.id)) {
@@ -395,25 +436,32 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
         }
       }
     }
-    if (isInitialSearch && agregados.length >= 3) break;
-    if (!isInitialSearch && agregados.length >= 8) break;
+    // Respeita o alvo da primeira página
+    if (isInitialSearch && agregados.length >= alvoInicial) break;
+    if (!isInitialSearch && agregados.length >= Math.max(5, Math.min(20, limiteDinamico || 8))) break;
   }
 
   agregados.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-  const limitados = isInitialSearch ? agregados.slice(0, 3) : agregados.slice(0, 8);
+
+  const limiteFinal = isInitialSearch
+    ? alvoInicial
+    : Math.max(1, Math.min(20, Number(limiteDinamico || 8)));
+
+  const limitados = agregados.slice(0, limiteFinal);
 
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
       payload: {
-        termos: listaDeTermos,
+        termos: argumentosDaFerramenta?.terms || [],
         categoriaProcurada,
         cidadeProcurada,
         isInitialSearch,
         excludeIds,
         categoriasTentadas: categoriasAProcurar,
         total_filtrado: limitados.length,
-        cidadeSlug
+        cidadeSlug,
+        limiteDinamico: limiteDinamico || null
       }
     });
   } catch {}
@@ -437,7 +485,16 @@ async function ferramentaBuscarParceirosOuDicas({ cidadesAtivas, argumentosDaFer
   };
 }
 
-async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa, isInitialSearch = true, excludeIds = [] }) {
+async function lidarComNovaBusca({
+  textoDoUsuario,
+  historicoGemini,
+  regiao,
+  cidadesAtivas,
+  idDaConversa,
+  isInitialSearch = true,
+  excludeIds = [],
+  limiteDinamico = null
+}) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
 
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
@@ -445,7 +502,8 @@ async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cida
     argumentosDaFerramenta: entidades,
     textoOriginal: textoDoUsuario,
     isInitialSearch,
-    excludeIds
+    excludeIds,
+    limiteDinamico
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
@@ -486,15 +544,26 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     }
     textoDoUsuario = textoDoUsuario.trim();
 
-    const { data: regiao, error: erroRegiao } = await supabase.from("regioes").select("id, nome, slug, ativo").eq("slug", slugDaRegiao).single();
+    // Resolve região
+    const { data: regiao, error: erroRegiao } = await supabase
+      .from("regioes")
+      .select("id, nome, slug, ativo")
+      .eq("slug", slugDaRegiao)
+      .single();
     if (erroRegiao || !regiao) return res.status(404).json({ error: "Região não encontrada." });
     if (regiao.ativo === false) return res.status(403).json({ error: "Região desativada." });
 
-    const { data: cidades, error: erroCidades } = await supabase.from("cidades").select("id, nome, slug, lat, lng, ativo").eq("regiao_id", regiao.id);
+    const { data: cidades, error: erroCidades } = await supabase
+      .from("cidades")
+      .select("id, nome, slug, lat, lng, ativo")
+      .eq("regiao_id", regiao.id);
     if (erroCidades) return res.status(500).json({ error: "Erro ao carregar cidades.", internal: erroCidades });
     const cidadesAtivas = (cidades || []).filter(c => c.ativo !== false);
 
-    if (!conversationId || typeof conversationId !== "string" || !conversationId.trim()) {
+    // ==================== CORREÇÃO CRÍTICA (memória) ====================
+    console.log(`[RAIO-X] Recebido do frontend: conversationId = ${conversationId}`);
+    if (!conversationId || typeof conversationId !== "string" || conversationId.trim().length < 10) {
+      console.log("[RAIO-X] conversationId inválido ou ausente. Gerando um novo.");
       conversationId = randomUUID();
       try {
         await supabase.from("conversas").insert({
@@ -508,11 +577,40 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           topico_atual: null,
           aguardando_refinamento: false
         });
+        console.log(`[RAIO-X] Nova conversa criada no DB com ID: ${conversationId}`);
       } catch (e) {
-        return res.status(500).json({ error: "Erro ao criar conversa.", internal: e });
+        return res.status(500).json({ error: "Erro ao criar nova conversa.", internal: e });
+      }
+    } else {
+      console.log(`[RAIO-X] Reutilizando conversationId existente: ${conversationId}`);
+      // Garante existência no DB (idempotente)
+      try {
+        const { data: existe } = await supabase
+          .from("conversas")
+          .select("id")
+          .eq("id", conversationId)
+          .maybeSingle();
+        if (!existe) {
+          await supabase.from("conversas").insert({
+            id: conversationId,
+            regiao_id: regiao.id,
+            parceiro_em_foco: null,
+            parceiros_sugeridos: [],
+            ultima_pergunta_usuario: null,
+            ultima_resposta_ia: null,
+            preferencia_indicacao: null,
+            topico_atual: null,
+            aguardando_refinamento: false
+          });
+          console.log(`[RAIO-X] conversationId informado não existia. Criado agora: ${conversationId}`);
+        }
+      } catch (e) {
+        console.warn("[RAIO-X] Não foi possível validar/garantir a conversa:", e?.message || e);
       }
     }
+    // ====================================================================
 
+    // Carrega estado atual da conversa
     let conversaAtual = null;
     try {
       const { data: conv } = await supabase
@@ -525,7 +623,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     const historicoGemini = await construirHistoricoParaGemini(conversationId, 12);
 
-    // --- INÍCIO DO NOVO FLUXO DE REFINAMENTO ---
+    // ----- REFINO EM ANDAMENTO -----
     if (conversaAtual?.aguardando_refinamento) {
       const criteriosDeBusca = textoDoUsuario;
       const parceirosJaSugeridos = Array.isArray(conversaAtual.parceiros_sugeridos)
@@ -539,7 +637,8 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         cidadesAtivas,
         idDaConversa: conversationId,
         isInitialSearch: false,
-        excludeIds: parceirosJaSugeridos
+        excludeIds: parceirosJaSugeridos,
+        limiteDinamico: extrairLimiteDaMensagem(criteriosDeBusca)
       });
 
       await supabase.from("conversas").update({ aguardando_refinamento: false }).eq("id", conversationId);
@@ -547,9 +646,8 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       const fotos = (r.parceirosSugeridos || []).flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
       return res.status(200).json({ reply: r.respostaFinal, photoLinks: fotos, conversationId, partners: r.parceirosSugeridos });
     }
-    // --- FIM DO NOVO FLUXO DE REFINAMENTO ---
 
-    // Seleção direta por "1º/2º" ou nome
+    // ----- SELEÇÃO DIRETA (ordinal / nome) -----
     const candidatos = Array.isArray(conversaAtual?.parceiros_sugeridos) ? conversaAtual.parceiros_sugeridos : [];
     const parceiroSelecionado = encontrarParceiroNaLista(textoDoUsuario, candidatos);
     if (parceiroSelecionado) {
@@ -593,7 +691,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // --- DETECÇÃO "MAIS OPÇÕES" / REFINAMENTO ---
+    // ----- DETECÇÃO "MAIS OPÇÕES" / REFINAMENTO -----
     const palavrasDeRefinamento = ["outras opções","mais","nao gostei","não gostei","outra sugestao","outra sugestão","outras"];
     const pediuRefinamento = palavrasDeRefinamento.some(p => normalizarTexto(textoDoUsuario).includes(p));
 
@@ -614,21 +712,23 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       return res.status(200).json({ reply: perguntaRefinamento, conversationId });
     }
 
-    // Intenção + busca
+    // ----- INTENÇÃO + BUSCA -----
     const intent = await analisarIntencaoDoUsuario(textoDoUsuario);
     let respostaFinal = "";
     let parceirosSugeridos = [];
 
     switch (intent) {
       case "busca_parceiro": {
+        const limiteDinamico = extrairLimiteDaMensagem(textoDoUsuario);
         const r = await lidarComNovaBusca({
           textoDoUsuario,
           historicoGemini,
           regiao,
           cidadesAtivas,
           idDaConversa: conversationId,
-          isInitialSearch: true,   // 1ª página → 3 aleatórios
-          excludeIds: []           // nada a excluir na 1ª página
+          isInitialSearch: true,
+          excludeIds: [],
+          limiteDinamico // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         });
         respostaFinal = r.respostaFinal;
         parceirosSugeridos = r.parceirosSugeridos;
@@ -679,13 +779,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 });
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
-// Resposta SEMPRE no formato: { data: [...] }
-// Inclui cidade_nome quando houver cidade_id (join com cidades)
+// (inalterado)
 aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
 
-    // 1) Valida/resolve a região
     const { data: regiao, error: erroRegiao } = await supabase
       .from("regioes")
       .select("id")
@@ -696,7 +794,6 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
       return res.status(404).json({ error: "Região não encontrada." });
     }
 
-    // 2) Busca avisos ativos da região + join em cidades para obter cidade_nome
     const { data: avisos, error: erroAvisos } = await supabase
       .from("avisos_publicos")
       .select(`
@@ -718,7 +815,6 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
 
     if (erroAvisos) throw erroAvisos;
 
-    // 3) Normaliza para shape estável + adiciona cidade_nome (quando houver)
     const normalized = (avisos || []).map(a => ({
       id: a.id,
       regiao_id: a.regiao_id,
@@ -739,128 +835,4 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   }
 });
 
-
-
-// ------------------------------ FEEDBACK ------------------------------------
-aplicacaoExpress.post("/api/feedback", async (req, res) => {
-  try {
-    const { interactionId, feedback } = req.body || {};
-    if (!interactionId || typeof interactionId !== "string") return res.status(400).json({ error: "interactionId é obrigatório (uuid)." });
-    if (!feedback || typeof feedback !== "string" || !feedback.trim()) return res.status(400).json({ error: "feedback é obrigatório (string não vazia)." });
-
-    const { error } = await supabase.from("interacoes").update({ feedback_usuario: feedback }).eq("id", interactionId);
-    if (error) return res.status(500).json({ error: "Erro ao registrar feedback." });
-
-    try { await supabase.from("eventos_analytics").insert({ tipo_evento: "feedback", payload: { interactionId, feedback } }); } catch {}
-    res.json({ success: true });
-  } catch (erro) {
-    console.error("[/api/feedback] Erro:", erro);
-    res.status(500).json({ error: "Erro interno." });
-  }
-});
-
-// ------------------------------ HEALTH/DIAG ---------------------------------
-aplicacaoExpress.get("/health", (_req, res) => res.status(200).json({ ok: true, message: "Servidor BEPIT Nexus online", port: String(portaDoServidor) }));
-aplicacaoExpress.get("/api/health", (_req, res) => res.status(200).json({ ok: true, scope: "api", message: "BEPIT Nexus API ok", port: String(portaDoServidor) }));
-aplicacaoExpress.get("/api/health/db", async (_req, res) => {
-  try {
-    const { data, error } = await supabase.from("regioes").select("id").limit(1);
-    if (error) throw error;
-    res.json({ ok: true, sample: data || [] });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "db_error", internal: e });
-  }
-});
-aplicacaoExpress.get("/api/diag/gemini", async (_req, res) => {
-  try {
-    if (!usarGeminiREST) return res.status(200).json({ ok: false, modo: "SDK", info: "USE_GEMINI_REST não está ativo." });
-    const modelos = await listarModelosREST();
-    let escolhido = null; let ping = null;
-    try {
-      escolhido = await obterModeloREST();
-      const texto = await gerarConteudoComREST(escolhido, "ping");
-      ping = texto ? "ok" : "vazio";
-    } catch (e) {
-      ping = String(e?.message || e);
-    }
-    res.json({ ok: true, modo: "REST", modelos, escolhido, ping });
-  } catch (e) {
-    res.status(500).json({ ok: false, modo: "REST", error: String(e?.message || e) });
-  }
-});
-
-// ------------------------------ ADMIN ---------------------------------------
-function exigirChaveDeAdministrador(req, res, next) {
-  const chave = req.headers["x-admin-key"];
-  if (!chave || chave !== (process.env.ADMIN_API_KEY || "")) return res.status(401).json({ error: "Chave administrativa inválida ou ausente." });
-  next();
-}
-
-aplicacaoExpress.post("/api/auth/login", async (req, res) => {
-  try {
-    const { key } = req.body || {};
-    if (!key || typeof key !== "string") return res.status(400).json({ error: "missing_key" });
-    const ADMIN_API_KEY = process.env.ADMIN_API_KEY || "";
-    if (ADMIN_API_KEY && key === ADMIN_API_KEY) return res.status(200).json({ ok: true });
-    return res.status(401).json({ error: "invalid_key" });
-  } catch (erro) {
-    console.error("[/api/auth/login] Erro:", erro);
-    return res.status(500).json({ error: "server_error" });
-  }
-});
-
-aplicacaoExpress.post("/api/admin/parceiros", exigirChaveDeAdministrador, async (req, res) => {
-  try {
-    const { regiaoSlug, cidadeSlug, ...rest } = req.body || {};
-    const { data: regiao } = await supabase.from("regioes").select("id").eq("slug", regiaoSlug).single();
-    if (!regiao) return res.status(400).json({ error: "regiaoSlug inválido." });
-
-    const { data: cidade } = await supabase.from("cidades").select("id").eq("regiao_id", regiao.id).eq("slug", cidadeSlug).single();
-    if (!cidade) return res.status(400).json({ error: "cidadeSlug inválido." });
-
-    const novo = {
-      cidade_id: cidade.id,
-      tipo: rest.tipo || "PARCEIRO",
-      nome: rest.nome,
-      descricao: rest.descricao || null,
-      categoria: rest.categoria || null,
-      beneficio_bepit: rest.beneficio_bepit || null,
-      endereco: rest.endereco || null,
-      contato: rest.contato || null,
-      tags: Array.isArray(rest.tags) ? rest.tags : null,
-      horario_funcionamento: rest.horario_funcionamento || null,
-      faixa_preco: rest.faixa_preco || null,
-      fotos_parceiros: Array.isArray(rest.fotos_parceiros) ? rest.fotos_parceiros : (Array.isArray(rest.fotos) ? rest.fotos : null),
-      ativo: rest.ativo !== false
-    };
-    const { data, error } = await supabase.from("parceiros").insert(novo).select("*").single();
-    if (error) throw error;
-    return res.status(201).json({ ok: true, data });
-  } catch (erro) {
-    console.error("[/api/admin/parceiros POST] Erro:", erro);
-    return res.status(500).json({ error: "Erro interno." });
-  }
-});
-
-aplicacaoExpress.get("/api/admin/parceiros/:regiaoSlug/:cidadeSlug", exigirChaveDeAdministrador, async (req, res) => {
-  try {
-    const { regiaoSlug, cidadeSlug } = req.params;
-    const { data: regiao } = await supabase.from("regioes").select("id").eq("slug", regiaoSlug).single();
-    if (!regiao) return res.status(400).json({ error: "regiaoSlug inválido." });
-
-    const { data: cidade } = await supabase.from("cidades").select("id").eq("regiao_id", regiao.id).eq("slug", cidadeSlug).single();
-    if (!cidade) return res.status(400).json({ error: "cidadeSlug inválido." });
-
-    const { data, error } = await supabase.from("parceiros").select("*").eq("cidade_id", cidade.id).order("nome");
-    if (error) throw error;
-    return res.status(200).json({ data });
-  } catch (erro) {
-    console.error("[/api/admin/parceiros GET] Erro:", erro);
-    return res.status(500).json({ error: "Erro interno." });
-  }
-});
-
-// ============================== START =======================================
-aplicacaoExpress.listen(portaDoServidor, () => {
-  console.log(`✅ BEPIT Nexus (Orquestrador v4.0) rodando em http://localhost:${portaDoServidor}`);
-});
+export default aplicacaoExpress;
