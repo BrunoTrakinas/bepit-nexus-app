@@ -1,79 +1,65 @@
-import React, { useEffect } from "react";
+import React from "react";
 import { useNavigate } from "react-router-dom";
 
-// Helper: tema claro/escuro persistente
-function useTheme() {
-  useEffect(() => {
-    const saved = localStorage.getItem("bepit_theme") || "light";
-    document.documentElement.classList.toggle("dark", saved === "dark");
-  }, []);
-  const toggle = () => {
-    const next = document.documentElement.classList.contains("dark") ? "light" : "dark";
-    document.documentElement.classList.toggle("dark", next === "dark");
-    localStorage.setItem("bepit_theme", next);
-  };
-  return { toggle };
-}
-
+/**
+ * RegionSelection.jsx
+ * - Tela de escolha de região
+ * - Centraliza LOGO (bepit-logo.png), "Bepit Nexus", subtítulo e lista de regiões
+ * - Ao selecionar, salva { slug, name } em localStorage e redireciona para /chat
+ */
 export default function RegionSelection() {
   const navigate = useNavigate();
-  const { toggle } = useTheme();
 
-  const handleSelect = (slug, nome) => {
-    localStorage.setItem("bepit_region", JSON.stringify({ slug, nome }));
+  // Ajuste/expanda aqui suas regiões reais
+  const regioes = [
+    { slug: "regiao-dos-lagos", name: "Região dos Lagos" },
+    // { slug: "outra-regiao", name: "Outra Região" },
+  ];
+
+  function onSelectRegion(region) {
+    try {
+      localStorage.setItem("bepit_region", JSON.stringify(region));
+    } catch {}
     navigate("/chat");
-  };
+  }
 
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100 flex items-center justify-center p-4">
-      <div className="w-full max-w-3xl">
-        {/* Header com logo e tema */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <img
-              src="/bepit-logo.png"
-              alt="BEPIT"
-              className="h-10 w-auto"
-              onError={(e) => { e.currentTarget.style.display = "none"; }}
-            />
-            <h1 className="text-2xl font-semibold">BEPIT • Selecione a Região</h1>
-          </div>
-          <button
-            onClick={toggle}
-            className="px-3 py-2 rounded-xl bg-neutral-200 hover:bg-neutral-300 dark:bg-neutral-800 dark:hover:bg-neutral-700 transition"
-            title="Alternar tema claro/escuro"
-          >
-            🌓
-          </button>
+    <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-950 px-4">
+      <div className="w-full max-w-lg text-center">
+        {/* LOGO centralizada — 500% do tamanho base */}
+        <div className="flex justify-center mb-4">
+          <img
+            src="/bepit-logo.png"
+            alt="BEPIT"
+            className="w-40 h-40 md:w-48 md:h-48 lg:w-52 lg:h-52"
+            style={{ transform: "scale(5)", transformOrigin: "center" }}
+          />
         </div>
 
-        {/* Cards de regiões (adicione mais se tiver) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <button
-            onClick={() => handleSelect("regiao-dos-lagos", "Região dos Lagos")}
-            className="text-left p-5 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:shadow-md transition"
-          >
-            <div className="flex items-center gap-3">
-              <img
-                src="/bepit-logo.png"
-                alt=""
-                className="h-8 w-8"
-                onError={(e) => { e.currentTarget.style.display = "none"; }}
-              />
-              <div>
-                <div className="text-lg font-medium">Região dos Lagos</div>
-                <div className="text-sm opacity-70">Cabo Frio, Arraial, Búzios…</div>
-              </div>
-            </div>
-          </button>
+        {/* Título principal */}
+        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-800 dark:text-slate-100 mb-2">
+          Bepit Nexus
+        </h1>
 
-          {/* Exemplo de região futura */}
-          {/* <button onClick={() => handleSelect("outra-regiao", "Outra Região")} className="...">Outra Região</button> */}
-        </div>
-
-        <p className="mt-6 text-sm opacity-70">
-          Dica: você pode trocar de tema no botão 🌓 e voltar aqui a qualquer momento.
+        {/* Subtítulo */}
+        <p className="text-lg md:text-xl text-slate-600 dark:text-slate-300 mb-6">
+          Escolha sua Região
         </p>
+
+        {/* Lista de regiões (vertical, centralizada) */}
+        <div className="space-y-3">
+          {regioes.map((r) => (
+            <button
+              key={r.slug}
+              onClick={() => onSelectRegion(r)}
+              className="w-full py-4 rounded-2xl bg-white dark:bg-slate-800 shadow hover:shadow-md transition
+                         border border-slate-200 dark:border-slate-700 text-lg font-medium
+                         text-slate-800 dark:text-slate-100"
+            >
+              {r.name}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );

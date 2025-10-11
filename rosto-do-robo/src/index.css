@@ -1,9 +1,31 @@
 /* src/index.css — Tailwind v4 */
 @import "tailwindcss";
 
-/* MUITO IMPORTANTE no v4:
-   Diz ao Tailwind: “quando <html> tiver class='dark', ative as classes 'dark:' ” */
+/* Importante no v4:
+   Quando <html> tiver class="dark", as classes `dark:` ficam ativas */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Seus estilos globais opcionais (pode deixar vazio se quiser) */
-/* body { } */
+/* ====== Mobile / iOS helpers ====== */
+
+/* Safe areas (iOS notch / home indicator) via CSS env() */
+:root {
+  --safe-top: env(safe-area-inset-top);
+  --safe-right: env(safe-area-inset-right);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+}
+
+/* Rolagem com inércia no iOS para áreas roláveis */
+.scroll-smooth-touch {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Suaviza scroll geral quando suportado */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh; /* usa dvh p/ corrigir 100vh no Safari móvel */
+}
