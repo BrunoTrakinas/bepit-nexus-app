@@ -1,78 +1,64 @@
-import React, { useEffect } from "react";
+// src/components/RegionSelection.jsx
+import React from "react";
 import { useNavigate } from "react-router-dom";
 import ThemeToggleButton from "./ThemeToggleButton.jsx";
 
 /**
- * Tela de seleção de região
- * - Logo centralizada
- * - “Bepit Nexus” + “Escolha sua Região” centralizados
- * - Cartões (botões) de regiões centralizados, um embaixo do outro (responsivo)
- * - Botão de tema no topo direito
+ * Se você já carrega as regiões de outro lugar, pode apagar este array
+ * e usar seu map normalmente. Mantive aqui só para o arquivo ser “auto-suficiente”.
  */
+const REGIONS = [
+  { slug: "regiao-dos-lagos", nome: "Região dos Lagos" },
+  // Adicione outras regiões aqui se quiser
+];
+
 export default function RegionSelection() {
   const navigate = useNavigate();
 
-  // Exemplo de regiões disponíveis (ajuste conforme seu backend)
-  const regions = [
-    { slug: "regiao-dos-lagos", nome: "Região dos Lagos" },
-    // adicione outras regiões aqui quando estiverem ativas
-  ];
-
-  const handleSelect = (region) => {
+  function handleSelectRegion(region) {
     try {
-      // grava de forma compatível com telas que leem "name" OU "nome"
-      const payload = { ...region, name: region?.nome || region?.name };
-      localStorage.setItem("bepit_region", JSON.stringify(payload));
+      localStorage.setItem(
+        "bepit_region",
+        JSON.stringify({ slug: region.slug, nome: region.nome })
+      );
     } catch {}
     navigate("/chat");
-  };
+  }
 
   return (
-    <div className="min-h-screen bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      {/* Top bar com toggle de tema */}
-      <div className="w-full flex items-center justify-end px-4 py-3">
+    <main className="min-h-screen bg-white text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100">
+      {/* Topbar (apenas o toggle; se você já tem outro topo, pode remover esta linha) */}
+      <div className="flex w-full items-center justify-end gap-2 px-4 py-3">
         <ThemeToggleButton />
       </div>
 
-      {/* Conteúdo centralizado */}
-      <main className="max-w-3xl mx-auto px-4">
-        <div className="flex flex-col items-center justify-center text-center gap-6 sm:gap-8 pt-10 pb-16">
-          {/* Logo */}
-          <img
-            src="/bepit-logo.png"
-            alt="BEPIT"
-            className="h-20 w-20 sm:h-24 sm:w-24 md:h-28 md:w-28 rounded-full shadow"
-          />
+      {/* Centro da página (logo + títulos + botões) */}
+      <section className="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl flex-col items-center justify-center px-4 pb-8 pt-0">
+        <img
+          src="/bepit-logo.png"
+          alt="BEPIT"
+          className="mb-4 h-16 w-16 rounded-full sm:h-20 sm:w-20"
+        />
 
-          {/* Título “Bepit Nexus” */}
-          <h1 className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight">
-            Bepit Nexus
-          </h1>
+        <h1 className="mb-1 text-center text-2xl font-extrabold tracking-tight sm:text-3xl">
+          BEPIT Nexus
+        </h1>
+        <h2 className="mb-6 text-center text-base font-medium text-neutral-600 dark:text-neutral-300 sm:text-lg">
+          Escolha sua Região
+        </h2>
 
-          {/* Subtítulo */}
-          <p className="text-base sm:text-lg md:text-xl text-slate-600 dark:text-slate-300">
-            Escolha sua Região
-          </p>
-
-          {/* Lista de regiões */}
-          <div className="w-full max-w-md flex flex-col items-stretch gap-3 mt-2">
-            {regions.map((r) => (
-              <button
-                key={r.slug}
-                onClick={() => handleSelect(r)}
-                className="
-                  w-full rounded-2xl border border-slate-200 bg-white px-5 py-4 text-lg font-semibold
-                  shadow-sm hover:shadow transition
-                  text-center
-                  dark:border-slate-700 dark:bg-slate-900
-                "
-              >
-                {r.nome || r.name}
-              </button>
-            ))}
-          </div>
+        <div className="flex w-full max-w-xl flex-col items-stretch gap-3">
+          {REGIONS.map((r) => (
+            <button
+              key={r.slug}
+              onClick={() => handleSelectRegion(r)}
+              className="w-full rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-center text-base font-semibold shadow-sm hover:bg-neutral-50 active:scale-[0.99] dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+            >
+              {r.nome}
+            </button>
+          ))}
         </div>
-      </main>
-    </div>
+      </section>
+    </main>
   );
 }

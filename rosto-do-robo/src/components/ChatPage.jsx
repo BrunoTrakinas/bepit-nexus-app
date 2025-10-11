@@ -3,17 +3,28 @@ import ThemeToggleButton from "./ThemeToggleButton.jsx";
 import AvisosModal from "./AvisosModal.jsx";
 import { supabase } from "../lib/supabaseClient.js";
 
-/** HTTP com timeout para chamadas ao backend do chat */
+/** HTTP com timeout e um retry leve para o backend do chat */
 async function fetchWithTimeout(resource, options = {}) {
-  const { timeout = 45000, ...rest } = options; // ⬅️ 45s para dar folga ao backend
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
+  const { timeout = 45000, retries = 0, ...rest } = options;
+  const attempt = async () => {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+      const resp = await fetch(resource, { ...rest, signal: controller.signal });
+      clearTimeout(id);
+      return resp;
+    } catch (e) {
+      clearTimeout(id);
+      throw e;
+    }
+  };
   try {
-    const resp = await fetch(resource, { ...rest, signal: controller.signal });
-    clearTimeout(id);
-    return resp;
+    return await attempt();
   } catch (e) {
-    clearTimeout(id);
+    if (retries > 0) {
+      await new Promise((r) => setTimeout(r, 600)); // backoff curto
+      return await fetchWithTimeout(resource, { timeout, retries: retries - 1, ...rest });
+    }
     throw e;
   }
 }
@@ -53,6 +64,16 @@ async function resolveRegionId(regionInfo) {
   return String(data.id);
 }
 
+/** Heurística simples para sugerir tópico ao backend (opcional) */
+function inferTopic(text) {
+  const t = (text || "").toLowerCase();
+  if (t.includes("restaurante") || t.includes("comida") || t.includes("gastr")) return "restaurants";
+  if (t.includes("passeio") || t.includes("trilha") || t.includes("barco") || t.includes("bugre")) return "tours";
+  if (t.includes("praia")) return "beaches";
+  if (t.includes("hotel") || t.includes("hosped")) return "lodging";
+  return "general";
+}
+
 export default function ChatPage() {
   // Região do localStorage
   const regionInfo = useMemo(() => {
@@ -75,7 +96,6 @@ export default function ChatPage() {
   }, [regionSlug]);
 
   // ===== Conversa: ID persistente por região =====
-  // Recupera/gera um conversationId que persiste por região
   const initialConversationId = useMemo(() => {
     try {
       const savedId = localStorage.getItem("bepit_conversation_id");
@@ -140,14 +160,16 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     setMessages((prev) => [...prev, { ...msg, id: msg.id || crypto.randomUUID(), ts: Date.now() }]);
   };
 
-  // “Chips” — perguntas rápidas (passa pelo mesmo fluxo do sendMessage)
+  // ===== Chips: agora o texto já pede "5 opções" para evitar resposta única =====
   const handleQuickAsk = (text) => {
     if (!text) return;
     setUserInput("");
-    sendMessage(text);
+    // injeta o nome da região no chip (ajuda o LLM a entender o contexto)
+    const enriched = text.replace("{regiao}", regionName).replace("{região}", regionName);
+    sendMessage(enriched);
   };
 
-  // Enviar mensagem (preserva conversationId estável + chaves alternativas)
+  // Enviar mensagem (preserva conversationId, tenta enriquecer o payload)
   const sendMessage = async (rawText) => {
     const text = (rawText ?? userInput).trim();
     if (!text || !regionSlug) return;
@@ -158,48 +180,47 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     try {
       const url = `${apiBase.replace(/\/$/, "")}/api/chat/${encodeURIComponent(regionSlug)}`;
 
-      // Payload envia o id em 3 chaves — servidor usa a que conhecer.
       const payload = {
         message: text,
-        conversationId,               // nome comum
-        threadId: conversationId,     // alternativa comum
-        sessionId: conversationId     // outra alternativa comum
+        // IDs aceitos por diferentes backends; o servidor usa o que conhecer:
+        conversationId,
+        threadId: conversationId,
+        sessionId: conversationId,
+        // Dicas Opcionais (servidor pode ignorar sem quebrar):
+        limit: 6,
+        topK: 6,
+        topic: inferTopic(text),
+        region: regionName,
+        regionSlug
       };
 
-      if (import.meta.env.DEV) {
-        console.debug("[Chat →]", url, payload);
-      }
+      if (import.meta.env.DEV) console.debug("[Chat →]", url, payload);
 
       const resp = await fetchWithTimeout(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeout: 45000
+        timeout: 45000,
+        retries: 1
       });
 
       let replyText = "Desculpe, não consegui obter uma resposta agora.";
       if (resp.ok) {
         const data = await resp.json().catch(() => ({}));
 
-        // Se o backend devolver algum id oficial de conversa, passamos a usá-lo.
-        const serverId =
-          data?.conversationId || data?.threadId || data?.sessionId || null;
+        // Se o backend devolver um id oficial, passamos a usar
+        const serverId = data?.conversationId || data?.threadId || data?.sessionId || null;
         if (serverId && typeof serverId === "string" && serverId !== conversationId) {
           setConversationId(serverId);
           try {
             localStorage.setItem("bepit_conversation_id", serverId);
             localStorage.setItem("bepit_conversation_region", regionSlug || "");
           } catch {}
-          if (import.meta.env.DEV) {
-            console.debug("[Chat] server conversation id ->", serverId);
-          }
+          if (import.meta.env.DEV) console.debug("[Chat] server conversation id ->", serverId);
         }
 
-        if (data?.reply) {
-          replyText = String(data.reply);
-        } else if (data?.message) {
-          replyText = String(data.message);
-        }
+        if (data?.reply) replyText = String(data.reply);
+        else if (data?.message) replyText = String(data.message);
       } else {
         replyText = `Tive um problema ao buscar uma resposta (HTTP ${resp.status}).`;
       }
@@ -211,9 +232,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         text:
           "Ops, a conexão parece ter oscilado. Tente novamente em instantes. Se preferir, descreva com mais detalhes o que deseja."
       });
-      if (import.meta.env.DEV) {
-        console.warn("[Chat erro]", e);
-      }
+      if (import.meta.env.DEV) console.warn("[Chat erro]", e);
     } finally {
       setIsTyping(false);
       setUserInput("");
@@ -266,63 +285,58 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
   return (
     <div className="min-h-dvh bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex flex-col">
       {/* Cabeçalho */}
-      <header className="sticky top-0 z-30 bg-white/80 dark:bg-neutral-900/80 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto w-full max-w-5xl px-3 sm:px-4">
-          <div className="grid grid-cols-3 items-center h-16 sm:h-20">
-            {/* ESQUERDA: Voltar + logo + BEPIT */}
-            <div className="flex items-center gap-3 sm:gap-4">
-              <button
-                type="button"
-                onClick={() => window.history.back()}
-                className="inline-flex items-center justify-center rounded-full border border-neutral-300 dark:border-neutral-700 px-4 py-2 text-base hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                aria-label="Voltar"
-                title="Voltar"
-              >
-                ←
-              </button>
+      {/* === HEADER (apenas este bloco substitui o seu header atual) === */}
+<header className="sticky top-0 z-40 grid grid-cols-[auto,1fr,auto] items-center gap-2 border-b border-neutral-200 bg-white/95 px-3 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4 sm:py-3">
+  {/* ESQUERDA: Voltar + Logo + BEPIT */}
+  <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+    <button
+      onClick={() => navigate("/")}
+      className="rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
+      aria-label="Voltar para seleção de região"
+    >
+      ← Voltar
+    </button>
 
-              <img
-                src="/bepit-logo.png"
-                alt="BEPIT"
-                className="h-10 w-10 sm:h-12 sm:w-12 rounded"
-                loading="lazy"
-              />
-              <span className="font-extrabold text-neutral-900 dark:text-neutral-100 text-lg sm:text-2xl">
-                BEPIT
-              </span>
-            </div>
+    <img
+      src="/bepit-logo.png"
+      alt="BEPIT"
+      className="h-7 w-7 shrink-0 rounded-full sm:h-8 sm:w-8"
+    />
+    <span className="shrink-0 text-base font-semibold sm:text-lg md:text-xl">
+      BEPIT
+    </span>
+  </div>
 
-            {/* CENTRO: Nome da Região (dinâmico) */}
-            <div className="flex items-center justify-center">
-              <span className="truncate font-bold text-neutral-800 dark:text-neutral-200 text-base sm:text-xl">
-                {regionName}
-              </span>
-            </div>
+  {/* CENTRO: Nome da região (trunca no mobile) */}
+  <div className="min-w-0 text-center">
+    <div className="mx-auto max-w-[70vw] truncate text-sm font-medium sm:max-w-[60vw] sm:text-base md:text-lg">
+      {region?.nome || region?.name || "Região"}
+    </div>
+  </div>
 
-            {/* DIREITA: Avisos + Tema */}
-            <div className="flex items-center justify-end gap-2 sm:gap-4">
-              <button
-                type="button"
-                onClick={openAvisosModal}
-                className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 text-amber-800 px-4 py-2 text-base hover:bg-amber-100 dark:border-amber-600 dark:bg-amber-900/30 dark:text-amber-200"
-                title="Avisos da Região"
-              >
-                <span className="text-xl leading-none">⚠️</span>
-                <span className="hidden sm:inline font-semibold">Avisos</span>
-              </button>
-              <ThemeToggleButton />
-            </div>
-          </div>
-        </div>
-      </header>
+  {/* DIREITA: Avisos + Tema */}
+  <div className="flex items-center justify-end gap-2 sm:gap-3">
+    <button
+      onClick={() => setIsAvisosOpen(true)}
+      className="flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
+      aria-label="Abrir avisos da região"
+    >
+      <span className="text-base">⚠️</span>
+      <span className="hidden sm:inline">Avisos</span>
+    </button>
+    <ThemeToggleButton />
+  </div>
+</header>
+{/* === /HEADER === */}
 
-      {/* CHIPS FIXOS */}
+
+      {/* CHIPS FIXOS (textos mais claros para “evitar resposta única”) */}
       <div className="sticky top-16 sm:top-20 z-20 bg-white/90 dark:bg-neutral-900/90 backdrop-blur border-b border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto w-full max-w-5xl px-3 sm:px-4 py-2">
           <div className="flex flex-wrap items-center justify-center gap-2">
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quero opções de restaurantes")}
+              onClick={() => handleQuickAsk("Quero 5 opções de restaurantes variados em {região}, com nome e bairro")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Restaurantes"
             >
@@ -331,7 +345,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quero sugestões de passeios (barco, trilha, bugre)")}
+              onClick={() => handleQuickAsk("Quero 5 sugestões de passeios em {região} (barco, trilha, bugre), com ponto de partida")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Passeios"
             >
@@ -340,7 +354,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quais são as melhores praias agora?")}
+              onClick={() => handleQuickAsk("Quais são as melhores praias agora em {região}? Considere vento e ondas")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Praias"
             >
@@ -349,7 +363,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quero dicas gerais de hoje")}
+              onClick={() => handleQuickAsk("Quero dicas gerais para hoje em {região} (clima, trânsito, eventos)")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Dicas"
             >
