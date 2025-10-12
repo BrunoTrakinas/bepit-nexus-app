@@ -30,30 +30,32 @@ const portaDoServidor = process.env.PORT || 3002;
 aplicacaoExpress.use(express.json({ limit: "2mb" }));
 
 // ------------------------------ CORS ----------------------------------------
-function origemPermitida(origem) {
-  if (!origem) return true; // curl/Postman/health
-  try {
-    const url = new URL(origem);
-    if (url.hostname === "localhost") return true;
-    if (url.host === "bepitnexus.netlify.app") return true;
-    if (url.host === "bepit-nexus.netlify.app") return true;
-    if (url.host.endsWith(".netlify.app")) return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
+// Lista de origens permitidas
+const allowedOrigins = [
+  "http://localhost:5173", // Para seu teste local (ajuste a porta se for diferente)
+  "http://localhost:3000",
+  "https://bepitnexus.netlify.app",
+  "https://bepit-nexus.netlify.app"
+];
 
-aplicacaoExpress.use(
-  cors({
-    origin: (origin, callback) =>
-      origemPermitida(origin) ? callback(null, true) : callback(new Error("CORS: origem não permitida.")),
-    credentials: true,
-    allowedHeaders: ["Content-Type", "x-admin-key", "authorization"],
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-  })
-);
-aplicacaoExpress.options("*", cors());
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Permite requisições sem 'origin' (como Postman, apps mobile, etc.) E origens da nossa lista
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("CORS: Origem não permitida por política de segurança."));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "x-admin-key", "authorization"]
+};
+
+// Aplica o middleware do CORS para TODAS as requisições
+aplicacaoExpress.use(cors(corsOptions));
+// Garante que as requisições OPTIONS pré-voo sejam tratadas corretamente
+aplicacaoExpress.options("*", cors(corsOptions));
 
 // ============================== GEMINI REST v1 ===============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
