@@ -1,37 +1,77 @@
 // ============================================================================
-// Busca de parceiros tolerante a maiúsculas/acentos/typos (pg_trgm + unaccent).
-// Depende das funções SQL no Supabase:
-//   - public.search_parceiros(cidade_id uuid, categoria_norm text, p_term_norm text, p_limit int)
-//   - public.cidade_id_by_slug(slug text)
-// Requer extensões: unaccent, pg_trgm.
-// Suporta: isInitialSearch (N itens aleatórios; N = dinâmico ou 3), excludeIds (evita repetição)
-// Agora respeita "limiteDinamico" vindo do backend (v4.1).
+// BEPIT Nexus - Utilitário de Busca de Parceiros (v4.1)
+// ----------------------------------------------------------------------------
+// Objetivo:
+// - Realizar buscas tolerantes a acentos/maiúsculas/typos sobre a base de
+//   parceiros e dicas (RPC no Supabase).
+// - Respeitar "limite dinâmico" solicitado pelo usuário (ex.: "me dê 5
+//   restaurantes") na 1ª página e também em buscas de refinamento.
+// - Evitar repetição de itens já exibidos (excludeIds).
+//
+// Dependências no Supabase (lado SQL):
+// - Função RPC:   public.search_parceiros(p_cidade_id uuid,
+//                                         p_categoria_norm text,
+//                                         p_term_norm text,
+//                                         p_limit int)
+// - Função RPC:   public.cidade_id_by_slug(p_slug text) -> uuid
+// - Extensões:    unaccent, pg_trgm
+//
+// Notas:
+// - Este módulo não formata a resposta final ao usuário. Apenas retorna a
+//   lista "crua" de itens (id, nome, categoria, etc) para o orquestrador.
+// - A paginação “inteligente” da primeira página pega um universo maior via
+//   RPC, embaralha e recorta para o limite solicitado.
 // ============================================================================
 
 import { supabase } from "../../lib/supabaseClient.js";
 
-// -------------------- Normalizador com dicionário de typos -------------------
-export function normalizeTerm(s) {
-  if (!s) return "";
-  let out = String(s).toLowerCase();
+// --------------------------- Normalização de termos -------------------------
+/**
+ * Normaliza um termo para busca:
+ * - Lowercase
+ * - Remoção de acentos (NFD)
+ * - Colapsa espaços
+ * - Corrige typos comuns via dicionário
+ */
+export function normalizeTerm(valor) {
+  if (!valor) return "";
+  let out = String(valor).toLowerCase();
   out = out.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   out = out.replace(/\s+/g, " ").trim();
 
+  // Dicionário de correções (pode ser expandido conforme observações reais)
   const FIX = new Map([
-    // (… manter o dicionário completo já existente …)
     ["piconha", "picanha"],
     ["hamburquer", "hamburguer"],
+    ["hamburgueria", "hamburgueria"], // identidade (mantida por clareza)
     ["rodisio", "rodizio"],
+    ["rodízio", "rodizio"],
     ["pitza", "pizza"],
+    ["piza", "pizza"],
+    ["moqueca", "moqueca"],
+    ["bistro", "bistrô"],   // Em alguns bancos está sem acento; manter coerência
+    ["bistrô", "bistrô"],
+    ["frutos  do  mar", "frutos do mar"],
+    ["beira  mar", "beira mar"],
+    ["vista  para  o  mar", "vista para o mar"],
     ["reveion", "reveillon"],
-    // (demais entradas preservadas)
+    ["reveillon", "reveillon"],
   ]);
 
-  out = out.split(" ").map(w => FIX.get(w) || w).join(" ");
+  out = out
+    .split(" ")
+    .map((w) => FIX.get(w) || w)
+    .join(" ");
+
   return out;
 }
 
-// ------------------------------ Cidade (RPC) ---------------------------------
+// --------------------------- Resolução de cidade ----------------------------
+/**
+ * Retorna o UUID da cidade a partir do slug, usando RPC.
+ * @param {string} cidadeSlug
+ * @returns {Promise<string|null>}
+ */
 export async function getCidadeIdBySlug(cidadeSlug) {
   if (!cidadeSlug) return null;
   const { data, error } = await supabase.rpc("cidade_id_by_slug", { p_slug: cidadeSlug });
@@ -42,7 +82,8 @@ export async function getCidadeIdBySlug(cidadeSlug) {
   return data ?? null;
 }
 
-// ------------------------------ Util local ----------------------------------
+// --------------------------- Utilitário local -------------------------------
+/** Embaralha um array in-place (Fisher–Yates). */
 function shuffleInPlace(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -50,19 +91,19 @@ function shuffleInPlace(arr) {
   }
 }
 
-// ------------------------------ Busca principal ------------------------------
+// --------------------------- Busca tolerante (RPC) --------------------------
 /**
- * Buscar parceiros com tolerância e paginação inteligente.
+ * Busca parceiros com tolerância e paginação inteligente.
  *
- * @param {Object} opts
- *  - cidadeId?: string (uuid)
- *  - cidadeSlug?: string
- *  - categoria: string (ex.: 'churrascaria', 'restaurante' — minúsculas)
- *  - term?: string (termo livre; typos tratados pelo normalizeTerm)
- *  - limit?: number (default 10; ignorado quando isInitialSearch=true sem limite dinâmico)
- *  - isInitialSearch?: boolean (default false → 1ª página retorna N aleatórios)
- *  - excludeIds?: string[] (IDs já exibidos que não devem voltar)
- *  - limiteDinamico?: number | null (1..15)
+ * @param {Object} options
+ * @param {string=} options.cidadeId         - UUID da cidade (opcional se cidadeSlug for fornecido)
+ * @param {string=} options.cidadeSlug       - Slug da cidade (ex.: 'cabo-frio')
+ * @param {string}  options.categoria        - Categoria normalizada (ex.: 'restaurante', 'churrascaria')
+ * @param {string=} options.term             - Termo opcional para refinar (ex.: 'picanha', 'vista')
+ * @param {number=} options.limit            - Limite padrão (usado mais em refinamentos)
+ * @param {boolean=} options.isInitialSearch - Se é a 1ª página (default: false)
+ * @param {string[]=} options.excludeIds     - IDs já exibidos para evitar repetição
+ * @param {number|null=} options.limiteDinamico - Limite solicitado pelo usuário (1..15)
  *
  * @returns {Promise<{ok: boolean, items?: any[], error?: string}>}
  */
@@ -78,6 +119,7 @@ export async function buscarParceirosTolerante({
 }) {
   console.log("\n==================== INICIANDO BUSCA TOLERANTE (v4.1) ====================");
   try {
+    // Validação de categoria
     const categoriaNorm = (categoria || "").toLowerCase().trim();
     if (!categoriaNorm) {
       console.log("[DEBUG] Busca falhou: Categoria ausente.");
@@ -85,6 +127,7 @@ export async function buscarParceirosTolerante({
       return { ok: false, error: "Categoria ausente." };
     }
 
+    // Resolve cidade (UUID) via slug, se necessário
     let cidadeUUID = cidadeId || null;
     if (!cidadeUUID && cidadeSlug) {
       console.log(`[DEBUG] Buscando UUID para a cidade com slug: "${cidadeSlug}"`);
@@ -103,14 +146,18 @@ export async function buscarParceirosTolerante({
       return { ok: false, error: "cidadeId ou cidadeSlug obrigatório." };
     }
 
+    // Normaliza termo
     const termNorm = normalizeTerm(term || "");
 
-    // ---------- Limite para a chamada RPC ----------
-    // Se houver limite dinâmico e for a 1ª página, usamos um teto maior na RPC
-    // para permitir embaralhar e recortar no pós-processamento.
+    // ----------------------- Limites e estratégia ------------------------
+    // Alvo da 1ª página: respeita pedido do usuário (1..15), senão fallback 3
     const alvoInicial = Math.max(1, Math.min(15, Number(limiteDinamico || 3)));
+
+    // Limite da RPC:
+    // - Na primeira página, pedimos mais itens para poder embaralhar e cortar.
+    // - Em refinamentos, usamos o limite fornecido (limit) com teto de 50.
     const rpcLimit = isInitialSearch
-      ? Math.max(8, alvoInicial * 4) // busca "larga" para sortear e fatiar
+      ? Math.max(8, alvoInicial * 4)
       : Math.max(1, Math.min(50, limit || 10));
 
     const params = {
@@ -122,6 +169,7 @@ export async function buscarParceirosTolerante({
 
     console.log("[DEBUG] Parâmetros RPC search_parceiros:", params, "isInitialSearch=", isInitialSearch, "excludeIds=", excludeIds, "limiteDinamico=", limiteDinamico);
 
+    // Chamada RPC
     const { data, error } = await supabase.rpc("search_parceiros", params);
     if (error) {
       console.error("[DEBUG] !!! ERRO RPC search_parceiros:", error);
@@ -135,13 +183,14 @@ export async function buscarParceirosTolerante({
     // Excluir IDs já exibidos
     const excludeSet = new Set((excludeIds || []).filter(Boolean));
     if (excludeSet.size > 0) {
-      items = items.filter(p => p && p.id && !excludeSet.has(p.id));
+      items = items.filter((p) => p && p.id && !excludeSet.has(p.id));
       console.log(`[DEBUG] Após excludeIds, restaram ${items.length} itens.`);
     }
 
+    // Ordenação/aleatoriedade e corte final conforme tipo de busca
     if (isInitialSearch) {
       shuffleInPlace(items);
-      const finalLimit = alvoInicial; // usa limite dinâmico ou 3
+      const finalLimit = alvoInicial; // usa o limite dinâmico pedido ou 3
       items = items.slice(0, finalLimit);
       console.log(`[DEBUG] isInitialSearch: retornando ${items.length} aleatórios (limite: ${finalLimit}).`);
     } else {
