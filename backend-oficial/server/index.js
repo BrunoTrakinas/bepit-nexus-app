@@ -223,7 +223,7 @@ async function extrairEntidadesDaBusca(texto) {
   else if (tNorm.includes("arraial")) cidade = "Arraial do Cabo";
   else if (tNorm.includes("sao pedro") || tNorm.includes("são pedro")) cidade = "São Pedro da Aldeia";
 
-  // Termos úteis p/ ranking
+  // Termos úteis para ranking
   const DIC_TERMS = [
     "picanha","piconha","carne","churrasco","rodizio","rodízio","fraldinha","costela",
     "barato","barata","familia","família","romantico","romântico","vista","vista para o mar","rodizio",
@@ -534,7 +534,6 @@ async function lidarComNovaBusca({
 }
 
 // ============================== ROTAS =======================================
-
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
@@ -728,7 +727,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           idDaConversa: conversationId,
           isInitialSearch: true,
           excludeIds: [],
-          limiteDinamico // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+          limiteDinamico
         });
         respostaFinal = r.respostaFinal;
         parceirosSugeridos = r.parceirosSugeridos;
@@ -779,7 +778,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 });
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
-// (inalterado)
 aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
@@ -835,4 +833,33 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// HEALTHCHECKS BÁSICOS
+aplicacaoExpress.get("/", (_req, res) => {
+  res.status(200).send("BEPIT backend ativo ✅");
+});
+
+aplicacaoExpress.get("/ping", (_req, res) => {
+  res.status(200).json({ pong: true, ts: Date.now() });
+});
+
+// ---------------------------------------------------------------------------
+// STARTUP DO SERVIDOR (necessário no Render)
+const host = "0.0.0.0";
+aplicacaoExpress
+  .listen(portaDoServidor, host, () => {
+    console.log(`[BOOT] BEPIT ouvindo em http://${host}:${portaDoServidor}`);
+  })
+  .on("error", (err) => {
+    console.error("[BOOT] Falha ao subir servidor:", err);
+    process.exit(1);
+  });
+
+// Encerramento gracioso
+process.on("SIGTERM", () => {
+  console.log("[SHUTDOWN] Recebido SIGTERM. Encerrando...");
+  process.exit(0);
+});
+
+// Export para testes (opcional)
 export default aplicacaoExpress;
