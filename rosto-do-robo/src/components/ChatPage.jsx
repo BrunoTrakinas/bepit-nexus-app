@@ -336,7 +336,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
           <div className="flex flex-wrap items-center justify-center gap-2">
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quero 5 opções de restaurantes variados em {região}, com nome e bairro")}
+              onClick={() => handleQuickAsk("Restaurantes")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Restaurantes"
             >
@@ -345,7 +345,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quero 5 sugestões de passeios em {região} (barco, trilha, bugre), com ponto de partida")}
+              onClick={() => handleQuickAsk("Passeios")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Passeios"
             >
@@ -354,7 +354,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quais são as melhores praias agora em {região}? Considere vento e ondas")}
+              onClick={() => handleQuickAsk("Praias")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Praias"
             >
@@ -363,7 +363,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Quero dicas gerais para hoje em {região} (clima, trânsito, eventos)")}
+              onClick={() => handleQuickAsk("Dicas do dia")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Dicas"
             >
