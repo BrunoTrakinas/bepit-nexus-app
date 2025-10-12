@@ -1,12 +1,10 @@
 // ============================================================================
-// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v4.1
-// - Correção crítica: preservar conversationId vindo do frontend, com validação
-// - Limite dinâmico: "me dê 5 restaurantes", "quero 10 sugestões", etc.
-// - Paginação Inteligente (1ª página: até N opções aleatórias do banco; N = dinâmico ou 3)
-// - Fluxo de Refinamento ("mais opções" → pergunta de critérios → nova busca)
-// - Prioridade para carne/picanha (inclui "piconha"): churrascaria + restaurante
-// - Busca tolerante via RPC + pós-processamento (excludeIds / isInitialSearch)
-// - Mantém: /api/admin/*, /api/auth/login, health, diag, feedback
+// BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v4.1 (Diretiva Simplificada)
+// - (T1) Removido "limite dinâmico" por completo (extração e uso)
+// - (T2) Busca padronizada: inicial = máx 3 aleatórios; refinamento = máx 5 por relevância
+// - (T3) Muralha anti-alucinação nos prompts (Regra de Ouro inquebrável na resposta geral)
+// - (T4) Fluxo de intenção determinístico: busca → se 0, cai em resposta geral blindada
+// - Mantém: /api/admin/* (não incluído aqui), /api/auth/login (não incluído aqui), health, diag, feedback
 // ============================================================================
 
 import "dotenv/config";
@@ -139,24 +137,6 @@ function normalizarTexto(texto) {
   return String(texto || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 }
 
-/**
- * Extrai um limite numérico solicitado na mensagem do usuário.
- * Exemplos aceitos: "quero 5 opções", "me dê 10 sugestões", "2 passeios", "5 restaurantes".
- * Limite de segurança: 1..15
- */
-function extrairLimiteDaMensagem(texto) {
-  if (!texto) return null;
-  const match = String(texto).match(/\b(?:quero|me dê|me de|gostaria de|veja)?\s*(\d{1,2})\s+(opç(?:ões|oes)|sugest(?:ões|oes)|indicaç(?:ões|oes)|exemplos|passeios|restaurantes)\b/i);
-  if (match && match[1]) {
-    const num = parseInt(match[1], 10);
-    if (Number.isFinite(num) && num >= 1 && num <= 15) {
-      console.log(`[RAIO-X] Limite dinâmico de ${num} encontrado na mensagem.`);
-      return num;
-    }
-  }
-  return null;
-}
-
 async function construirHistoricoParaGemini(conversationId, limite = 12) {
   try {
     const { data, error } = await supabase
@@ -180,9 +160,9 @@ async function construirHistoricoParaGemini(conversationId, limite = 12) {
   }
 }
 
-function historicoParaTextoSimples(contents) {
+function historicoParaTextoSimplesWrapper(hc) {
   try {
-    return (contents || [])
+    return (hc || [])
       .map(b => {
         const role = b?.role || "user";
         const text = (b?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
@@ -252,31 +232,11 @@ async function extrairEntidadesDaBusca(texto) {
 }
 
 // ============================== PROMPTS =====================================
+
+// (T4) Intenção determinística: sem LLM para classificar.
+// Retorna "busca_parceiro" se bater palavra-chave; caso contrário, "pergunta_geral".
 async function analisarIntencaoDoUsuario(textoDoUsuario) {
-  if (forcarBuscaParceiro(textoDoUsuario)) return "busca_parceiro";
-
-  // Fallback simples via modelo
-  const prompt = `Classifique a frase do usuário em 'busca_parceiro' ou 'pergunta_geral'. Responda só com a string.\nFrase: "${textoDoUsuario}"`;
-  try {
-    const saida = await geminiGerarTexto(prompt);
-    const txt = (saida || "").trim().toLowerCase();
-    if (txt === "busca_parceiro" || txt === "pergunta_geral") return txt;
-  } catch {}
-  return "pergunta_geral";
-}
-
-function historicoParaTextoSimplesWrapper(hc) {
-  try {
-    return (hc || [])
-      .map(b => {
-        const role = b?.role || "user";
-        const text = (b?.parts?.[0]?.text || "").replace(/\s+/g, " ").trim();
-        return `- ${role}: ${text}`;
-      })
-      .join("\n");
-  } catch {
-    return "";
-  }
+  return forcarBuscaParceiro(textoDoUsuario) ? "busca_parceiro" : "pergunta_geral";
 }
 
 async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
@@ -298,18 +258,24 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   return await geminiGerarTexto(prompt);
 }
 
+// (T3) Prompt blindado (Regra de Ouro inquebrável) — NUNCA inventar estabelecimentos.
 async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
   const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const nomeRegiao = regiao?.nome || "Região dos Lagos";
+
   const prompt = [
     `Você é o BEPIT, um concierge amigável e especialista na região de ${nomeRegiao}.`,
-    "Se não houver resultados de parceiros, admita e ofereça ajuda em outros tópicos — sem fingir que tem resultados.",
+    "Sua principal função é responder perguntas gerais sobre a região (história, geografia, dicas de segurança, etc.).",
+    "**REGRA DE OURO INQUEBRÁVEL:** Você é **ESTRITAMENTE PROIBIDO** de inventar ou sugerir nomes de estabelecimentos comerciais (restaurantes, hotéis, passeios, lojas, etc.) que não foram fornecidos a você em uma lista de [Contexto].",
+    "Se o usuário pedir uma sugestão de estabelecimento e você não tiver uma lista de [Contexto], sua ÚNICA resposta permitida é dizer que não encontrou um parceiro cadastrado para aquela solicitação específica e perguntar se pode ajudar com outra coisa.",
+    "NUNCA finja que tem resultados. NUNCA use seu conhecimento geral para sugerir um nome comercial.",
     "",
     BEPIT_SYSTEM_PROMPT_APPENDIX,
     "",
     `[Histórico]:\n${historicoTexto}`,
     `[Pergunta]: "${pergunta}"`
   ].join("\n");
+
   return await geminiGerarTexto(prompt);
 }
 
@@ -346,13 +312,13 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
 }
 
 // ============================== BUSCA / REFINO ==============================
+// (T1) Removido por completo o parâmetro/uso de limite dinâmico
 async function ferramentaBuscarParceirosOuDicas({
   cidadesAtivas,
   argumentosDaFerramenta,
   textoOriginal,
   isInitialSearch = false,
-  excludeIds = [],
-  limiteDinamico = null
+  excludeIds = []
 }) {
   const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
@@ -382,7 +348,7 @@ async function ferramentaBuscarParceirosOuDicas({
     transporte: ["transfer","transporte","aluguel de carro","locadora","taxi","ônibus","onibus","rodoviária","rodoviaria"]
   };
 
-  // Priorização inteligente
+  // Priorização mínima: “carne/picanha” → churrascaria + restaurante
   let categoriasAProcurar = [];
   if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
 
@@ -401,7 +367,7 @@ async function ferramentaBuscarParceirosOuDicas({
     categoriasAProcurar = MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada].map(normalizarTexto);
   }
 
-  // Termo “inteligente”
+  // Termo opcional para RPC
   let termoDeBusca = null;
   if (sinaisCarne) termoDeBusca = "picanha";
   else if (sinaisVista) termoDeBusca = "vista";
@@ -412,20 +378,21 @@ async function ferramentaBuscarParceirosOuDicas({
   }
   if (!termoDeBusca && categoriasAProcurar.length > 0) termoDeBusca = categoriasAProcurar[0];
 
-  // Execução de buscas
+  // Execução de buscas com limites FIXOS:
+  // - inicial: coleta até 3 (aleatórios)
+  // - refinamento: coleta até 5 (por relevância)
   const agregados = [];
   const vistos = new Set();
-  const alvoInicial = Math.max(1, Math.min(15, Number(limiteDinamico || 3))); // limite dinâmico para a 1ª página
+  const alvoInicialFix = 3;
+  const alvoRefinoFix = 5;
 
   for (const cat of categoriasAProcurar) {
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
       term: termoDeBusca,
-      limit: Math.max(alvoInicial, 8), // RPC usa limite mais alto; corte final é feito depois
       isInitialSearch: isInitialSearch,
-      excludeIds: excludeIds,
-      limiteDinamico: limiteDinamico || null
+      excludeIds: Array.from(vistos) // evita repetir dentro do loop também
     });
 
     if (r.ok && Array.isArray(r.items)) {
@@ -436,17 +403,13 @@ async function ferramentaBuscarParceirosOuDicas({
         }
       }
     }
-    // Respeita o alvo da primeira página
-    if (isInitialSearch && agregados.length >= alvoInicial) break;
-    if (!isInitialSearch && agregados.length >= Math.max(5, Math.min(20, limiteDinamico || 8))) break;
+
+    if (isInitialSearch && agregados.length >= alvoInicialFix) break;
+    if (!isInitialSearch && agregados.length >= alvoRefinoFix) break;
   }
 
-  agregados.sort((a, b) => (a.tipo === "DICA" ? 1 : 0) - (b.tipo === "DICA" ? 1 : 0));
-
-  const limiteFinal = isInitialSearch
-    ? alvoInicial
-    : Math.max(1, Math.min(20, Number(limiteDinamico || 8)));
-
+  // Seleção final fixa
+  const limiteFinal = isInitialSearch ? alvoInicialFix : alvoRefinoFix;
   const limitados = agregados.slice(0, limiteFinal);
 
   try {
@@ -460,8 +423,7 @@ async function ferramentaBuscarParceirosOuDicas({
         excludeIds,
         categoriasTentadas: categoriasAProcurar,
         total_filtrado: limitados.length,
-        cidadeSlug,
-        limiteDinamico: limiteDinamico || null
+        cidadeSlug
       }
     });
   } catch {}
@@ -492,8 +454,7 @@ async function lidarComNovaBusca({
   cidadesAtivas,
   idDaConversa,
   isInitialSearch = true,
-  excludeIds = [],
-  limiteDinamico = null
+  excludeIds = []
 }) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
 
@@ -502,8 +463,7 @@ async function lidarComNovaBusca({
     argumentosDaFerramenta: entidades,
     textoOriginal: textoDoUsuario,
     isInitialSearch,
-    excludeIds,
-    limiteDinamico
+    excludeIds
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
@@ -523,6 +483,7 @@ async function lidarComNovaBusca({
     } catch {}
     return { respostaFinal, parceirosSugeridos };
   } else {
+    // (T4) Sem resultados → cai em resposta geral BLINDADA
     const respostaModelo = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
     const respostaFinal = finalizeAssistantResponse({
       modelResponseText: respostaModelo,
@@ -636,8 +597,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         cidadesAtivas,
         idDaConversa: conversationId,
         isInitialSearch: false,
-        excludeIds: parceirosJaSugeridos,
-        limiteDinamico: extrairLimiteDaMensagem(criteriosDeBusca)
+        excludeIds: parceirosJaSugeridos
       });
 
       await supabase.from("conversas").update({ aguardando_refinamento: false }).eq("id", conversationId);
@@ -711,14 +671,13 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       return res.status(200).json({ reply: perguntaRefinamento, conversationId });
     }
 
-    // ----- INTENÇÃO + BUSCA -----
+    // ----- INTENÇÃO + BUSCA (determinística) -----
     const intent = await analisarIntencaoDoUsuario(textoDoUsuario);
     let respostaFinal = "";
     let parceirosSugeridos = [];
 
     switch (intent) {
       case "busca_parceiro": {
-        const limiteDinamico = extrairLimiteDaMensagem(textoDoUsuario);
         const r = await lidarComNovaBusca({
           textoDoUsuario,
           historicoGemini,
@@ -726,8 +685,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           cidadesAtivas,
           idDaConversa: conversationId,
           isInitialSearch: true,
-          excludeIds: [],
-          limiteDinamico
+          excludeIds: []
         });
         respostaFinal = r.respostaFinal;
         parceirosSugeridos = r.parceirosSugeridos;
