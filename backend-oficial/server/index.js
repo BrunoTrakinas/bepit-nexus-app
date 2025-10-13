@@ -15,9 +15,63 @@ import { supabase } from "../lib/supabaseClient.js";
 
 import {
   finalizeAssistantResponse,
-  buildNoPartnerFallback,
-  BEPIT_SYSTEM_PROMPT_APPENDIX
+  buildNoPartnerFallback
+  // REMOVIDO da importação: BEPIT_SYSTEM_PROMPT_APPENDIX
 } from "./utils/bepitGuardrails.js";
+
+// ---------------------------------------------------------------------------
+// >>>>>>>>>>>>>>>>> PROMPT MESTRE DO BEPIT (v1.1) — SISTEMA <<<<<<<<<<<<<<<<<<
+// Mantemos o nome BEPIT_SYSTEM_PROMPT_APPENDIX para preservar a lógica existente.
+const BEPIT_SYSTEM_PROMPT_APPENDIX = `
+# 1. IDENTIDADE E MISSÃO (Quem Você é)
+- Você é o BEPIT, um concierge de turismo especialista, amigável e confiável, focado 100% na Região dos Lagos.
+- Sua missão é fornecer informações claras, úteis e 100% precisas, baseadas EXCLUSIVamente nos dados fornecidos no contexto de cada pergunta.
+- Você NUNCA inventa informações, não usa conhecimento externo e não faz suposições. Se a informação não foi fornecida a você, você não sabe.
+
+# 2. DIRETRIZES GERAIS DE COMPORTAMENTO (Como Você Age)
+- SEJA PROATIVO E PRESTATIVO: Sempre termine suas respostas de uma forma que convide à continuação da conversa ou ofereça o próximo passo lógico.
+- PRIORIZE PARCEIROS: Ao dar sugestões, sempre dê preferência aos dados vindos da nossa base de "Parceiros".
+- SEJA HONESTO: Se você não encontrar a informação solicitada nos dados fornecidos, informe ao usuário de forma amigável. Ex: "Não encontrei um parceiro cadastrado com essa característica, mas posso ajudar com outra coisa?".
+- FOCO E SEGURANÇA: Mantenha o foco em turismo. Não forneça conselhos médicos, financeiros ou de segurança pessoal.
+
+# 3. MÓDULOS DE RACIOCÍNIO (Como Você Pensa)
+
+## 3.1 Módulo: Resposta Padrão e Refinamento Conversacional Passivo
+- Quando receber uma lista de parceiros, apresente de 1 a 3 opções de forma clara e resumida.
+- Após listar as opções, SEMPRE aplique o "Refinamento Conversacional Passivo": ofereça ajuda para filtrar mais os resultados.
+- EXEMPLO DE REFINAMENTO: "...para te ajudar a decidir, se quiser posso filtrar por opções mais românticas, ideais para levar crianças ou com melhor custo-benefício. É só me dizer o que você procura!"
+
+## 3.2 Módulo: Planejador de Roteiros
+- Se a tarefa for "criar um roteiro", use a lista de parceiros e pontos turísticos fornecida.
+- Organize a resposta por "Dia 1", "Dia 2", etc., e separe em "Manhã", "Tarde" e "Noite".
+- Crie uma narrativa envolvente, descrevendo a experiência que o turista terá.
+
+## 3.3 Módulo: Agenda e "O que fazer hoje?"
+- Quando receber dados da nossa "Agenda", apresente-os como os eventos para a data solicitada.
+- Se não houver eventos, sugira opções da lista de "Pontos Turísticos" como alternativas.
+
+## 3.4 Módulo: Waze do Turismo
+- Quando receber um "status_local" (ex: "Lotado"), traduza para uma linguagem natural e útil.
+- EXEMPLO: "Atenção, a Praia do Forno está bastante movimentada agora, talvez seja melhor visitá-la em outro horário se você procura tranquilidade."
+
+## 3.5 Módulo: Concierge do Clima e Marés (Versão Aprimorada)
+- Quando receber dados de clima e mar, sua função é ser um "tradutor" e "conselheiro" para o turista. Sua tarefa principal é conectar os dados brutos a atividades práticas.
+- Regra para Temperatura: Se a temperatura da água estiver agradável (acima de 22°C), sugira que "o mar está ótimo para um mergulho".
+- Regra para Passeio de Barco: Se a altura das ondas (waveHeight) e a velocidade do vento (windSpeed) estiverem baixas, sugira que "o dia está ideal e seguro para um passeio de barco".
+- Regra para Windsurf/Kitesurf: Se a velocidade do vento estiver moderada ou alta (acima de 5 m/s), mas as ondas não muito altas, mencione que "as condições estão favoráveis para a prática de esportes a vela, como windsurf ou kitesurf".
+- Regra para Pesca: Se os dados de maré (dados_mare) mostrarem os horários de maré alta e baixa, você pode informar que "os períodos de mudança de maré, próximo a esses horários, costumam ser bons momentos para a pesca".
+- EXEMPLO DE RESPOSTA INTEGRADA: "Hoje o mar em Arraial está com temperatura de 23°C, ótimo para um mergulho! Como o vento está fraco e as ondas baixas, o dia está ideal e seguro para um passeio de barco. A maré baixa será por volta das 14h."
+
+# 4. DADOS CONTEXTUAIS DA CONSULTA ATUAL
+- [ESSA SEÇÃO SERÁ PREENCHIDA AUTOMATICAMENTE PELO BACKEND]
+- PERGUNTA ORIGINAL DO USUÁRIO: "[aqui entrará a pergunta do usuário]"
+- DADOS RETORNADOS DO BANCO: "[aqui entrarão os dados que o Orquestrador de Buscas encontrou]"
+- DADOS DA API DE CLIMA: "[aqui entrarão os dados do clima e marés, já salvos no nosso banco]"
+
+# 5. TAREFA FINAL
+Com base em sua IDENTIDADE, suas DIRETRIZES, seus MÓDULOS DE RACIOCÍNIO e os DADOS CONTEXTUAIS fornecidos, formule a melhor e mais útil resposta para o usuário.
+`.trim();
+// ---------------------------------------------------------------------------
 
 import {
   buscarParceirosTolerante,
@@ -139,6 +193,14 @@ function normalizarTexto(texto) {
   return String(texto || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 }
 
+// Saudação (upgrade anterior)
+function isSaudacao(texto) {
+  const t = normalizarTexto(texto);
+  const saudacoes = ["oi", "ola", "bom dia", "boa tarde", "boa noite", "e aí", "tudo bem"];
+  // Verifica se o texto é EXATAMENTE uma das saudações
+  return saudacoes.includes(t);
+}
+
 async function construirHistoricoParaGemini(conversationId, limite = 12) {
   try {
     const { data, error } = await supabase
@@ -245,23 +307,55 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
   const prompt = [
-    "Você é um assistente de consulta de dados. Sua única função é apresentar os resultados encontrados de forma clara e objetiva.",
-    "Apresente os estabelecimentos do [Contexto] em formato de lista. Use os dados fornecidos e nada mais.",
-    "Comece a resposta diretamente com 'Claro, encontrei estas opções para você:' ou frase similar e apresente a lista.",
-    "DEPOIS da lista completa, faça UMA pergunta curta para oferecer mais ajuda (ex.: 'Quer que eu refine por preço ou estilo?').",
+    // LISTA RESUMIDA, NUMERADA, NOME EM NEGRITO
+    "Você é um assistente de consulta. Sua única função é apresentar os resultados de uma busca em uma lista numerada.",
+    "Para cada estabelecimento no [Contexto], crie um item na lista com o NOME em negrito, seguido por um traço e a DESCRIÇÃO.",
+    "NÃO inclua endereço, contato ou qualquer outra informação. Apenas NOME e DESCRIÇÃO.",
+    "A lista deve ser clara e objetiva.",
+    "Após a lista, finalize com a pergunta: 'Alguma dessas opções te interessou? Me diga o número ou o nome para ver mais detalhes.'",
     "",
     BEPIT_SYSTEM_PROMPT_APPENDIX,
     "",
     `[Contexto]: ${contextoParceiros}`,
     `[Histórico]:\n${historicoTexto}`,
     `[Região]: ${regiaoNome}`,
-    `[Pergunta]: "${pergunta}"`
+    `[Pergunta do Usuário]: "${pergunta}"`
+  ].join("\n");
+  return await geminiGerarTexto(prompt);
+}
+
+// Nova função para detalhar um parceiro específico
+async function gerarDetalhesDoParceiro(pergunta, historicoContents, parceiro, regiaoNome = "") {
+  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
+  const contextoParceiro = JSON.stringify(parceiro ?? {}, null, 2);
+  const prompt = [
+    "Você é um assistente de consulta. Sua única função é apresentar todos os detalhes do estabelecimento fornecido no [Contexto] de forma organizada e completa.",
+    "Use um tom conversacional, amigável e informativo. Destaque pontos-chave com **negrito** quando fizer sentido.",
+    "Apresente as informações usando títulos claros para cada dado (ex: 'Endereço:', 'Contato:', 'Faixa de Preço:').",
+    "Se o parceiro tiver um 'beneficio_bepit', destaque-o.",
+    "Ao final, inclua a seguinte nota de rodapé OBRIGATORIAMENTE: 'Observação: os preços e horários podem sofrer alterações. Recomendamos entrar em contato com o estabelecimento para confirmar.'",
+    "Se o usuário perguntar por cardápio ou fotos, e essa informação estiver no [Contexto], apresente-a.",
+    "",
+    BEPIT_SYSTEM_PROMPT_APPENDIX,
+    "",
+    `[Contexto]: ${contextoParceiro}`,
+    `[Histórico]:\n${historicoTexto}`,
+    `[Região]: ${regiaoNome}`,
+    `[Pergunta do Usuário]: "${pergunta}"`
   ].join("\n");
   return await geminiGerarTexto(prompt);
 }
 
 // (T3) Prompt blindado (Regra de Ouro inquebrável) — NUNCA inventar estabelecimentos.
 async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
+  // --- NOVA LÓGICA DE SAUDAÇÃO ---
+  if (isSaudacao(pergunta)) {
+    const nomeRegiao = regiao?.nome || "Região dos Lagos";
+    const respostaSaudacao = `Olá! Seja bem-vindo(a) à ${nomeRegiao}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região, todos verificados por nossa equipe. Aqui você encontra passeios organizados, restaurantes de qualidade e serviços testados. Nada de ciladas. Como posso te ajudar a ter uma experiência incrível hoje?`;
+    return respostaSaudacao; // Retorna a resposta diretamente
+  }
+  // --- FIM DA NOVA LÓGICA ---
+
   const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const nomeRegiao = regiao?.nome || "Região dos Lagos";
 
@@ -444,6 +538,7 @@ async function ferramentaBuscarParceirosOuDicas({
       beneficio_bepit: p.beneficio_bepit,
       faixa_preco: p.faixa_preco,
       fotos_parceiros: Array.isArray(p.fotos_parceiros) ? p.fotos_parceiros : [],
+      links_cardapio_precos: p.links_cardapio_precos ?? null,
       cidade_id: p.cidade_id
     }))
   };
@@ -585,6 +680,68 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     const historicoGemini = await construirHistoricoParaGemini(conversationId, 12);
 
+    // ====== (NOVA) DETECÇÃO DE PEDIDOS DE MÍDIA ANTES DE ESCOLHA DIRETA ======
+    // Fotos / Cardápio / Preços
+    const pedidoMidia = (() => {
+      const t = normalizarTexto(textoDoUsuario);
+      const querFotos = /(foto|fotos|imagem|imagens|ver fotos)/.test(t);
+      const querMenu  = /(cardapio|cardápio|preco|preços|preco|tabela|menu)/.test(t);
+      return { querFotos, querMenu, any: (querFotos || querMenu) };
+    })();
+
+    if (pedidoMidia.any) {
+      // Se existe parceiro em foco → retorna links correspondentes
+      if (conversaAtual?.parceiro_em_foco) {
+        const foco = conversaAtual.parceiro_em_foco || {};
+        const fotos = Array.isArray(foco.fotos_parceiros) ? foco.fotos_parceiros.filter(Boolean) : [];
+        const temCardapio = foco.links_cardapio_precos && (Array.isArray(foco.links_cardapio_precos) ? foco.links_cardapio_precos.length > 0 : typeof foco.links_cardapio_precos === "object");
+
+        let reply = "";
+        const linhas = [];
+
+        if (pedidoMidia.querFotos && fotos.length > 0) {
+          linhas.push("Seguem algumas fotos do estabelecimento:");
+        } else if (pedidoMidia.querFotos) {
+          linhas.push("Não encontrei fotos cadastradas para este estabelecimento.");
+        }
+
+        if (pedidoMidia.querMenu && temCardapio) {
+          linhas.push("Posso te mostrar o cardápio/tabela de preços. Aqui estão os links disponíveis:");
+        } else if (pedidoMidia.querMenu) {
+          linhas.push("Não encontrei cardápio ou tabela de preços cadastrados para este estabelecimento.");
+        }
+
+        reply = linhas.join("\n");
+
+        // Monta anexos/links
+        const extra = {};
+        if (pedidoMidia.querFotos && fotos.length > 0) {
+          extra.photoLinks = fotos;
+          reply += "\n\n• Fotos: (use os botões de visualização do app)";
+        }
+        if (pedidoMidia.querMenu && temCardapio) {
+          const lista = Array.isArray(foco.links_cardapio_precos) ? foco.links_cardapio_precos : [foco.links_cardapio_precos];
+          const links = lista
+            .map((l, i) => (typeof l === "string" ? `• Cardápio ${i + 1}: ${l}` : null))
+            .filter(Boolean)
+            .join("\n");
+          if (links) reply += `\n${links}`;
+        }
+
+        return res.status(200).json({
+          reply,
+          conversationId,
+          intent: "midia_parceiro",
+          ...extra
+        });
+      } else {
+        // Sem parceiro em foco → pergunta de esclarecimento
+        const reply = "Claro! Mas para eu poder te mostrar, preciso saber: de qual estabelecimento você gostaria de ver as fotos ou o cardápio?";
+        return res.status(200).json({ reply, conversationId, intent: "midia_pedir_especificacao" });
+      }
+    }
+    // ========================================================================
+
     // ----- REFINO EM ANDAMENTO -----
     if (conversaAtual?.aguardando_refinamento) {
       const criteriosDeBusca = textoDoUsuario;
@@ -616,9 +773,25 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         await supabase.from("conversas").update({ parceiro_em_foco: parceiroSelecionado }).eq("id", conversationId);
       } catch {}
 
-      const respostaModelo = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, [parceiroSelecionado], regiao?.nome);
+      // Detalhes do parceiro (nova função)
+      const respostaModelo = await gerarDetalhesDoParceiro(textoDoUsuario, historicoGemini, parceiroSelecionado, regiao?.nome);
+      let respostaFinal = respostaModelo;
+
+      // Anexos contextuais
+      const temFotos = Array.isArray(parceiroSelecionado.fotos_parceiros) && parceiroSelecionado.fotos_parceiros.length > 0;
+      if (temFotos) {
+        respostaFinal += `\n\nEu também tenho algumas fotos do local. Gostaria de ver?`;
+      }
+      const temCardapio = parceiroSelecionado.links_cardapio_precos && (
+        (Array.isArray(parceiroSelecionado.links_cardapio_precos) && parceiroSelecionado.links_cardapio_precos.length > 0) ||
+        typeof parceiroSelecionado.links_cardapio_precos === "object"
+      );
+      if (temCardapio) {
+        respostaFinal += `\n\nPosso te mostrar o cardápio ou a tabela de preços. Você quer dar uma olhada?`;
+      }
+
       const respostaCurtaSegura = finalizeAssistantResponse({
-        modelResponseText: respostaModelo,
+        modelResponseText: respostaFinal,
         foundPartnersList: [parceiroSelecionado],
         mode: "partners"
       });
