@@ -2,7 +2,7 @@
 // BEPIT Nexus - Servidor (Express) — Orquestrador Lógico v4.1 (Diretiva Simplificada)
 // - (T1) Removido "limite dinâmico" por completo (extração e uso)
 // - (T2) Busca padronizada: inicial = máx 3 aleatórios; refinamento = máx 5 por relevância
-// - (T3) Muralha anti-alucinação nos prompts (Regra de Ouro inquebrável)
+// - (T3) Muralha anti-alucinação nos prompts (Regra de Ouro inquebrável na resposta geral)
 // - (T4) Fluxo de intenção determinístico: busca → se 0, cai em resposta geral blindada
 // - Mantém: /api/admin/* (não incluído aqui), /api/auth/login (não incluído aqui), health, diag, feedback
 // ============================================================================
@@ -15,8 +15,8 @@ import { supabase } from "../lib/supabaseClient.js";
 
 import {
   finalizeAssistantResponse,
-  buildNoPartnerFallback
-  // BEPIT_SYSTEM_PROMPT_APPENDIX // substituído pelo PROMPT_MESTRE_BEPIT_V13
+  buildNoPartnerFallback,
+  BEPIT_SYSTEM_PROMPT_APPENDIX
 } from "./utils/bepitGuardrails.js";
 
 import {
@@ -32,7 +32,7 @@ aplicacaoExpress.use(express.json({ limit: "2mb" }));
 // ------------------------------ CORS ----------------------------------------
 // Lista de origens permitidas
 const allowedOrigins = [
-  "http://localhost:5173",
+  "http://localhost:5173", // Para seu teste local (ajuste a porta se for diferente)
   "http://localhost:3000",
   "https://bepitnexus.netlify.app",
   "https://bepit-nexus.netlify.app"
@@ -40,6 +40,7 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
+    // Permite requisições sem 'origin' (como Postman, apps mobile, etc.) E origens da nossa lista
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -51,7 +52,9 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "x-admin-key", "authorization"]
 };
 
+// Aplica o middleware do CORS para TODAS as requisições
 aplicacaoExpress.use(cors(corsOptions));
+// Garante que as requisições OPTIONS pré-voo sejam tratadas corretamente
 aplicacaoExpress.options("*", cors(corsOptions));
 
 // ============================== GEMINI REST v1 ===============================
@@ -131,60 +134,9 @@ async function geminiGerarTexto(texto) {
   return await gerarConteudoComREST(modelo, texto);
 }
 
-// ============================== PROMPT MESTRE (v1.3) ========================
-// Substitui o prompt anterior pela versão v1.3 exatamente como especificada.
-const PROMPT_MESTRE_BEPIT_V13 = `
-# 1. IDENTIDADE E MISSÃO
-- Você é o BEPIT, um concierge de turismo especialista e confiável na Região dos Lagos.
-- Sua missão é fornecer informações precisas baseadas EXCLUSIVAMENTE nos dados fornecidos. Você NUNCA usa conhecimento externo.
-
-# 2. DIRETRIZES GERAIS
-- Seja proativo, amigável e honesto.
-- Priorize sempre os parceiros cadastrados.
-
-# 3. MÓDULO DE RACIOCÍNIO: CONCIERGE DE CLIMA, MARÉS E ATIVIDADES CONTEXTUAIS
-- Sua função é ser um "conselheiro" para o turista, conectando dados brutos a atividades práticas e contextuais.
-- **REGRA DE OURO DE CONTEXTO:** Você DEVE usar a "HORA ATUAL" fornecida para dar sugestões apropriadas.
-
-- **SE FOR DE MANHÃ (até 10:00):**
-    - Se \`ondas\` e \`vento\` estiverem baixos, sua sugestão principal deve ser um **passeio de barco**. Ex: "O dia está simplesmente perfeito para um passeio de barco agora pela manhã!"
-
-- **SE FOR "MEIO DO DIA" (das 10:01 às 14:00):**
-    - Se \`ondas\` e \`vento\` estiverem baixos, você ainda pode sugerir passeio de barco, mas com um tom de "última chamada". Ex: "O tempo está ótimo para um passeio de barco! Se você ainda conseguir uma vaga em alguma embarcação, vale muito a pena!"
-    - Se as condições do mar **não** estiverem boas para barco, sua sugestão alternativa deve ser o **Shopping Park Lagos**. Ex: "O mar está um pouco agitado para passeios agora, mas é uma ótima oportunidade para conhecer o Shopping Park Lagos em Cabo Frio."
-
-- **SE FOR DE TARDE (das 14:01 às 17:00):**
-    - **NUNCA MAIS** sugira passeio de barco.
-    - Se o tempo estiver bom (sol/sem chuva), sua sugestão principal deve ser **curtir uma praia**. Ex: "A tarde está linda e o sol ainda está forte, perfeito para aproveitar a praia!"
-
-- **SE FOR FIM DE TARDE / NOITE (a partir das 17:01):**
-    - **NUNCA** sugira atividades de praia ou barco como algo a se fazer "agora".
-    - Use a temperatura para contextualizar sugestões noturnas.
-    - **EXEMPLO DE SUGESTÃO NOTURNA:** "A noite em Búzios está muito agradável, com cerca de 26°C. É uma temperatura perfeita para uma caminhada pela Rua das Pedras ou para explorar o polo gastronômico do bairro da Passagem em Cabo Frio."
-    - Você pode, opcionalmente, mencionar como o dia esteve: "O mar esteve ótimo para mergulho hoje..." mas a sua sugestão de ação deve ser para a noite.
-
-- **REGRAS ADICIONAIS (qualquer horário):**
-    - Se a \`temperatura da água\` estiver agradável (>22°C), mencione que "o mar está ótimo para um mergulho".
-    - Se o \`vento\` estiver moderado/alto (>5 m/s), mencione que "as condições estão favoráveis para esportes a vela, como windsurf ou kitesurf".
-    - Se houver dados de maré, informe os horários e a dica sobre a pesca.
-
-# 4. DADOS CONTEXTUAIS
-- HORA ATUAL: [aqui entrará a hora local, ex: "21"]
-- [OUTROS DADOS...]
-
-# 5. TAREFA FINAL
-Com base em todas as suas regras e nos dados contextuais (especialmente a HORA ATUAL), formule a melhor e mais útil resposta.
-`.trim();
-
 // ============================== HELPERS =====================================
 function normalizarTexto(texto) {
   return String(texto || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-}
-
-function isSaudacao(texto) {
-  const t = normalizarTexto(texto);
-  const saudacoes = ["oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "e aí", "tudo bem"];
-  return saudacoes.includes(t);
 }
 
 async function construirHistoricoParaGemini(conversationId, limite = 12) {
@@ -224,6 +176,24 @@ function historicoParaTextoSimplesWrapper(hc) {
   }
 }
 
+// ======== (NOVO) DETECTORES DE CLIMA E ENTIDADES BÁSICAS PARA CLIMA =========
+function isPerguntaClima(texto) {
+  const t = normalizarTexto(texto);
+  const termos = [
+    "clima", "tempo", "previsao", "previsão", "vento", "mar", "marea", "maré",
+    "ondas", "onda", "temperatura", "graus", "calor", "frio", "chovendo", "chuva"
+  ];
+  return termos.some(k => t.includes(k));
+}
+
+function mencionaRegiaoSemCidade(texto) {
+  const t = normalizarTexto(texto);
+  const temRegiao = ["regiao", "região", "regiao dos lagos", "região dos lagos", "na regiao", "na região"].some(k => t.includes(k));
+  const cidades = ["cabo frio", "arraial do cabo", "arraial", "buzios", "búzios", "armacao dos buzios", "armação dos búzios"];
+  const temCidade = cidades.some(c => t.includes(c));
+  return temRegiao && !temCidade;
+}
+
 // ============================== HEURÍSTICA DE INTENÇÃO ======================
 const PALAVRAS_CHAVE = {
   comida: ["restaurante", "restaurantes", "almoço", "almoco", "jantar", "comer", "comida", "picanha", "piconha", "carne", "churrasco", "pizza", "pizzaria", "peixe", "frutos do mar", "moqueca", "rodizio", "rodízio", "lanchonete", "burger", "hamburguer", "hambúrguer", "bistrô", "bistro"],
@@ -231,17 +201,9 @@ const PALAVRAS_CHAVE = {
   bebidas: ["bar", "bares", "chopp", "chope", "drinks", "pub", "boteco"],
   passeios: ["passeio", "passeios", "barco", "lancha", "escuna", "trilha", "trilhas", "tour", "buggy", "quadriciclo", "city tour", "catamarã", "catamara", "mergulho", "snorkel", "gruta", "ilha"],
   praias: ["praia", "praias", "faixa de areia", "bandeira azul", "mar calmo", "mar forte"],
-  transporte: ["transfer", "transporte", "alugar carro", "aluguel de carro", "uber", "taxi", "ônibus", "onibus", "rodoviária", "rodoviaria"]
+  transporte: ["transfer", "transporte", "alugar carro", "aluguel de carro", "uber", "taxi", "ônibus", "onibus", "rodoviária", "rodoviaria"],
+  // (Clima) — mantido fora da intenção determinística; usaremos os detectores dedicados acima
 };
-
-// ——— Gatilhos para CLIMA/MAR/MARÉS (inclui termos novos) ———
-const CLIMA_GATILHOS = [
-  "clima", "tempo", "vento", "ventos",
-  "maré", "mare", "marés", "mares", "ondulação", "ondas",
-  "água", "agua", "chuva", "chuvas",
-  // novos gatilhos solicitados:
-  "temperatura", "graus", "calor", "frio", "chovendo"
-];
 
 function forcarBuscaParceiro(texto) {
   const t = normalizarTexto(texto);
@@ -251,12 +213,7 @@ function forcarBuscaParceiro(texto) {
   return false;
 }
 
-function pedeClima(texto) {
-  const t = normalizarTexto(texto);
-  return CLIMA_GATILHOS.some(p => t.includes(p));
-}
-
-// -------- ENTIDADES (cidade + termos) --------
+// -------- ENTIDADES (cidade + termos) COM SINAIS DE "CARNE/PICANHA" --------
 async function extrairEntidadesDaBusca(texto) {
   const tNorm = normalizarTexto(texto || "");
 
@@ -297,15 +254,16 @@ async function extrairEntidadesDaBusca(texto) {
 
 // ============================== PROMPTS =====================================
 
+// (T4) Intenção determinística: sem LLM para classificar.
+// Retorna "busca_parceiro" se bater palavra-chave; caso contrário, "pergunta_geral".
 async function analisarIntencaoDoUsuario(textoDoUsuario) {
   return forcarBuscaParceiro(textoDoUsuario) ? "busca_parceiro" : "pergunta_geral";
 }
 
 async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros, regiaoNome = "") {
+  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
   const prompt = [
-    PROMPT_MESTRE_BEPIT_V13,
-    "",
     "Você é um assistente de consulta. Sua única função é apresentar os resultados de uma busca em uma lista numerada.",
     "Para cada estabelecimento no [Contexto], crie um item na lista com o NOME em negrito, seguido por um traço e a DESCRIÇÃO.",
     "NÃO inclua endereço, contato ou qualquer outra informação. Apenas NOME e DESCRIÇÃO.",
@@ -318,50 +276,54 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   return await geminiGerarTexto(prompt);
 }
 
-async function gerarDetalhesDoParceiro(pergunta, historicoContents, parceiro, regiaoNome = "") {
-  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
-  const contextoParceiro = JSON.stringify(parceiro ?? {}, null, 2);
-  const prompt = [
-    PROMPT_MESTRE_BEPIT_V13,
-    "",
-    "Você é um assistente de consulta. Sua única função é apresentar todos os detalhes do estabelecimento fornecido no [Contexto] de forma organizada e completa.",
-    "Apresente as informações usando títulos claros para cada dado (ex: 'Endereço:', 'Contato:', 'Faixa de Preço:').",
-    "Se o parceiro tiver um 'beneficio_bepit', destaque-o.",
-    "Ao final, inclua a seguinte nota de rodapé OBRIGATORIAMENTE: 'Observação: os preços e horários podem sofrer alterações. Recomendamos entrar em contato com o estabelecimento para confirmar.'",
-    "Se o usuário perguntar por cardápio ou fotos, e essa informação estiver no [Contexto], apresente-a.",
-    "",
-    `[Contexto]: ${contextoParceiro}`,
-    `[Histórico]:\n${historicoTexto}`,
-    `[Pergunta do Usuário]: "${pergunta}"`
-  ].join("\n");
-  return await geminiGerarTexto(prompt);
-}
-
-// Prompt blindado + saudação
-async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
-  if (isSaudacao(pergunta)) {
+// (T3) Prompt blindado (Regra de Ouro inquebrável) — NUNCA inventar estabelecimentos.
+// >>> Alteração 1: anti-repetição de saudação (verificação do histórico vazio) <<<
+// >>> Alteração 2: suporte a clima comparativo (array de cidades) <<<
+async function gerarRespostaGeral(pergunta, historicoContents, regiao, climaComparativo = null) {
+  // --- NOVA LÓGICA DE SAUDAÇÃO (anti-repetição) ---
+  if (isSaudacao(pergunta) && historicoContents.length === 0) {
     const nomeRegiao = regiao?.nome || "Região dos Lagos";
     const respostaSaudacao = `Olá! Seja bem-vindo(a) à ${nomeRegiao}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região, todos verificados por nossa equipe. Aqui você encontra passeios organizados, restaurantes de qualidade e serviços testados. Nada de ciladas. Como posso te ajudar a ter uma experiência incrível hoje?`;
     return respostaSaudacao;
   }
+  // --- FIM DA NOVA LÓGICA ---
 
   const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const nomeRegiao = regiao?.nome || "Região dos Lagos";
 
+  // Extensão local do Prompt Mestre: adiciona a Regra de Resumo da Região no módulo de clima
+  const PROMPT_CLIMA_REGIAO_APPENDIX =
+    "\n[Módulo 3.5 — Concierge do Clima: Regra para Resumo da Região]\n" +
+    "Se você receber uma lista de dados climáticos para múltiplas cidades, sua tarefa é criar um resumo comparativo e conciso para o usuário. " +
+    "Comece com uma frase como \"O tempo na Região dos Lagos está variado hoje!\". Em seguida, resuma a condição de cada cidade. " +
+    "Ex.: \"Em Cabo Frio, o céu está com poucas nuvens e 25°C. Já em Búzios, está ensolarado com 26°C...\"";
+
+  const blocoClimaComparativo = climaComparativo
+    ? `\n[DadosClimaRegiao]: ${JSON.stringify(climaComparativo, null, 2)}\n`
+    : "";
+
   const prompt = [
-    PROMPT_MESTRE_BEPIT_V13,
-    "",
     `Você é o BEPIT, um concierge amigável e especialista na região de ${nomeRegiao}.`,
     "Sua principal função é responder perguntas gerais sobre a região (história, geografia, dicas de segurança, etc.).",
     "**REGRA DE OURO INQUEBRÁVEL:** Você é **ESTRITAMENTE PROIBIDO** de inventar ou sugerir nomes de estabelecimentos comerciais (restaurantes, hotéis, passeios, lojas, etc.) que não foram fornecidos a você em uma lista de [Contexto].",
     "Se o usuário pedir uma sugestão de estabelecimento e você não tiver uma lista de [Contexto], sua ÚNICA resposta permitida é dizer que não encontrou um parceiro cadastrado para aquela solicitação específica e perguntar se pode ajudar com outra coisa.",
     "NUNCA finja que tem resultados. NUNCA use seu conhecimento geral para sugerir um nome comercial.",
     "",
+    BEPIT_SYSTEM_PROMPT_APPENDIX + PROMPT_CLIMA_REGIAO_APPENDIX,
+    "",
+    blocoClimaComparativo,
     `[Histórico]:\n${historicoTexto}`,
     `[Pergunta]: "${pergunta}"`
   ].join("\n");
 
   return await geminiGerarTexto(prompt);
+}
+
+// -------------------- SAUDAÇÃO: Helper pedido anteriormente -----------------
+function isSaudacao(texto) {
+  const t = normalizarTexto(texto);
+  const saudacoes = ["oi", "ola", "bom dia", "boa tarde", "boa noite", "e ai", "e aí", "tudo bem"];
+  return saudacoes.includes(t);
 }
 
 function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
@@ -397,6 +359,7 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
 }
 
 // ============================== BUSCA / REFINO ==============================
+// (T1) Removido por completo o parâmetro/uso de limite dinâmico
 async function ferramentaBuscarParceirosOuDicas({
   cidadesAtivas,
   argumentosDaFerramenta,
@@ -411,6 +374,7 @@ async function ferramentaBuscarParceirosOuDicas({
   const sinaisCarne = ["picanha","piconha","carne","churrasco","rodizio","rodízio"].some(s => textoN.includes(s));
   const sinaisVista = ["vista","vista para o mar","beira mar","orla"].some(s => textoN.includes(s));
 
+  // Resolve cidade (slug) a partir da lista ativa
   const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   let cidadeSlug = "";
   if (cidadeProcurada) {
@@ -421,6 +385,7 @@ async function ferramentaBuscarParceirosOuDicas({
   }
   if (!cidadeSlug && cidadesValidas.length > 0) cidadeSlug = cidadesValidas[0].slug;
 
+  // Mapa macro → categorias DB
   const MAPA_CESTA_PARA_CATEGORIAS_DB = {
     comida: ["churrascaria","restaurante","pizzaria","lanchonete","frutos do mar","sushi","padaria","cafeteria","bistrô","bistro","hamburgueria","pizza"],
     bebidas: ["bar","pub","cervejaria","wine bar","balada","boteco"],
@@ -430,6 +395,7 @@ async function ferramentaBuscarParceirosOuDicas({
     transporte: ["transfer","transporte","aluguel de carro","locadora","taxi","ônibus","onibus","rodoviária","rodoviaria"]
   };
 
+  // Priorização mínima: “carne/picanha” → churrascaria + restaurante
   let categoriasAProcurar = [];
   if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
 
@@ -448,6 +414,7 @@ async function ferramentaBuscarParceirosOuDicas({
     categoriasAProcurar = MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada].map(normalizarTexto);
   }
 
+  // Termo opcional para RPC
   let termoDeBusca = null;
   if (sinaisCarne) termoDeBusca = "picanha";
   else if (sinaisVista) termoDeBusca = "vista";
@@ -458,6 +425,9 @@ async function ferramentaBuscarParceirosOuDicas({
   }
   if (!termoDeBusca && categoriasAProcurar.length > 0) termoDeBusca = categoriasAProcurar[0];
 
+  // Execução de buscas com limites FIXOS:
+  // - inicial: coleta até 3 (aleatórios)
+  // - refinamento: coleta até 5 (por relevância)
   const agregados = [];
   const vistos = new Set();
   const alvoInicialFix = 3;
@@ -469,7 +439,7 @@ async function ferramentaBuscarParceirosOuDicas({
       categoria: cat,
       term: termoDeBusca,
       isInitialSearch: isInitialSearch,
-      excludeIds: Array.from(vistos)
+      excludeIds: Array.from(vistos) // evita repetir dentro do loop também
     });
 
     if (r.ok && Array.isArray(r.items)) {
@@ -485,6 +455,7 @@ async function ferramentaBuscarParceirosOuDicas({
     if (!isInitialSearch && agregados.length >= alvoRefinoFix) break;
   }
 
+  // Seleção final fixa
   const limiteFinal = isInitialSearch ? alvoInicialFix : alvoRefinoFix;
   const limitados = agregados.slice(0, limiteFinal);
 
@@ -559,6 +530,7 @@ async function lidarComNovaBusca({
     } catch {}
     return { respostaFinal, parceirosSugeridos };
   } else {
+    // (T4) Sem resultados → cai em resposta geral BLINDADA
     const respostaModelo = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
     const respostaFinal = finalizeAssistantResponse({
       modelResponseText: respostaModelo,
@@ -618,6 +590,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       }
     } else {
       console.log(`[RAIO-X] Reutilizando conversationId existente: ${conversationId}`);
+      // Garante existência no DB (idempotente)
       try {
         const { data: existe } = await supabase
           .from("conversas")
@@ -657,122 +630,78 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     const historicoGemini = await construirHistoricoParaGemini(conversationId, 12);
 
-    // ======= Pedidos de Mídia (antes da seleção) =======
-    const textoN = normalizarTexto(textoDoUsuario);
-    const pediuFotos = ["foto","fotos","imagens","imagem","ver fotos","mostrar fotos"].some(k => textoN.includes(k));
-    const pediuCardapio = ["cardapio","cardápio","menu","preço","preços","tabela de preços"].some(k => textoN.includes(k));
-
-    if ((pediuFotos || pediuCardapio)) {
-      if (conversaAtual?.parceiro_em_foco) {
-        const foco = conversaAtual.parceiro_em_foco || {};
-        const fotos = (foco.fotos_parceiros || []).filter(Boolean);
-        const cardapios = foco.links_cardapio_precos || null;
-
-        if (pediuFotos && fotos.length > 0) {
-          return res.status(200).json({
-            reply: "Claro! Separei algumas fotos do local para você dar uma olhada.",
-            photoLinks: fotos,
-            conversationId
-          });
-        }
-        if (pediuCardapio && cardapios) {
-          return res.status(200).json({
-            reply: "Aqui está o cardápio/tabela de preços que tenho cadastrado para este parceiro:",
-            menuLinks: cardapios,
-            conversationId
-          });
-        }
-        return res.status(200).json({
-          reply: "Eu tentei, mas não encontrei essas mídias para este parceiro. Quer que eu verifique outras opções?",
-          conversationId
-        });
-      } else {
-        return res.status(200).json({
-          reply: "Claro! Mas para eu poder te mostrar, preciso saber: de qual estabelecimento você gostaria de ver as fotos ou o cardápio?",
-          conversationId
-        });
-      }
-    }
-
-    // ======= Bloco de Clima (com hora local SP) =======
-    if (pedeClima(textoDoUsuario)) {
+    // ======= NOVA LÓGICA: Clima na Região (sem cidade específica) =======
+    // Se a pergunta for de clima/tempo e mencionar "região" (sem citar cidade),
+    // montamos um comparativo com ARRAIAL DO CABO, CABO FRIO e ARMAÇÃO DOS BÚZIOS
+    if (isPerguntaClima(textoDoUsuario) && mencionaRegiaoSemCidade(textoDoUsuario)) {
       try {
-        const cidadeAlvo = cidadesAtivas?.[0] || null;
-        if (!cidadeAlvo) {
-          return res.status(200).json({
-            reply: "Não consegui identificar uma cidade ativa nesta região para consultar os dados climáticos.",
-            conversationId
-          });
+        const nomesAlvo = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"];
+        const mapaCidades = {};
+        for (const n of nomesAlvo) {
+          const achada = cidadesAtivas.find(c => normalizarTexto(c.nome) === normalizarTexto(n));
+          if (achada) mapaCidades[n] = achada.id;
         }
 
-        async function pegar(tipo) {
-          const { data, error } = await supabase
+        const comparativo = [];
+        for (const nomeCidade of nomesAlvo) {
+          const cid = mapaCidades[nomeCidade];
+          if (!cid) continue;
+          const { data: climaRow, error: climaErr } = await supabase
             .from("dados_climaticos")
             .select("cidade_id, tipo_dado, dados, data_hora_consulta")
-            .eq("cidade_id", cidadeAlvo.id)
-            .eq("tipo_dado", tipo)
-            .order("data_hora_consulta", { ascending: false, nullsFirst: false })
+            .eq("cidade_id", cid)
+            .eq("tipo_dado", "clima_atual")
+            .order("data_hora_consulta", { ascending: false })
             .limit(1);
-          if (error) throw error;
-          return Array.isArray(data) && data.length ? data[0] : null;
+          if (!climaErr && Array.isArray(climaRow) && climaRow.length > 0) {
+            comparativo.push({ cidade: nomeCidade, registro: climaRow[0] });
+          }
         }
 
-        const climaAtual = await pegar("clima_atual");
-        const previsao = await pegar("previsao_diaria");
-        const mare = await pegar("dados_mare");
-        const tempAgua = await pegar("temperatura_agua");
-
-        // HORA ATUAL no fuso de São Paulo (apenas hora 00–23)
-        const horaAtualSP = new Intl.DateTimeFormat("pt-BR", {
-          hour: "2-digit",
-          hour12: false,
-          timeZone: "America/Sao_Paulo"
-        }).format(new Date());
-
-        const contexto = {
-          cidade: { id: cidadeAlvo.id, nome: cidadeAlvo.nome, slug: cidadeAlvo.slug },
-          clima_atual: climaAtual?.dados ?? null,
-          previsao_diaria: previsao?.dados ?? null,
-          dados_mare: mare?.dados ?? null,
-          temperatura_agua: tempAgua?.dados ?? null
-        };
-
-        const promptClima = [
-          PROMPT_MESTRE_BEPIT_V13,
-          "",
-          `HORA ATUAL: ${horaAtualSP}`,
-          `[DADOS DA CIDADE]: ${JSON.stringify(contexto, null, 2)}`,
-          `[PERGUNTA DO USUÁRIO]: "${textoDoUsuario}"`,
-          "",
-          "Com base nas regras, no horário e nos dados acima, gere a melhor resposta possível (natural, útil e contextual)."
-        ].join("\n");
-
-        const respostaModelo = await geminiGerarTexto(promptClima);
+        const respostaModelo = await gerarRespostaGeral(
+          textoDoUsuario,
+          historicoGemini,
+          regiao,
+          comparativo.length > 0 ? comparativo : null
+        );
         const respostaFinal = finalizeAssistantResponse({
           modelResponseText: respostaModelo,
           foundPartnersList: [],
           mode: "general"
         });
 
+        // Persistência da interação
+        let interactionId = null;
         try {
-          await supabase.from("interacoes").insert({
-            regiao_id: regiao.id,
-            conversation_id: conversationId,
-            pergunta_usuario: textoDoUsuario,
-            resposta_ia: respostaFinal,
-            parceiros_sugeridos: []
-          });
-        } catch {}
+          const { data: nova } = await supabase
+            .from("interacoes")
+            .insert({
+              regiao_id: regiao.id,
+              conversation_id: conversationId,
+              pergunta_usuario: textoDoUsuario,
+              resposta_ia: respostaFinal,
+              parceiros_sugeridos: []
+            })
+            .select("id")
+            .single();
+          interactionId = nova?.id || null;
+        } catch (e) {
+          console.warn("[INTERACOES] Falha ao salvar (clima região):", e?.message || e);
+        }
 
         return res.status(200).json({
           reply: respostaFinal,
+          interactionId,
           conversationId,
-          intent: "clima"
+          intent: "resumo_clima_regiao",
+          partners: []
         });
       } catch (e) {
-        console.warn("[CLIMA] Falha ao montar resposta climática:", e?.message || e);
+        console.warn("[CLIMA REGIÃO] Falha durante montagem comparativa:", e?.message || e);
+        // Se algo falhar, caímos no fluxo normal abaixo
       }
     }
+    // ==================== FIM NOVA LÓGICA CLIMA REGIÃO ====================
 
     // ----- REFINO EM ANDAMENTO -----
     if (conversaAtual?.aguardando_refinamento) {
@@ -797,7 +726,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       return res.status(200).json({ reply: r.respostaFinal, photoLinks: fotos, conversationId, partners: r.parceirosSugeridos });
     }
 
-    // ----- SELEÇÃO DIRETA -----
+    // ----- SELEÇÃO DIRETA (ordinal / nome) -----
     const candidatos = Array.isArray(conversaAtual?.parceiros_sugeridos) ? conversaAtual.parceiros_sugeridos : [];
     const parceiroSelecionado = encontrarParceiroNaLista(textoDoUsuario, candidatos);
     if (parceiroSelecionado) {
@@ -805,15 +734,12 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         await supabase.from("conversas").update({ parceiro_em_foco: parceiroSelecionado }).eq("id", conversationId);
       } catch {}
 
-      const respostaModelo = await gerarDetalhesDoParceiro(textoDoUsuario, historicoGemini, parceiroSelecionado, regiao?.nome);
-      let respostaFinal = respostaModelo;
-
-      if (Array.isArray(parceiroSelecionado.fotos_parceiros) && parceiroSelecionado.fotos_parceiros.length > 0) {
-        respostaFinal += `\n\nEu também tenho algumas fotos do local. Gostaria de ver?`;
-      }
-      if (parceiroSelecionado.links_cardapio_precos && Object.keys(parceiroSelecionado.links_cardapio_precos).length > 0) {
-        respostaFinal += `\n\nPosso te mostrar o cardápio ou a tabela de preços. Você quer dar uma olhada?`;
-      }
+      const respostaModelo = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, [parceiroSelecionado], regiao?.nome);
+      const respostaCurtaSegura = finalizeAssistantResponse({
+        modelResponseText: respostaModelo,
+        foundPartnersList: [parceiroSelecionado],
+        mode: "partners"
+      });
 
       let interactionId = null;
       try {
@@ -823,7 +749,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
             regiao_id: regiao.id,
             conversation_id: conversationId,
             pergunta_usuario: textoDoUsuario,
-            resposta_ia: respostaFinal,
+            resposta_ia: respostaCurtaSegura,
             parceiros_sugeridos: [parceiroSelecionado]
           })
           .select("id")
@@ -835,7 +761,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
       const fotos = [parceiroSelecionado].flatMap(p => p?.fotos_parceiros || []).filter(Boolean);
       return res.status(200).json({
-        reply: respostaFinal,
+        reply: respostaCurtaSegura,
         interactionId,
         photoLinks: fotos,
         conversationId,
@@ -844,7 +770,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // ----- DETECÇÃO "MAIS OPÇÕES" -----
+    // ----- DETECÇÃO "MAIS OPÇÕES" / REFINAMENTO -----
     const palavrasDeRefinamento = ["outras opções","mais","nao gostei","não gostei","outra sugestao","outra sugestão","outras"];
     const pediuRefinamento = palavrasDeRefinamento.some(p => normalizarTexto(textoDoUsuario).includes(p));
 
@@ -865,7 +791,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       return res.status(200).json({ reply: perguntaRefinamento, conversationId });
     }
 
-    // ----- INTENÇÃO + BUSCA -----
+    // ----- INTENÇÃO + BUSCA (determinística) -----
     const intent = await analisarIntencaoDoUsuario(textoDoUsuario);
     let respostaFinal = "";
     let parceirosSugeridos = [];
