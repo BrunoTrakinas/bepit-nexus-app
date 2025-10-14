@@ -294,10 +294,10 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
   // Render
   return (
     <div className="min-h-dvh bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex flex-col">
-      {/* Cabeçalho */}
-      <header className="sticky top-0 z-40 grid grid-cols-[auto,1fr,auto] items-center gap-2 border-b border-neutral-200 bg-white/95 px-3 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4 sm:py-3">
-        {/* ESQUERDA: Voltar + Logo + BEPIT */}
-        <div className="self-center flex min-w-0 items-center gap-2 sm:gap-3">
+      {/* ===== NOVO CABEÇALHO CORRIGIDO ===== */}
+      <header className="sticky top-0 z-40 flex items-center justify-between gap-2 border-b border-neutral-200 bg-white/95 px-3 py-2 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4">
+        {/* ESQUERDA: Voltar + Logo */}
+        <div className="flex flex-1 basis-1/4 items-center justify-start gap-2 sm:gap-3">
           <button
             onClick={() => navigate("/")}
             className="rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
@@ -305,26 +305,25 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
           >
             ← Voltar
           </button>
-
           <img
             src="/bepit-logo.png"
             alt="BEPIT"
             className="h-7 w-7 shrink-0 rounded-full sm:h-8 sm:w-8"
           />
-          <span className="shrink-0 text-base font-semibold sm:text-lg md:text-xl">
-            BEPIT
-          </span>
         </div>
 
-        {/* CENTRO: Nome da região (trunca no mobile) */}
-        <div className="self-center min-w-0 text-center">
-          <div className="mx-auto max-w-[70vw] truncate text-sm font-medium sm:max-w-[60vw] sm:text-base md:text-lg">
+        {/* CENTRO: BEPIT + Nome da Região */}
+        <div className="flex flex-col items-center justify-center text-center">
+          <span className="shrink-0 text-lg font-semibold sm:text-xl md:text-2xl">
+            BEPIT
+          </span>
+          <div className="w-full max-w-[40vw] truncate text-xs font-medium text-neutral-500 dark:text-neutral-400 sm:max-w-[30vw] sm:text-sm">
             {regionName}
           </div>
         </div>
 
         {/* DIREITA: Avisos + Tema */}
-        <div className="self-center flex items-center justify-end gap-2 sm:gap-3">
+        <div className="flex flex-1 basis-1/4 items-center justify-end gap-2 sm:gap-3">
           <button
             onClick={openAvisosModal}
             className="flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
