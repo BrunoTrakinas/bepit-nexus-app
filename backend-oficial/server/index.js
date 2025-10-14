@@ -194,6 +194,19 @@ function mencionaRegiaoSemCidade(texto) {
   return temRegiao && !temCidade;
 }
 
+// (NOVO) Inteligência temporal simples: presente vs futuro
+function detectarJanelaTemporal(texto) {
+  const t = normalizarTexto(texto);
+  // futuro explícito
+  if (/(amanha|amanhã|semana que vem|proxima semana|próxima semana|sabado|sábado|domingo|daqui a \d+ dia)/.test(t)) {
+    return "futuro";
+  }
+  // presente
+  if (/(agora|hoje|nesse momento|no momento)/.test(t)) return "presente";
+  // default presente
+  return "presente";
+}
+
 // ============================== HEURÍSTICA DE INTENÇÃO ======================
 const PALAVRAS_CHAVE = {
   comida: ["restaurante", "restaurantes", "almoço", "almoco", "jantar", "comer", "comida", "picanha", "piconha", "carne", "churrasco", "pizza", "pizzaria", "peixe", "frutos do mar", "moqueca", "rodizio", "rodízio", "lanchonete", "burger", "hamburguer", "hambúrguer", "bistrô", "bistro"],
@@ -265,7 +278,7 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
   const prompt = [
     "Você é um assistente de consulta. Sua única função é apresentar os resultados de uma busca em uma lista numerada.",
-    "Para cada estabelecimento no [Contexto], crie um item na lista com o NOME em negrito, seguido por um traço e a DESCRIÇÃO.",
+    "Para cada estabelecimento no [Contexto], crie um item na lista com o NOME em negrido, seguido por um traço e a DESCRIÇÃO.",
     "NÃO inclua endereço, contato ou qualquer outra informação. Apenas NOME e DESCRIÇÃO.",
     "A lista deve ser clara e objetiva.",
     "Após a lista, finalize com a pergunta: 'Alguma dessas opções te interessou? Me diga o número ou o nome para ver mais detalhes.'",
@@ -279,7 +292,8 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
 // (T3) Prompt blindado (Regra de Ouro inquebrável) — NUNCA inventar estabelecimentos.
 // >>> Alteração 1: anti-repetição de saudação (verificação do histórico vazio) <<<
 // >>> Alteração 2: suporte a clima comparativo (array de cidades) <<<
-async function gerarRespostaGeral(pergunta, historicoContents, regiao, climaComparativo = null) {
+// >>> Alteração 3: regra honesta quando faltar previsao_diaria para perguntas de futuro <<<
+async function gerarRespostaGeral(pergunta, historicoContents, regiao, climaComparativo = null, climaCidade = null) {
   // --- NOVA LÓGICA DE SAUDAÇÃO (anti-repetição) ---
   if (isSaudacao(pergunta) && historicoContents.length === 0) {
     const nomeRegiao = regiao?.nome || "Região dos Lagos";
@@ -298,8 +312,18 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao, climaComp
     "Comece com uma frase como \"O tempo na Região dos Lagos está variado hoje!\". Em seguida, resuma a condição de cada cidade. " +
     "Ex.: \"Em Cabo Frio, o céu está com poucas nuvens e 25°C. Já em Búzios, está ensolarado com 26°C...\"";
 
+  // Regra honesta para previsões futuras sem dados
+  const PROMPT_PREVISAO_FUTURA_FALTA_DADOS =
+    "\n[Regra de Clima — Futuro sem dados]\n" +
+    "Se você não receber dados de 'previsao_diaria' ao ser perguntado sobre o futuro, responda: " +
+    "\"Ainda não tenho os dados consolidados para a previsão futura. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.\"";
+
   const blocoClimaComparativo = climaComparativo
     ? `\n[DadosClimaRegiao]: ${JSON.stringify(climaComparativo, null, 2)}\n`
+    : "";
+
+  const blocoClimaCidade = climaCidade
+    ? `\n[DadosClimaCidade]: ${JSON.stringify(climaCidade, null, 2)}\n`
     : "";
 
   const prompt = [
@@ -309,9 +333,10 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao, climaComp
     "Se o usuário pedir uma sugestão de estabelecimento e você não tiver uma lista de [Contexto], sua ÚNICA resposta permitida é dizer que não encontrou um parceiro cadastrado para aquela solicitação específica e perguntar se pode ajudar com outra coisa.",
     "NUNCA finja que tem resultados. NUNCA use seu conhecimento geral para sugerir um nome comercial.",
     "",
-    BEPIT_SYSTEM_PROMPT_APPENDIX + PROMPT_CLIMA_REGIAO_APPENDIX,
+    BEPIT_SYSTEM_PROMPT_APPENDIX + PROMPT_CLIMA_REGIAO_APPENDIX + PROMPT_PREVISAO_FUTURA_FALTA_DADOS,
     "",
     blocoClimaComparativo,
+    blocoClimaCidade,
     `[Histórico]:\n${historicoTexto}`,
     `[Pergunta]: "${pergunta}"`
   ].join("\n");
@@ -702,6 +727,106 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       }
     }
     // ==================== FIM NOVA LÓGICA CLIMA REGIÃO ====================
+
+    // ======= NOVA LÓGICA: Clima por cidade + inteligência temporal + VIP marés =======
+    if (isPerguntaClima(textoDoUsuario) && !mencionaRegiaoSemCidade(textoDoUsuario)) {
+      try {
+        const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
+        const cidadePedida = entidades?.city || null;
+
+        if (cidadePedida) {
+          const cidadeRow = cidadesAtivas.find(c => normalizarTexto(c.nome) === normalizarTexto(cidadePedida));
+          if (cidadeRow) {
+            const janela = detectarJanelaTemporal(textoDoUsuario); // "presente" | "futuro"
+            const tipoClima = janela === "futuro" ? "previsao_diaria" : "clima_atual";
+
+            // Clima principal
+            const { data: climaRows } = await supabase
+              .from("dados_climaticos")
+              .select("cidade_id, tipo_dado, dados, data_hora_consulta")
+              .eq("cidade_id", cidadeRow.id)
+              .eq("tipo_dado", tipoClima)
+              .order("data_hora_consulta", { ascending: false })
+              .limit(1);
+
+            // VIP marés (apenas para Arraial, Cabo Frio, Búzios)
+            const vip = ["arraial do cabo", "cabo frio", "armação dos búzios", "armacao dos buzios"];
+            let mareRow = null;
+            let aguaRow = null;
+            if (vip.includes(normalizarTexto(cidadeRow.nome))) {
+              const { data: mare } = await supabase
+                .from("dados_climaticos")
+                .select("cidade_id, tipo_dado, dados, data_hora_consulta")
+                .eq("cidade_id", cidadeRow.id)
+                .eq("tipo_dado", "dados_mare")
+                .order("data_hora_consulta", { ascending: false })
+                .limit(1);
+              mareRow = Array.isArray(mare) && mare.length > 0 ? mare[0] : null;
+
+              const { data: agua } = await supabase
+                .from("dados_climaticos")
+                .select("cidade_id, tipo_dado, dados, data_hora_consulta")
+                .eq("cidade_id", cidadeRow.id)
+                .eq("tipo_dado", "temperatura_agua")
+                .order("data_hora_consulta", { ascending: false })
+                .limit(1);
+              aguaRow = Array.isArray(agua) && agua.length > 0 ? agua[0] : null;
+            }
+
+            const climaCidadePayload = {
+              cidade: cidadeRow.nome,
+              tipo_consulta: tipoClima,
+              clima: Array.isArray(climaRows) && climaRows.length > 0 ? climaRows[0] : null,
+              dados_mare: mareRow,
+              temperatura_agua: aguaRow
+            };
+
+            const respostaModelo = await gerarRespostaGeral(
+              textoDoUsuario,
+              historicoGemini,
+              regiao,
+              null, // sem comparativo
+              climaCidadePayload
+            );
+            const respostaFinal = finalizeAssistantResponse({
+              modelResponseText: respostaModelo,
+              foundPartnersList: [],
+              mode: "general"
+            });
+
+            let interactionId = null;
+            try {
+              const { data: nova } = await supabase
+                .from("interacoes")
+                .insert({
+                  regiao_id: regiao.id,
+                  conversation_id: conversationId,
+                  pergunta_usuario: textoDoUsuario,
+                  resposta_ia: respostaFinal,
+                  parceiros_sugeridos: []
+                })
+                .select("id")
+                .single();
+              interactionId = nova?.id || null;
+            } catch (e) {
+              console.warn("[INTERACOES] Falha ao salvar (clima por cidade):", e?.message || e);
+            }
+
+            return res.status(200).json({
+              reply: respostaFinal,
+              interactionId,
+              conversationId,
+              intent: "clima_cidade",
+              partners: []
+            });
+          }
+        }
+        // Se não conseguimos resolver uma cidade, segue o fluxo normal
+      } catch (e) {
+        console.warn("[CLIMA CIDADE] Falha durante montagem de clima por cidade:", e?.message || e);
+      }
+    }
+    // ==================== FIM NOVA LÓGICA CLIMA CIDADE ====================
 
     // ----- REFINO EM ANDAMENTO -----
     if (conversaAtual?.aguardando_refinamento) {
