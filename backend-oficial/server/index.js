@@ -26,19 +26,54 @@ const aplicacaoExpress = express();
 const portaDoServidor = process.env.PORT || 3002;
 aplicacaoExpress.use(express.json({ limit: "2mb" }));
 
-// ------------------------------ CORS ----------------------------------------
-// Lista de origens permitidas
-const allowedOrigins = [
-  "http://localhost:5173", // Para seu teste local (ajuste a porta se for diferente)
+// ------------------------------ CORS (permanente e seguro) ------------------
+// Origem permitida (exato + regex). Você pode adicionar extras via env: CORS_EXTRA_ORIGINS="https://meusite.com,https://app.meusite.com"
+const EXPLICIT_ALLOWED_ORIGINS = new Set([
+  "http://localhost:5173",
   "http://localhost:3000",
   "https://bepitnexus.netlify.app",
   "https://bepit-nexus.netlify.app",
+]);
+
+// Adiciona origens extras via env (opcional)
+if (process.env.CORS_EXTRA_ORIGINS) {
+  for (const o of process.env.CORS_EXTRA_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)) {
+    EXPLICIT_ALLOWED_ORIGINS.add(o);
+  }
+}
+
+// Padrões para deploy previews do Netlify (apenas dos seus sites)
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/(deploy-preview-\d+--)?bepitnexus\.netlify\.app$/,
+  /^https:\/\/(deploy-preview-\d+--)?bepit-nexus\.netlify\.app$/,
+  /^http:\/\/localhost:(3000|5173)$/,
 ];
 
+function isOriginAllowed(origin) {
+  if (!origin) return true; // Postman, cURL, mobile apps etc.
+  if (EXPLICIT_ALLOWED_ORIGINS.has(origin)) return true;
+  return ALLOWED_ORIGIN_PATTERNS.some(rx => rx.test(origin));
+}
+
+// Preflight dedicado (garante 204 + cabeçalhos corretos e "echo" do Origin)
+aplicacaoExpress.use((req, res, next) => {
+  if (req.method !== "OPTIONS") return next();
+  const origin = req.headers.origin || "";
+  if (!isOriginAllowed(origin)) {
+    return res.status(403).send("CORS: Origem não permitida por política de segurança.");
+  }
+  res.header("Access-Control-Allow-Origin", origin);
+  res.header("Vary", "Origin");
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-key, authorization");
+  return res.sendStatus(204);
+});
+
+// Middleware cors com validação por origem (para as demais requisições)
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permite requisições sem 'origin' (como Postman, apps mobile, etc.) E origens da nossa lista
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (isOriginAllowed(origin)) {
       callback(null, true);
     } else {
       callback(new Error("CORS: Origem não permitida por política de segurança."));
@@ -48,11 +83,7 @@ const corsOptions = {
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "x-admin-key", "authorization"],
 };
-
-// Aplica o middleware do CORS para TODAS as requisições
 aplicacaoExpress.use(cors(corsOptions));
-// Garante que as requisições OPTIONS pré-voo sejam tratadas corretamente
-aplicacaoExpress.options("*", cors(corsOptions));
 
 // ============================== GEMINI REST v1 ===============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
