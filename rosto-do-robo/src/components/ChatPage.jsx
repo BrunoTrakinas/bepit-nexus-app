@@ -178,6 +178,13 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     if (!text || !regionSlug) return;
 
     pushMessage({ role: "user", text });
+
+    // CORREÇÃO 2: Auto-scroll imediato após enviar a mensagem
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+
+    // CORREÇÃO 1: Limpar o input imediatamente após enviar
+    setUserInput("");
+
     setIsTyping(true);
 
     try {
@@ -238,7 +245,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
       if (import.meta.env.DEV) console.warn("[Chat erro]", e);
     } finally {
       setIsTyping(false);
-      setUserInput("");
+      // Removido setUserInput("") daqui (foi movido para logo após o envio)
     }
   };
 
@@ -288,9 +295,9 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
   return (
     <div className="min-h-dvh bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 flex flex-col">
       {/* Cabeçalho */}
-      <header className="sticky top-0 z-40 grid grid-cols-3 items-center gap-2 border-b border-neutral-200 bg-white/95 px-3 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4 sm:py-3">
-        {/* ESQUERDA: Voltar + Logo */}
-        <div className="flex min-w-0 items-center gap-2 sm:gap-3 justify-self-start">
+      <header className="sticky top-0 z-40 grid grid-cols-[auto,1fr,auto] items-center gap-2 border-b border-neutral-200 bg-white/95 px-3 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4 sm:py-3">
+        {/* ESQUERDA: Voltar + Logo + BEPIT */}
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <button
             onClick={() => navigate("/")}
             className="rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
@@ -304,20 +311,20 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
             alt="BEPIT"
             className="h-7 w-7 shrink-0 rounded-full sm:h-8 sm:w-8"
           />
-        </div>
-
-        {/* CENTRO: BEPIT + Nome da Região */}
-        <div className="flex min-w-0 flex-col items-center justify-center text-center">
-          <span className="shrink-0 text-lg font-semibold sm:text-xl md:text-2xl">
+          <span className="shrink-0 text-base font-semibold sm:text-lg md:text-xl">
             BEPIT
           </span>
-          <div className="w-full max-w-[40vw] truncate text-xs font-medium text-neutral-500 dark:text-neutral-400 sm:max-w-[30vw] sm:text-sm">
+        </div>
+
+        {/* CENTRO: Nome da região (trunca no mobile) */}
+        <div className="min-w-0 text-center">
+          <div className="mx-auto max-w-[70vw] truncate text-sm font-medium sm:max-w-[60vw] sm:text-base md:text-lg">
             {regionName}
           </div>
         </div>
 
         {/* DIREITA: Avisos + Tema */}
-        <div className="flex items-center justify-end gap-2 sm:gap-3 justify-self-end">
+        <div className="flex items-center justify-end gap-2 sm:gap-3">
           <button
             onClick={openAvisosModal}
             className="flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
@@ -336,7 +343,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
           <div className="flex flex-wrap items-center justify-center gap-2">
             <button
               type="button"
-              onClick={() => handleQuickAsk("Restaurantes")}
+              onClick={() => handleQuickAsk("Quero 5 opções de restaurantes variados em {região}, com nome e bairro")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Restaurantes"
             >
@@ -345,7 +352,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Passeios")}
+              onClick={() => handleQuickAsk("Quero 5 sugestões de passeios em {região} (barco, trilha, bugre), com ponto de partida")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Passeios"
             >
@@ -354,7 +361,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Praias")}
+              onClick={() => handleQuickAsk("Quais são as melhores praias agora em {região}? Considere vento e ondas")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Praias"
             >
@@ -363,7 +370,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
 
             <button
               type="button"
-              onClick={() => handleQuickAsk("Dicas do dia")}
+              onClick={() => handleQuickAsk("Quero dicas gerais para hoje em {região} (clima, trânsito, eventos)")}
               className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-base border border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
               title="Dicas"
             >
