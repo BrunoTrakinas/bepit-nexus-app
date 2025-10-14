@@ -177,13 +177,13 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
     const text = (rawText ?? userInput).trim();
     if (!text || !regionSlug) return;
 
+    // Correção 1: limpar input imediatamente
+    setUserInput("");
+
     pushMessage({ role: "user", text });
 
-    // CORREÇÃO 2: Auto-scroll imediato após enviar a mensagem
+    // Correção 2: scroll imediato após enviar
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-
-    // CORREÇÃO 1: Limpar o input imediatamente após enviar
-    setUserInput("");
 
     setIsTyping(true);
 
@@ -245,7 +245,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
       if (import.meta.env.DEV) console.warn("[Chat erro]", e);
     } finally {
       setIsTyping(false);
-      // Removido setUserInput("") daqui (foi movido para logo após o envio)
+      // setUserInput("") já ocorre imediatamente após iniciar o envio
     }
   };
 
@@ -297,7 +297,7 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
       {/* Cabeçalho */}
       <header className="sticky top-0 z-40 grid grid-cols-[auto,1fr,auto] items-center gap-2 border-b border-neutral-200 bg-white/95 px-3 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95 sm:gap-3 sm:px-4 sm:py-3">
         {/* ESQUERDA: Voltar + Logo + BEPIT */}
-        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+        <div className="self-center flex min-w-0 items-center gap-2 sm:gap-3">
           <button
             onClick={() => navigate("/")}
             className="rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
@@ -317,14 +317,14 @@ Dica: antes de perguntar, vale clicar em ⚠️ Avisos para ver se há algo impo
         </div>
 
         {/* CENTRO: Nome da região (trunca no mobile) */}
-        <div className="min-w-0 text-center">
+        <div className="self-center min-w-0 text-center">
           <div className="mx-auto max-w-[70vw] truncate text-sm font-medium sm:max-w-[60vw] sm:text-base md:text-lg">
             {regionName}
           </div>
         </div>
 
         {/* DIREITA: Avisos + Tema */}
-        <div className="flex items-center justify-end gap-2 sm:gap-3">
+        <div className="self-center flex items-center justify-end gap-2 sm:gap-3">
           <button
             onClick={openAvisosModal}
             className="flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-100 active:scale-[0.99] dark:border-neutral-700 dark:hover:bg-neutral-800 sm:px-4"
