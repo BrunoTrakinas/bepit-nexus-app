@@ -969,7 +969,8 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       };
 
       if (escopoRegiao) {
-        // 3 cidades VIP: Arraial, Cabo Frio, Búzios (clima_atual)
+        // 3 cidades VIP: Arraial, Cabo Frio, Búzios — respeita janela temporal (presente/futuro)
+        const tipoDadoRegiao = when === "future" ? "previsao_diaria" : "clima_atual";
         const nomesAlvo = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"];
         const mapaCidades = {};
         for (const n of nomesAlvo) {
@@ -986,11 +987,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
             .from("dados_climaticos")
             .select("cidade_id, tipo_dado, dados, data_hora_consulta")
             .eq("cidade_id", cid)
-            .eq("tipo_dado", "clima_atual")
+            .eq("tipo_dado", tipoDadoRegiao)
             .order("data_hora_consulta", { ascending: false })
             .limit(1);
           if (Array.isArray(climaRow) && climaRow.length > 0) {
-            dadosIA.resultados.push({ cidade: nomeCidade, tipo: "clima_atual", registro: climaRow[0] });
+            dadosIA.resultados.push({ cidade: nomeCidade, tipo: tipoDadoRegiao, registro: climaRow[0] });
           }
         }
       } else if (cidadeEscopo) {
