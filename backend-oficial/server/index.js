@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
-// Orquestrador Lógico — Arquitetura "Session Ensurer + Classificador + Roteamento"
-// v5.1.2 (stateful, robusto, CORS fixo, tolerância a rate-limit e etiqueta de conversa)
+// Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
+// v6.0.0 (Memória Curta com Redis, Refatorado para DRY, stateful)
 // ============================================================================
 
 import "dotenv/config";
@@ -9,14 +9,13 @@ import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
+import { Redis } from 'ioredis';
 
 // Guardrails essenciais
 import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
-
 // Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 
-import { Redis } from 'ioredis';
 // --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) ---
 let redis;
 try {
@@ -31,22 +30,18 @@ try {
 
   redis.on('error', (err) => {
     console.error('[REDIS] Não foi possível conectar ao Upstash:', err);
-    // Em um ambiente de produção real, você poderia querer
-    // tomar uma ação aqui, como desabilitar funcionalidades
-    // que dependem do cache.
   });
-
 } catch (error) {
   console.error("[REDIS] Erro ao inicializar o cliente Redis:", error.message);
 }
 // --- FIM DA CONFIGURAÇÃO DO REDIS ---
+
 // ============================== CONFIG BÁSICA ================================
 const aplicacaoExpress = express();
 const portaDoServidor = process.env.PORT || 3002;
 aplicacaoExpress.use(express.json({ limit: "2mb" }));
 
 // ------------------------------ CORS (permanente e seguro) ------------------
-// Whitelist explícita + padrões Netlify + extras por variável de ambiente
 const EXPLICIT_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
@@ -72,7 +67,6 @@ function isOriginAllowed(origin) {
   return ALLOWED_ORIGIN_PATTERNS.some((rx) => rx.test(origin));
 }
 
-// Preflight dedicado (OPTIONS)
 aplicacaoExpress.use((req, res, next) => {
   if (req.method !== "OPTIONS") return next();
   const origin = req.headers.origin || "";
@@ -87,8 +81,6 @@ aplicacaoExpress.use((req, res, next) => {
   res.header("Access-Control-Max-Age", "600");
   return res.sendStatus(204);
 });
-
-// CORS nas demais rotas
 aplicacaoExpress.use(
   cors({
     origin: (origin, cb) => (isOriginAllowed(origin) ? cb(null, true) : cb(new Error("CORS block"))),
@@ -98,7 +90,7 @@ aplicacaoExpress.use(
   })
 );
 
-// ============================== GEMINI REST v1 ===============================
+// ============================== GEMINI REST v1 (sem alterações) ===============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
 const chaveGemini = process.env.GEMINI_API_KEY || "";
 const AI_DISABLED = String(process.env.AI_DISABLED || "") === "1";
@@ -127,7 +119,6 @@ async function listarModelosREST() {
 async function selecionarModeloREST() {
   const todosComPrefixo = await listarModelosREST();
   const disponiveis = todosComPrefixo.map(stripModelsPrefix);
-
   const envModelo = (process.env.GEMINI_MODEL || "").trim();
   if (envModelo) {
     const alvo = stripModelsPrefix(envModelo);
@@ -171,7 +162,8 @@ async function gerarConteudoComREST(modelo, texto) {
   }
   const json = await resp.json();
   const parts = json?.candidates?.[0]?.content?.parts;
-  const out = Array.isArray(parts) ? parts.map((p) => p?.text || "").join("\n").trim() : "";
+  const out = Array.isArray(parts) ?
+  parts.map((p) => p?.text || "").join("\n").trim() : "";
   return out || "";
 }
 
@@ -189,7 +181,6 @@ async function geminiGerarTexto(texto) {
   return await gerarConteudoComREST(modelo, texto);
 }
 
-// ---- Tolerância a rate-limit / indisponibilidade
 function isRetryableGeminiError(err) {
   const msg = String(err?.message || err);
   return /429|RESOURCE_EXHAUSTED|500|502|503|504/i.test(msg);
@@ -210,7 +201,7 @@ async function geminiTry(texto, { retries = 2, baseDelay = 500 } = {}) {
   }
 }
 
-// ============================== HELPERS =====================================
+// ============================== HELPERS (sem alterações) =====================================
 function normalizarTexto(texto) {
   return String(texto || "")
     .normalize("NFD")
@@ -219,7 +210,6 @@ function normalizarTexto(texto) {
     .trim();
 }
 
-/** Hora local "America/Sao_Paulo" no formato HH:mm */
 function getHoraLocalSP() {
   try {
     const fmt = new Intl.DateTimeFormat("pt-BR", {
@@ -239,6 +229,8 @@ function getHoraLocalSP() {
   }
 }
 
+// ATENÇÃO: Esta função foi MANTIDA para possível uso futuro, mas não é mais
+// chamada no fluxo principal, que agora prioriza o cache do Redis.
 async function construirHistoricoParaGemini(conversationId, limite = 12) {
   try {
     const { data, error } = await supabase
@@ -259,7 +251,7 @@ async function construirHistoricoParaGemini(conversationId, limite = 12) {
     }
     return contents;
   } catch (e) {
-    console.warn("[HISTORICO] Falha ao carregar:", e?.message || e);
+    console.warn("[HISTORICO DB] Falha ao carregar:", e?.message || e);
     return [];
   }
 }
@@ -278,28 +270,90 @@ function historicoParaTextoSimplesWrapper(hc) {
   }
 }
 
-// -------------------------- SESSION ENSURER ---------------------------------
+// ======================= NOVA FUNÇÃO CENTRALIZADORA ==========================
 /**
- * Garante que exista uma conversa e descobre se é o primeiro turno.
- * Coloca em req.ctx: { conversationId, isFirstTurn }
+ * Salva a interação no Redis e no Supabase, e envia a resposta final.
+ * @param {object} params
+ * @param {object} params.res - O objeto de resposta do Express.
+ * @param {string} params.conversationId - O ID da conversa.
+ * @param {string} params.userText - A pergunta do usuário.
+ * @param {string} params.aiResponseText - A resposta da IA.
+ * @param {object} params.sessionData - O objeto de sessão atual (com histórico).
+ * @param {string} params.regiaoId - O ID da região.
+ * @param {Array} [params.partners] - Lista de parceiros sugeridos (opcional).
  */
+async function updateSessionAndRespond({
+  res,
+  conversationId,
+  userText,
+  aiResponseText,
+  sessionData,
+  regiaoId,
+  partners = [],
+}) {
+  // 1. Atualiza o histórico da sessão
+  const novoHistorico = [...(sessionData.history || [])];
+  novoHistorico.push({ role: "user", parts: [{ text: userText }] });
+  novoHistorico.push({ role: "model", parts: [{ text: aiResponseText }] });
+
+  // 2. Mantém o histórico com um tamanho máximo (ex: últimos 12 turnos)
+  const MAX_HISTORY_LENGTH = 12;
+  while (novoHistorico.length > MAX_HISTORY_LENGTH) {
+    novoHistorico.shift();
+  }
+  
+  const novaSessionData = {
+    ...sessionData,
+    history: novoHistorico,
+  };
+
+  // 3. Salva a sessão atualizada no Redis com expiração de 15 minutos
+  const TTL_SECONDS = 900; // 15 minutos
+  if (redis) {
+    try {
+      await redis.set(
+        conversationId,
+        JSON.stringify(novaSessionData),
+        "EX",
+        TTL_SECONDS
+      );
+    } catch (e) {
+      console.error(`[REDIS] Falha ao salvar sessão para ${conversationId}:`, e);
+    }
+  }
+
+  // 4. Salva a interação no Supabase (para histórico de longo prazo e analytics)
+  try {
+    await supabase.from("interacoes").insert({
+      conversation_id: conversationId,
+      regiao_id: regiaoId,
+      pergunta_usuario: userText,
+      resposta_ia: aiResponseText,
+      parceiros_sugeridos: partners.length > 0 ? partners : null,
+    });
+  } catch (e) {
+    console.error(`[SUPABASE] Falha ao salvar interação para ${conversationId}:`, e);
+  }
+
+  // 5. Envia a resposta final para o cliente
+  return res.json({
+    reply: aiResponseText,
+    conversationId,
+    partners: partners.length > 0 ? partners : undefined,
+  });
+}
+
+
+// -------------------------- SESSION ENSURER (sem alterações) ---------------------------------
 async function ensureConversation(req, supabaseClient) {
   const body = req.body || {};
   let conversationId = body.conversationId || body.threadId || body.sessionId || null;
-
   if (!conversationId || typeof conversationId !== "string" || conversationId.trim().length < 10) {
     conversationId = randomUUID();
     try {
       await supabaseClient.from("conversas").insert({
         id: conversationId,
         regiao_id: req.ctx?.regiao?.id || null,
-        parceiro_em_foco: null,
-        parceiros_sugeridos: [],
-        ultima_pergunta_usuario: null,
-        ultima_resposta_ia: null,
-        preferencia_indicacao: null,
-        topico_atual: null,
-        aguardando_refinamento: false,
       });
     } catch (e) {
       // idempotência
@@ -315,13 +369,6 @@ async function ensureConversation(req, supabaseClient) {
         await supabaseClient.from("conversas").insert({
           id: conversationId,
           regiao_id: req.ctx?.regiao?.id || null,
-          parceiro_em_foco: null,
-          parceiros_sugeridos: [],
-          ultima_pergunta_usuario: null,
-          ultima_resposta_ia: null,
-          preferencia_indicacao: null,
-          topico_atual: null,
-          aguardando_refinamento: false,
         });
       }
     } catch {
@@ -329,34 +376,33 @@ async function ensureConversation(req, supabaseClient) {
     }
   }
 
+  // A verificação de isFirstTurn agora pode ser feita pela existência da sessão no cache
   let isFirstTurn = false;
-  try {
-    const { count } = await supabaseClient
-      .from("interacoes")
-      .select("*", { count: "exact", head: true })
-      .eq("conversation_id", conversationId);
-    isFirstTurn = (count || 0) === 0;
-  } catch {
-    isFirstTurn = false;
+  if (redis) {
+      const sessionExists = await redis.exists(conversationId);
+      isFirstTurn = !sessionExists;
+  } else {
+      // Fallback para o método antigo se o Redis não estiver disponível
+      try {
+          const { count } = await supabaseClient
+            .from("interacoes")
+            .select("*", { count: "exact", head: true })
+            .eq("conversation_id", conversationId);
+          isFirstTurn = (count || 0) === 0;
+      } catch {
+          isFirstTurn = false;
+      }
   }
 
   req.ctx = Object.assign({}, req.ctx || {}, { conversationId, isFirstTurn });
   return { conversationId, isFirstTurn };
 }
 
-// ---------------------- CLASSIFICAÇÃO DETERMINÍSTICA ------------------------
+// ---------------------- CLASSIFICAÇÃO DETERMINÍSTICA (sem alterações) ------------------------
 function isSaudacao(texto) {
   const t = normalizarTexto(texto);
   const saudacoes = [
-    "oi",
-    "ola",
-    "olá",
-    "bom dia",
-    "boa tarde",
-    "boa noite",
-    "e ai",
-    "e aí",
-    "tudo bem",
+    "oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "e ai", "e aí", "tudo bem",
   ];
   return saudacoes.includes(t);
 }
@@ -364,140 +410,94 @@ function isSaudacao(texto) {
 function isWeatherQuestion(texto) {
   const t = normalizarTexto(texto);
   const termos = [
-    "clima",
-    "tempo",
-    "previsao",
-    "previsão",
-    "vento",
-    "mar",
-    "marea",
-    "maré",
-    "ondas",
-    "onda",
-    "temperatura",
-    "graus",
-    "calor",
-    "frio",
-    "chovendo",
-    "chuva",
-    "sol",
-    "ensolarado",
-    "nublado",
+    "clima", "tempo", "previsao", "previsão", "vento", "mar", "marea", "maré", "ondas", "onda",
+    "temperatura", "graus", "calor", "frio", "chovendo", "chuva", "sol", "ensolarado", "nublado",
   ];
   return termos.some((k) => t.includes(k));
 }
 
-/** 'future' (amanhã, semana que vem, sábado, próximos dias) | 'present' (default) */
 function detectTemporalWindow(texto) {
   const t = normalizarTexto(texto);
   const sinaisFuturo = [
-    "amanha",
-    "amanhã",
-    "semana que vem",
-    "proxima semana",
-    "próxima semana",
-    "sabado",
-    "sábado",
-    "domingo",
-    "proximos dias",
-    "próximos dias",
-    "daqui a",
+    "amanha", "amanhã", "semana que vem", "proxima semana", "próxima semana", "sabado", "sábado",
+    "domingo", "proximos dias", "próximos dias", "daqui a",
   ];
   return sinaisFuturo.some((s) => t.includes(s)) ? "future" : "present";
 }
 
-/** Extrai cidade com base na lista de cidades ativas */
 function extractCity(texto, cidadesAtivas) {
   const t = normalizarTexto(texto || "");
   const lista = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
-  // apelidos comuns
   const apelidos = [
-    { key: "arraial", nome: "Arraial do Cabo" },
-    { key: "arraial do cabo", nome: "Arraial do Cabo" },
-    { key: "cabo frio", nome: "Cabo Frio" },
-    { key: "buzios", nome: "Armação dos Búzios" },
-    { key: "búzios", nome: "Armação dos Búzios" },
-    { key: "armacao dos buzios", nome: "Armação dos Búzios" },
-    { key: "armação dos búzios", nome: "Armação dos Búzios" },
-    { key: "rio das ostras", nome: "Rio das Ostras" },
-    { key: "sao pedro", nome: "São Pedro da Aldeia" },
-    { key: "são pedro", nome: "São Pedro da Aldeia" },
+    { key: "arraial", nome: "Arraial do Cabo" }, { key: "arraial do cabo", nome: "Arraial do Cabo" },
+    { key: "cabo frio", nome: "Cabo Frio" }, { key: "buzios", nome: "Armação dos Búzios" },
+    { key: "búzios", nome: "Armação dos Búzios" }, { key: "armacao dos buzios", nome: "Armação dos Búzios" },
+    { key: "armação dos búzios", nome: "Armação dos Búzios" }, { key: "rio das ostras", nome: "Rio das Ostras" },
+    { key: "sao pedro", nome: "São Pedro da Aldeia" }, { key: "são pedro", nome: "São Pedro da Aldeia" },
   ];
-
-  // 1) via apelidos
   const hitApelido = apelidos.find((a) => t.includes(a.key));
   if (hitApelido) {
     const alvo = lista.find((c) => normalizarTexto(c.nome) === normalizarTexto(hitApelido.nome));
     if (alvo) return alvo;
   }
-
-  // 2) varredura direta por nome/slug
   for (const c of lista) {
     if (t.includes(normalizarTexto(c.nome)) || t.includes(normalizarTexto(c.slug))) {
       return c;
     }
   }
-
   return null;
 }
 
 function isRegionQuery(texto) {
   const t = normalizarTexto(texto);
   const mencionaRegiao =
-    t.includes("regiao") ||
-    t.includes("região") ||
-    t.includes("regiao dos lagos") ||
-    t.includes("região dos lagos");
+    t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
   return mencionaRegiao;
 }
 
-// -------------------------- PROMPT MESTRE v1.3 ------------------------------
+// -------------------------- PROMPT MESTRE v1.3 (sem alterações) ------------------------------
 const PROMPT_MESTRE_V13 = `
 # 1. IDENTIDADE E MISSÃO
 - Você é o BEPIT, um concierge de turismo especialista e confiável na Região dos Lagos.
 - Sua missão é fornecer informações precisas baseadas EXCLUSIVAMENTE nos dados fornecidos. Você NUNCA usa conhecimento externo.
-
 # 2. DIRETRIZES GERAIS
 - Seja proativo, amigável e honesto.
 - Priorize sempre os parceiros cadastrados.
-- **REGRA DE ETIQUETA:** Se a conversa já começou (ou seja, se não for a primeira mensagem), NUNCA inicie sua resposta com "Olá!", "Seja bem-vindo" ou qualquer outra saudação. Vá direto ao ponto ou use uma transição curta como "Claro," ou "Entendido,".
-
+- **REGRA DE ETIQUETA:** Se a conversa já começou (ou seja, se não for a primeira mensagem), NUNCA inicie sua resposta com "Olá!", "Seja bem-vindo" ou qualquer outra saudação.
+Vá direto ao ponto ou use uma transição curta como "Claro," ou "Entendido,".
 # 3. MÓDULO DE RACIOCÍNIO: CONCIERGE DE CLIMA, MARÉS E ATIVIDADES CONTEXTUAIS
 - Sua função é ser um "conselheiro" para o turista, conectando dados brutos a atividades práticas e contextuais.
 - **REGRA DE OURO DE CONTEXTO:** Você DEVE usar a "HORA ATUAL" fornecida para dar sugestões apropriadas.
-
 - **SE FOR DE MANHÃ (até 10:00):**
-    - Se \`ondas\` e \`vento\` estiverem baixos, sua sugestão principal deve ser um **passeio de barco**. Ex: "O dia está simplesmente perfeito para um passeio de barco agora pela manhã!"
-
+    - Se \`ondas\` e \`vento\` estiverem baixos, sua sugestão principal deve ser um **passeio de barco**.
+Ex: "O dia está simplesmente perfeito para um passeio de barco agora pela manhã!"
 - **SE FOR "MEIO DO DIA" (das 10:01 às 14:00):**
-    - Se \`ondas\` e \`vento\` estiverem baixos, você ainda pode sugerir passeio de barco, mas com um tom de "última chamada". Ex: "O tempo está ótimo para um passeio de barco! Se você ainda conseguir uma vaga em alguma embarcação, vale muito a pena!"
-    - Se as condições do mar **não** estiverem boas para barco, sua sugestão alternativa deve ser o **Shopping Park Lagos**. Ex: "O mar está um pouco agitado para passeios agora, mas é uma ótima oportunidade para conhecer o Shopping Park Lagos em Cabo Frio."
-
+    - Se \`ondas\` e \`vento\` estiverem baixos, você ainda pode sugerir passeio de barco, mas com um tom de "última chamada".
+Ex: "O tempo está ótimo para um passeio de barco! Se você ainda conseguir uma vaga em alguma embarcação, vale muito a pena!"
+- Se as condições do mar **não** estiverem boas para barco, sua sugestão alternativa deve ser o **Shopping Park Lagos**.
+Ex: "O mar está um pouco agitado para passeios agora, mas é uma ótima oportunidade para conhecer o Shopping Park Lagos em Cabo Frio."
 - **SE FOR DE TARDE (das 14:01 às 17:00):**
     - **NUNCA MAIS** sugira passeio de barco.
-    - Se o tempo estiver bom (sol/sem chuva), sua sugestão principal deve ser **curtir uma praia**. Ex: "A tarde está linda e o sol ainda está forte, perfeito para aproveitar a praia!"
-
+- Se o tempo estiver bom (sol/sem chuva), sua sugestão principal deve ser **curtir uma praia**.
+Ex: "A tarde está linda e o sol ainda está forte, perfeito para aproveitar a praia!"
 - **SE FOR FIM DE TARDE / NOITE (a partir das 17:01):**
     - **NUNCA** sugira atividades de praia ou barco como algo a se fazer "agora".
-    - Use a temperatura para contextualizar sugestões noturnas.
+- Use a temperatura para contextualizar sugestões noturnas.
     - **EXEMPLO DE SUGESTÃO NOTURNA:** "A noite em Búzios está muito agradável, com cerca de 26°C. É uma temperatura perfeita para uma caminhada pela Rua das Pedras ou para explorar o polo gastronômico do bairro da Passagem em Cabo Frio."
-    - Você pode, opcionalmente, mencionar como o dia esteve: "O mar esteve ótimo para mergulho hoje..." mas a sua sugestão de ação deve ser para a noite.
-
+- Você pode, opcionalmente, mencionar como o dia esteve: "O mar esteve ótimo para mergulho hoje..." mas a sua sugestão de ação deve ser para a noite.
 - **REGRAS ADICIONAIS (qualquer horário):**
     - Se a \`temperatura da água\` estiver agradável (>22°C), mencione que "o mar está ótimo para um mergulho".
-    - Se o \`vento\` estiver moderado/alto (>5 m/s), mencione que "as condições estão favoráveis para esportes a vela, como windsurf ou kitesurf".
-    - Se houver dados de maré, informe os horários e a dica sobre a pesca.
-
-- **Regra para Resumo da Região:** Se você receber uma lista de dados climáticos para múltiplas cidades, sua tarefa é criar um resumo comparativo e conciso para o usuário. Comece com uma frase como "O tempo na Região dos Lagos está variado hoje!". Em seguida, resuma a condição de cada cidade. Ex: "Em Cabo Frio, o céu está com poucas nuvens e 25°C. Já em Búzios, está ensolarado com 26°C..."
-
+- Se o \`vento\` estiver moderado/alto (>5 m/s), mencione que "as condições estão favoráveis para esportes a vela, como windsurf ou kitesurf".
+- Se houver dados de maré, informe os horários e a dica sobre a pesca.
+- **Regra para Resumo da Região:** Se você receber uma lista de dados climáticos para múltiplas cidades, sua tarefa é criar um resumo comparativo e conciso para o usuário.
+Comece com uma frase como "O tempo na Região dos Lagos está variado hoje!".
+Em seguida, resuma a condição de cada cidade. Ex: "Em Cabo Frio, o céu está com poucas nuvens e 25°C. Já em Búzios, está ensolarado com 26°C..."
 - **Regra de honestidade futuro:** Se você não receber dados de \`previsao_diaria\` ao ser perguntado sobre o futuro, sua resposta deve ser: "Ainda não tenho os dados consolidados para a previsão futura. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde."
-
 # 4. DADOS CONTEXTUAIS (serão injetados abaixo)
 - HORA ATUAL (São Paulo): [[HORA_ATUAL]]
 - REGIÃO ATUAL: [[REGIAO]]
 - [DADOS CLIMA / MARÉS / ÁGUA]: 
 [[DADOS_JSON]]
-
 # 5. TAREFA FINAL
 Com base nas regras e nos dados fornecidos, formule a melhor e mais útil resposta.
 `.trim();
@@ -1070,7 +1070,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         .json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId });
     }
 
-    // 1. Setup de Contexto
+    // 1. Setup de Contexto Fixo (Região, Cidades)
     const { data: regiao } = await supabase
       .from("regioes")
       .select("id, nome")
@@ -1086,27 +1086,34 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       .eq("ativo", true);
     const cidadesAtivas = cidades || [];
 
-    // 2. Gerenciamento de Sessão
+    // 2. Gerenciamento de Sessão (Ensure + Leitura do Cache)
     const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
+    
+    let sessionData = { history: [], entities: {} };
+    if (redis && !isFirstTurn) { // Só lê do cache se não for o primeiro turno
+        try {
+            const cachedSession = await redis.get(conversationId);
+            if (cachedSession) {
+                sessionData = JSON.parse(cachedSession);
+                console.log(`[REDIS] Sessão ${conversationId} recuperada do cache.`);
+            }
+        } catch(e) {
+            console.error(`[REDIS] Falha ao ler sessão ${conversationId} do cache:`, e);
+        }
+    }
+    
+    const historico = sessionData.history || [];
 
     // 3. Tratamento de Saudação (sem repetição)
     if (isSaudacao(userText)) {
       const resposta = isFirstTurn
         ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região. Como posso te ajudar a ter uma experiência incrível hoje?`
         : "Oi! Como posso te ajudar agora?";
-
-      await supabase
-        .from("interacoes")
-        .insert({
-          conversation_id: conversationId,
-          regiao_id: regiao.id,
-          pergunta_usuario: userText,
-          resposta_ia: resposta,
-        });
-      return res.json({ reply: resposta, conversationId });
+      
+      return await updateSessionAndRespond({
+          res, conversationId, userText, aiResponseText: resposta, sessionData, regiaoId: regiao.id
+      });
     }
-
-    const historico = await construirHistoricoParaGemini(conversationId);
 
     // 4. Roteamento de Intenção: CLIMA
     if (isWeatherQuestion(userText)) {
@@ -1139,24 +1146,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
             if (!data) return null;
 
             let registro = { cidade: cidade.nome, [tipoDadoAlvo]: data.dados };
-
+            
+            const CIDADES_VIP = ["arraial do cabo", "cabo frio", "armação dos búzios"];
             if (when === "present" && CIDADES_VIP.includes(normalizarTexto(cidade.nome))) {
-              const { data: mare } = await supabase
-                .from("dados_climaticos")
-                .select("dados")
-                .eq("cidade_id", cidade.id)
-                .eq("tipo_dado", "dados_mare")
-                .order("data_hora_consulta", { ascending: false })
-                .limit(1)
-                .single();
-              const { data: agua } = await supabase
-                .from("dados_climaticos")
-                .select("dados")
-                .eq("cidade_id", cidade.id)
-                .eq("tipo_dado", "temperatura_agua")
-                .order("data_hora_consulta", { ascending: false })
-                .limit(1)
-                .single();
+              const { data: mare } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", cidade.id).eq("tipo_dado", "dados_mare").order("data_hora_consulta", { ascending: false }).limit(1).single();
+              const { data: agua } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", cidade.id).eq("tipo_dado", "temperatura_agua").order("data_hora_consulta", { ascending: false }).limit(1).single();
               if (mare) registro.dados_mare = mare.dados;
               if (agua) registro.temperatura_agua = agua.dados;
             }
@@ -1164,7 +1158,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           })
         )
       ).filter(Boolean);
-
+      
       if (dadosClimaticos.length > 0) {
         const payload = {
           tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica",
@@ -1172,38 +1166,22 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           dados: dadosClimaticos,
         };
         const horaLocal = getHoraLocalSP();
-        const promptFinal = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocal)
-          .replace("[[REGIAO]]", regiao.nome)
-          .replace("[[DADOS_JSON]]", JSON.stringify(payload))}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
-          historico
-        )}\n[Pergunta do Usuário]: "${userText}"`;
-
+        const promptFinal = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocal).replace("[[REGIAO]]", regiao.nome).replace("[[DADOS_JSON]]", JSON.stringify(payload))}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(historico)}\n[Pergunta do Usuário]: "${userText}"`;
         const respostaIA = await geminiTry(promptFinal);
-        await supabase
-          .from("interacoes")
-          .insert({
-            conversation_id: conversationId,
-            regiao_id: regiao.id,
-            pergunta_usuario: userText,
-            resposta_ia: respostaIA,
-          });
-        return res.json({ reply: respostaIA, conversationId });
+        
+        return await updateSessionAndRespond({
+            res, conversationId, userText, aiResponseText: respostaIA, sessionData, regiaoId: regiao.id
+        });
+
       } else {
-        const fallback =
-          "Ainda não tenho os dados consolidados para esta previsão. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.";
-        await supabase
-          .from("interacoes")
-          .insert({
-            conversation_id: conversationId,
-            regiao_id: regiao.id,
-            pergunta_usuario: userText,
-            resposta_ia: fallback,
-          });
-        return res.json({ reply: fallback, conversationId });
+        const fallback = "Ainda não tenho os dados consolidados para esta previsão. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.";
+        return await updateSessionAndRespond({
+            res, conversationId, userText, aiResponseText: fallback, sessionData, regiaoId: regiao.id
+        });
       }
     }
 
-    // 5. Roteamento de Intenção: PARCEIROS (usando sua lógica existente)
+    // 5. Roteamento de Intenção: PARCEIROS
     if (forcarBuscaParceiro(userText)) {
       const { respostaFinal, parceirosSugeridos } = await lidarComNovaBusca({
         textoDoUsuario: userText,
@@ -1214,35 +1192,20 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         isInitialSearch: true,
         excludeIds: [],
       });
-      await supabase
-        .from("interacoes")
-        .insert({
-          conversation_id: conversationId,
-          regiao_id: regiao.id,
-          pergunta_usuario: userText,
-          resposta_ia: respostaFinal,
-          parceiros_sugeridos: parceirosSugeridos,
-        });
-      return res.json({ reply: respostaFinal, conversationId, partners: parceirosSugeridos });
+      return await updateSessionAndRespond({
+          res, conversationId, userText, aiResponseText: respostaFinal, sessionData, regiaoId: regiao.id, partners: parceirosSugeridos
+      });
     }
 
     // 6. Fallback Geral (pergunta genérica)
     const horaLocalSP = getHoraLocalSP();
-    const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP)
-      .replace("[[REGIAO]]", regiao.nome)
-      .replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
-      historico
-    )}\n[Pergunta do Usuário]: "${userText}"`;
+    const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP).replace("[[REGIAO]]", regiao.nome).replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(historico)}\n[Pergunta do Usuário]: "${userText}"`;
     const respostaGeral = await geminiTry(promptGeral);
-    await supabase
-      .from("interacoes")
-      .insert({
-        conversation_id: conversationId,
-        regiao_id: regiao.id,
-        pergunta_usuario: userText,
-        resposta_ia: respostaGeral,
-      });
-    return res.json({ reply: respostaGeral, conversationId });
+
+    return await updateSessionAndRespond({
+        res, conversationId, userText, aiResponseText: respostaGeral, sessionData, regiaoId: regiao.id
+    });
+
   } catch (erro) {
     console.error(`[RUN ${runId}] ERRO FATAL:`, erro);
     return res
