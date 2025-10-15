@@ -524,7 +524,7 @@ function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
     if (r0?.tipo === "previsao_diaria") {
       const dias = Array.isArray(d?.daily) ? d.daily.slice(0, 5) : [];
       const linhas = dias.map((dia) => {
-       const label = dia?.data || dia?.date || "";
+        const label = dia?.data || dia?.date || "";
         const tmax = dia?.tmax ?? dia?.max ?? "";
         const tmin = dia?.tmin ?? dia?.min ?? "";
         const cond = dia?.condicao || dia?.descricao || "";
@@ -767,7 +767,7 @@ async function gerarRespostaGeralPrompteada({
       const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
       return texto || "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
     } catch {
-      return "Estou com alta demanda agora. Posco te ajudar com indicações e dados disponíveis.";
+      return "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
     }
   }
 }
@@ -1033,122 +1033,197 @@ async function lidarComNovaBusca({
 // >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v4 (DEFINITIVO) <<<<<<<<<<<<<<<
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
-  const runId = crypto.randomUUID();
-  console.log(`[RUN ${runId}] Iniciando nova requisição de chat.`);
+  const runId = randomUUID();
+  console.log(`[RUN ${runId}] Iniciando requisição para ${req.params.slugDaRegiao}.`);
 
   try {
-    // ------------------- SETUP E VALIDAÇÃO INICIAL -------------------
     const { slugDaRegiao } = req.params;
-    let { message: userText, conversationId } = req.body;
-    userText = (userText || "").trim();
+    const userText = (req.body?.message || "").trim();
 
-    if (!userText) {
-      return res.status(400).json({ error: "O campo 'message' é obrigatório." });
+    if (userText.length < 1) {
+      return res
+        .status(400)
+        .json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId });
     }
 
-    const { data: regiao } = await supabase.from("regioes").select("id, nome").eq("slug", slugDaRegiao).single();
+    // 1. Setup de Contexto
+    const { data: regiao } = await supabase
+      .from("regioes")
+      .select("id, nome")
+      .eq("slug", slugDaRegiao)
+      .single();
     if (!regiao) return res.status(404).json({ error: "Região não encontrada." });
+    req.ctx = { regiao };
 
-    // ------------------- MÓDULO DE SESSÃO (MEMÓRIA) -------------------
-    let isFirstTurn = false;
-    if (!conversationId) {
-      conversationId = crypto.randomUUID();
-      isFirstTurn = true;
-      await supabase.from("conversas").insert({ id: conversationId, regiao_id: regiao.id });
-    } else {
-      const { count } = await supabase.from("interacoes").select('id', { count: 'exact', head: true }).eq('conversation_id', conversationId);
-      isFirstTurn = (count || 0) === 0;
-    }
-    
-    const historicoGemini = isFirstTurn ? [] : await construirHistoricoParaGemini(conversationId, 6);
+    const { data: cidades } = await supabase
+      .from("cidades")
+      .select("id, nome, slug")
+      .eq("regiao_id", regiao.id)
+      .eq("ativo", true);
+    const cidadesAtivas = cidades || [];
 
-    // ------------------- TRATAR SAUDAÇÃO (FIM DA REPETIÇÃO) -------------------
+    // 2. Gerenciamento de Sessão
+    const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
+
+    // 3. Tratamento de Saudação (sem repetição)
     if (isSaudacao(userText)) {
-        const resposta = isFirstTurn
-            ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região. Como posso te ajudar a ter uma experiência incrível hoje?`
-            : "Oi! Como posso te ajudar agora?";
-        
-        await supabase.from("interacoes").insert({ conversation_id: conversationId, regiao_id: regiao.id, pergunta_usuario: userText, resposta_ia: resposta });
-        return res.status(200).json({ reply: resposta, conversationId });
+      const resposta = isFirstTurn
+        ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região. Como posso te ajudar a ter uma experiência incrível hoje?`
+        : "Oi! Como posso te ajudar agora?";
+
+      await supabase
+        .from("interacoes")
+        .insert({
+          conversation_id: conversationId,
+          regiao_id: regiao.id,
+          pergunta_usuario: userText,
+          resposta_ia: resposta,
+        });
+      return res.json({ reply: resposta, conversationId });
     }
 
-    // ------------------- ORQUESTRADOR DE CLIMA (INTELIGÊNCIA TOTAL) -------------------
-    const palavrasDeClima = ["clima", "tempo", "previsão", "previsao", "temperatura", "graus", "chovendo", "sol"];
-    if (palavrasDeClima.some(p => normalizarTexto(userText).includes(p))) {
-      
-      const palavrasDeFuturo = ["amanhã", "amanha", "semana que vem", "próximos dias", "sabado", "sábado", "domingo", "futuro"];
-      const isFutureQuery = palavrasDeFuturo.some(p => normalizarTexto(userText).includes(p));
-      const tipoDadoAlvo = isFutureQuery ? 'previsao_diaria' : 'clima_atual';
+    const historico = await construirHistoricoParaGemini(conversationId);
 
-      const { data: cidades } = await supabase.from("cidades").select("id, nome").eq("regiao_id", regiao.id).eq("ativo", true);
-      const cidadesAtivas = cidades || [];
-      
-      let cidadeAlvo = cidadesAtivas.find(c => normalizarTexto(userText).includes(normalizarTexto(c.nome)));
-      const isRegionQuery = normalizarTexto(userText).includes("região") && !cidadeAlvo;
+    // 4. Roteamento de Intenção: CLIMA
+    if (isWeatherQuestion(userText)) {
+      const when = detectTemporalWindow(userText);
+      const tipoDadoAlvo = when === "future" ? "previsao_diaria" : "clima_atual";
+      const cidadeAlvo = extractCity(userText, cidadesAtivas);
+      const forRegion = isRegionQuery(userText) && !cidadeAlvo;
 
-      let cidadesParaConsulta = [];
-      let dadosClimaticos = [];
-      let consultaParaIA = {};
-      const CIDADES_VIP = ["arraial do cabo", "cabo frio", "armação dos búzios"];
-
+      let cidadesParaBuscar = [];
       if (cidadeAlvo) {
-        cidadesParaConsulta.push(cidadeAlvo);
-      } else if (isRegionQuery) {
-        cidadesParaConsulta = cidadesAtivas.filter(c => CIDADES_VIP.includes(normalizarTexto(c.nome)));
+        cidadesParaBuscar.push(cidadeAlvo);
+      } else if (forRegion) {
+        const nomesVip = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"];
+        cidadesParaBuscar = cidadesAtivas.filter((c) =>
+          nomesVip.some((nVip) => normalizarTexto(c.nome) === normalizarTexto(nVip))
+        );
       }
 
-      if (cidadesParaConsulta.length > 0) {
-        const promises = cidadesParaConsulta.map(async (c) => {
-          // Busca o dado principal (clima ou previsão)
-          const { data: dadoPrincipal } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", c.id).eq("tipo_dado", tipoDadoAlvo).order('data_hora_consulta', { ascending: false }).limit(1).single();
-          if (!dadoPrincipal) return null;
+      const dadosClimaticos = (
+        await Promise.all(
+          cidadesParaBuscar.map(async (cidade) => {
+            const { data } = await supabase
+              .from("dados_climaticos")
+              .select("dados")
+              .eq("cidade_id", cidade.id)
+              .eq("tipo_dado", tipoDadoAlvo)
+              .order("data_hora_consulta", { ascending: false })
+              .limit(1)
+              .single();
+            if (!data) return null;
 
-          let registroFinal = { cidade: c.nome, [tipoDadoAlvo]: dadoPrincipal.dados };
+            let registro = { cidade: cidade.nome, [tipoDadoAlvo]: data.dados };
 
-          // Se for cidade VIP e a consulta for sobre o presente, busca maré e água
-          if (!isFutureQuery && CIDADES_VIP.includes(normalizarTexto(c.nome))) {
-            const { data: dadoMare } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", c.id).eq("tipo_dado", 'dados_mare').order('data_hora_consulta', { ascending: false }).limit(1).single();
-            const { data: dadoAgua } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", c.id).eq("tipo_dado", 'temperatura_agua').order('data_hora_consulta', { ascending: false }).limit(1).single();
-            if (dadoMare) registroFinal.dados_mare = dadoMare.dados;
-            if (dadoAgua) registroFinal.temperatura_agua = dadoAgua.dados;
-          }
-          return registroFinal;
-        });
-        const resultados = (await Promise.all(promises)).filter(Boolean);
-        dadosClimaticos = resultados;
-      }
-      
-      consultaParaIA = {
-          tipoConsulta: isRegionQuery ? 'resumo_regiao' : 'cidade_especifica',
-          janelaTempo: isFutureQuery ? 'futuro' : 'presente',
-          dados: dadosClimaticos
-      };
+            if (when === "present" && CIDADES_VIP.includes(normalizarTexto(cidade.nome))) {
+              const { data: mare } = await supabase
+                .from("dados_climaticos")
+                .select("dados")
+                .eq("cidade_id", cidade.id)
+                .eq("tipo_dado", "dados_mare")
+                .order("data_hora_consulta", { ascending: false })
+                .limit(1)
+                .single();
+              const { data: agua } = await supabase
+                .from("dados_climaticos")
+                .select("dados")
+                .eq("cidade_id", cidade.id)
+                .eq("tipo_dado", "temperatura_agua")
+                .order("data_hora_consulta", { ascending: false })
+                .limit(1)
+                .single();
+              if (mare) registro.dados_mare = mare.dados;
+              if (agua) registro.temperatura_agua = agua.dados;
+            }
+            return registro;
+          })
+        )
+      ).filter(Boolean);
 
       if (dadosClimaticos.length > 0) {
-        const horaLocal = new Date().getHours(); // Simplificado - idealmente converter para -03:00 com biblioteca
-        const promptContextual = `${BEPIT_SYSTEM_PROMPT_APPENDIX}\n\n# DADOS CONTEXTUAIS\n- HORA ATUAL: "${horaLocal}"\n- PERGUNTA DO USUÁRIO: "${userText}"\n- DADOS PARA RESPOSTA: ${JSON.stringify(consultaParaIA)}`;
-        const respostaIA = await geminiTry(promptContextual);
-        await supabase.from("interacoes").insert({ conversation_id: conversationId, regiao_id: regiao.id, pergunta_usuario: userText, resposta_ia: respostaIA });
-        return res.status(200).json({ reply: respostaIA, conversationId });
+        const payload = {
+          tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica",
+          janelaTempo: when,
+          dados: dadosClimaticos,
+        };
+        const horaLocal = getHoraLocalSP();
+        const promptFinal = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocal)
+          .replace("[[REGIAO]]", regiao.nome)
+          .replace("[[DADOS_JSON]]", JSON.stringify(payload))}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
+          historico
+        )}\n[Pergunta do Usuário]: "${userText}"`;
+
+        const respostaIA = await geminiTry(promptFinal);
+        await supabase
+          .from("interacoes")
+          .insert({
+            conversation_id: conversationId,
+            regiao_id: regiao.id,
+            pergunta_usuario: userText,
+            resposta_ia: respostaIA,
+          });
+        return res.json({ reply: respostaIA, conversationId });
       } else {
-        const respostaFallback = "Ainda não tenho os dados consolidados para esta previsão. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.";
-        await supabase.from("interacoes").insert({ conversation_id: conversationId, regiao_id: regiao.id, pergunta_usuario: userText, resposta_ia: respostaFallback });
-        return res.status(200).json({ reply: respostaFallback, conversationId });
+        const fallback =
+          "Ainda não tenho os dados consolidados para esta previsão. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.";
+        await supabase
+          .from("interacoes")
+          .insert({
+            conversation_id: conversationId,
+            regiao_id: regiao.id,
+            pergunta_usuario: userText,
+            resposta_ia: fallback,
+          });
+        return res.json({ reply: fallback, conversationId });
       }
     }
 
-    // ------------------- FALLBACK PARA LÓGICA DE PARCEIROS E GERAL -------------------
-    const respostaGeral = await gerarRespostaGeral(userText, historicoGemini, regiao);
-    await supabase.from("interacoes").insert({ conversation_id: conversationId, regiao_id: regiao.id, pergunta_usuario: userText, resposta_ia: respostaGeral });
-    return res.status(200).json({ reply: respostaGeral, conversationId });
+    // 5. Roteamento de Intenção: PARCEIROS (usando sua lógica existente)
+    if (forcarBuscaParceiro(userText)) {
+      const { respostaFinal, parceirosSugeridos } = await lidarComNovaBusca({
+        textoDoUsuario: userText,
+        historicoGemini: historico,
+        regiao,
+        cidadesAtivas,
+        idDaConversa: conversationId,
+        isInitialSearch: true,
+        excludeIds: [],
+      });
+      await supabase
+        .from("interacoes")
+        .insert({
+          conversation_id: conversationId,
+          regiao_id: regiao.id,
+          pergunta_usuario: userText,
+          resposta_ia: respostaFinal,
+          parceiros_sugeridos: parceirosSugeridos,
+        });
+      return res.json({ reply: respostaFinal, conversationId, partners: parceirosSugeridos });
+    }
 
+    // 6. Fallback Geral (pergunta genérica)
+    const horaLocalSP = getHoraLocalSP();
+    const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP)
+      .replace("[[REGIAO]]", regiao.nome)
+      .replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
+      historico
+    )}\n[Pergunta do Usuário]: "${userText}"`;
+    const respostaGeral = await geminiTry(promptGeral);
+    await supabase
+      .from("interacoes")
+      .insert({
+        conversation_id: conversationId,
+        regiao_id: regiao.id,
+        pergunta_usuario: userText,
+        resposta_ia: respostaGeral,
+      });
+    return res.json({ reply: respostaGeral, conversationId });
   } catch (erro) {
-    console.error(`[RUN ${runId}] ERRO FATAL NA ROTA DE CHAT:`, erro);
-    const MENSAGEM_ERRO_FRONTEND = "Ops, a conexão parece ter oscilado. Tente novamente em instantes. Se o erro persistir, o sistema pode estar em manutenção.";
-    return res.status(500).json({ 
-        reply: MENSAGEM_ERRO_FRONTEND,
-        error: "Erro interno no servidor do BEPIT." 
-    });
+    console.error(`[RUN ${runId}] ERRO FATAL:`, erro);
+    return res
+      .status(500)
+      .json({ reply: "Ops, encontrei um erro inesperado. Minha equipe já foi notificada." });
   }
 });
 
