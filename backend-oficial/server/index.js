@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Session Ensurer + Classificador + Roteamento"
-// v5.1.1 (stateful, robusto, CORS fixo, tolerância a rate-limit e prompt completo)
+// v5.1.2 (stateful, robusto, CORS fixo, tolerância a rate-limit e etiqueta de conversa)
 // ============================================================================
 
 import "dotenv/config";
@@ -115,7 +115,6 @@ async function selecionarModeloREST() {
     );
   }
 
-  // Preferência explícita pelo 2.5 flash
   const preferencia = [
     envModelo && stripModelsPrefix(envModelo),
     "gemini-2.5-flash",
@@ -437,6 +436,7 @@ const PROMPT_MESTRE_V13 = `
 # 2. DIRETRIZES GERAIS
 - Seja proativo, amigável e honesto.
 - Priorize sempre os parceiros cadastrados.
+- **REGRA DE ETIQUETA:** Se a conversa já começou (ou seja, se não for a primeira mensagem), NUNCA inicie sua resposta com "Olá!", "Seja bem-vindo" ou qualquer outra saudação. Vá direto ao ponto ou use uma transição curta como "Claro," ou "Entendido,".
 
 # 3. MÓDULO DE RACIOCÍNIO: CONCIERGE DE CLIMA, MARÉS E ATIVIDADES CONTEXTUAIS
 - Sua função é ser um "conselheiro" para o turista, conectando dados brutos a atividades práticas e contextuais.
@@ -524,7 +524,7 @@ function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
     if (r0?.tipo === "previsao_diaria") {
       const dias = Array.isArray(d?.daily) ? d.daily.slice(0, 5) : [];
       const linhas = dias.map((dia) => {
-        const label = dia?.data || dia?.date || "";
+       const label = dia?.data || dia?.date || "";
         const tmax = dia?.tmax ?? dia?.max ?? "";
         const tmin = dia?.tmin ?? dia?.min ?? "";
         const cond = dia?.condicao || dia?.descricao || "";
@@ -767,7 +767,7 @@ async function gerarRespostaGeralPrompteada({
       const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
       return texto || "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
     } catch {
-      return "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
+      return "Estou com alta demanda agora. Posco te ajudar com indicações e dados disponíveis.";
     }
   }
 }
@@ -1011,7 +1011,7 @@ async function lidarComNovaBusca({
     }
     return { respostaFinal, parceirosSugeridos };
   } else {
-    // Sem resultados → resposta geral (blindada por guardrails externos, se aplicável)
+    // Sem resultados → resposta geral
     const respostaModelo = await gerarRespostaGeralPrompteada({
       pergunta: textoDoUsuario,
       historicoContents: historicoGemini,
@@ -1061,7 +1061,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     // 2) Session Ensurer
     const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
 
-    // 3) Saudação somente se for primeiro turno
+    // 3) Saudação inicial — somente no primeiro turno
     if (isSaudacao(textoDoUsuario) && isFirstTurn) {
       const nomeRegiao = regiao?.nome || "Região dos Lagos";
       const respostaSaudacao =
@@ -1085,30 +1085,25 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         intent: "saudacao_inicial",
         partners: [],
       });
-    }
-
-    // 3.1) Saudação fora do primeiro turno: resposta curta sem IA
-    if (isSaudacao(textoDoUsuario) && !isFirstTurn) {
-      const msg =
-        "Oi! Como posso te ajudar agora? Posso sugerir passeios, restaurantes, praias e previsão do tempo. 🙂";
+    // ======== ALTERAÇÃO 1: SAUDAÇÃO CURTA NO MEIO DA CONVERSA (ELIMINA REPETIÇÃO) ========
+    } else if (isSaudacao(textoDoUsuario) && !isFirstTurn) {
+      // Se for uma saudação no meio da conversa, dê uma resposta curta.
+      const respostaCurta = "Oi! Como posso te ajudar agora?";
       try {
-        await supabase.from("interacoes").insert({
-          regiao_id: regiao.id,
-          conversation_id: conversationId,
-          pergunta_usuario: textoDoUsuario,
-          resposta_ia: msg,
-          parceiros_sugeridos: [],
-        });
+        await supabase
+          .from("interacoes")
+          .insert({
+            conversation_id: conversationId,
+            regiao_id: regiao.id,
+            pergunta_usuario: textoDoUsuario,
+            resposta_ia: respostaCurta,
+          });
       } catch {
-        // ignora
+        // não bloqueia fluxo
       }
-      return res.status(200).json({
-        reply: msg,
-        conversationId,
-        intent: "saudacao_continuacao",
-        partners: [],
-      });
+      return res.status(200).json({ reply: respostaCurta, conversationId, intent: "saudacao_curta" });
     }
+    // ======== FIM ALTERAÇÃO 1 ========
 
     // 4) Histórico (para IA)
     const historicoGemini = await construirHistoricoParaGemini(conversationId, 12);
@@ -1128,7 +1123,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       };
 
       if (escopoRegiao) {
-        // 3 cidades VIP: Arraial, Cabo Frio, Búzios — respeita janela temporal (presente/futuro)
+        // 3 cidades VIP: Arraial, Cabo Frio, Búzios
         const tipoDadoRegiao = when === "future" ? "previsao_diaria" : "clima_atual";
         const nomesAlvo = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"];
         const mapaCidades = {};
@@ -1158,7 +1153,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           }
         }
       } else if (cidadeEscopo) {
-        // Cidade específica: present -> clima_atual, future -> previsao_diaria
         const tipoDado = when === "future" ? "previsao_diaria" : "clima_atual";
         const { data: climaRows } = await supabase
           .from("dados_climaticos")
@@ -1176,7 +1170,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           });
         }
 
-        // Se for VIP, tenta dados de maré e temperatura da água (últimos registros)
+        // VIP: maré e temperatura da água
         if (CIDADES_VIP.includes(normalizarTexto(cidadeEscopo.nome))) {
           const { data: dMare } = await supabase
             .from("dados_climaticos")
@@ -1210,7 +1204,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         }
       }
 
-      // Fallback explícito se nada foi encontrado
       if (!Array.isArray(dadosIA.resultados) || dadosIA.resultados.length === 0) {
         const msgFallback =
           "Dados de clima não encontrados para esta consulta. Posso tentar novamente em instantes.";
@@ -1233,7 +1226,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         });
       }
 
-      // Gera resposta IA com PROMPT v1.3 (hora local)
       const dadosJSON = JSON.stringify(dadosIA, null, 2);
       const respostaModelo = await gerarRespostaGeralPrompteada({
         pergunta: textoDoUsuario,
@@ -1249,7 +1241,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         mode: "general",
       });
 
-      // Persistência
       let interactionId = null;
       try {
         const { data: nova } = await supabase
@@ -1277,7 +1268,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // 6) Fallback: lógica de parceiros existente (determinística)
+    // 6) Fallback: lógica de parceiros
     const intent = await analisarIntencaoDoUsuario(textoDoUsuario);
     let respostaFinal = "";
     let parceirosSugeridos = [];
@@ -1356,7 +1347,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       partners: parceirosSugeridos,
     });
   } catch (erro) {
-    // Importante: não exponha 429 do provedor para o cliente final
     const msg = String(erro?.message || erro);
     if (isRetryableGeminiError(erro) || /AI_DISABLED/.test(msg)) {
       return res.status(200).json({
