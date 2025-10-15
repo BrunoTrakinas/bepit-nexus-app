@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.0.1 (Anti-Fragilidade, Conexão Redis Resiliente, Try/Catch Global)
+// v6.0.2 (Diagnóstico com Raio-X, Anti-Fragilidade)
 // ============================================================================
 
 import "dotenv/config";
@@ -11,10 +11,10 @@ import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
 import { Redis } from 'ioredis';
 
-// Guardrails essenciais
+// (As importações auxiliares permanecem as mesmas)
 import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
-// Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
+
 
 // --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.1 ---
 let redis;
@@ -22,17 +22,16 @@ try {
   if (!process.env.UPSTASH_REDIS_URL) {
     throw new Error("A variável de ambiente UPSTASH_REDIS_URL não está definida.");
   }
-  // Opções de resiliência para ambientes de nuvem com conexões instáveis
   const redisOptions = {
-    lazyConnect: true, // Conecta apenas quando o primeiro comando for executado
+    lazyConnect: true,
     enableReadyCheck: false,
-    maxRetriesPerRequest: 3, // Tenta no máximo 3 vezes antes de desistir e gerar erro
-    connectTimeout: 10000, // Timeout de 10 segundos para conectar
+    maxRetriesPerRequest: 3,
+    connectTimeout: 10000,
   };
   redis = new Redis(process.env.UPSTASH_REDIS_URL, redisOptions);
 
   redis.on('connect', () => {
-    console.log('[REDIS] Conectado com sucesso ao Upstash!');
+    console.log('[REDIS] Conexão estabelecida com o Upstash!');
   });
 
   redis.on('error', (err) => {
@@ -1065,9 +1064,8 @@ async function lidarComNovaBusca({
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
-  // BLINDAGEM GLOBAL: try...catch em toda a rota para NUNCA travar o servidor.
   try {
-    console.log(`[RUN ${runId}] Iniciando requisição para ${req.params.slugDaRegiao}.`);
+    console.log(`[RUN ${runId}] [RAIO-X PONTO 1] Rota /chat iniciada.`);
 
     const { slugDaRegiao } = req.params;
     const userText = (req.body?.message || "").trim();
@@ -1078,51 +1076,47 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         .json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId });
     }
 
-    // 1. Setup de Contexto Fixo (Região, Cidades)
-    const { data: regiao } = await supabase
-      .from("regioes")
-      .select("id, nome")
-      .eq("slug", slugDaRegiao)
-      .single();
+    // 1. Setup de Contexto Fixo
+    const { data: regiao } = await supabase.from("regioes").select("id, nome").eq("slug", slugDaRegiao).single();
     if (!regiao) return res.status(404).json({ error: "Região não encontrada." });
     req.ctx = { regiao };
 
-    const { data: cidades } = await supabase
-      .from("cidades")
-      .select("id, nome, slug")
-      .eq("regiao_id", regiao.id)
-      .eq("ativo", true);
+    const { data: cidades } = await supabase.from("cidades").select("id, nome, slug").eq("regiao_id", regiao.id).eq("ativo", true);
     const cidadesAtivas = cidades || [];
+    console.log(`[RUN ${runId}] [RAIO-X PONTO 2] Contexto de região e cidades carregado.`);
 
-    // 2. Gerenciamento de Sessão (Ensure + Leitura do Cache)
+    // 2. Gerenciamento de Sessão
     const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
+    console.log(`[RUN ${runId}] [RAIO-X PONTO 3] Sessão garantida. ID: ${conversationId}, É o primeiro turno: ${isFirstTurn}`);
     
     let sessionData = { history: [], entities: {} };
-    // BLINDAGEM: try...catch em volta da operação de leitura do Redis
     try {
       if (redis && !isFirstTurn) {
+        console.log(`[RUN ${runId}] [RAIO-X PONTO 4] Tentando ler do cache Redis...`);
         const cachedSession = await redis.get(conversationId);
+        console.log(`[RUN ${runId}] [RAIO-X PONTO 5] Leitura do Redis concluída.`);
         if (cachedSession) {
             sessionData = JSON.parse(cachedSession);
-            console.log(`[REDIS] Sessão ${conversationId} recuperada do cache.`);
+            console.log(`[RUN ${runId}] [REDIS] Sessão recuperada do cache.`);
         }
       }
     } catch(e) {
-        console.error(`[REDIS] Falha CRÍTICA ao LER sessão ${conversationId}. Operando sem memória. Erro:`, e);
-        // Reseta a sessionData para garantir que não usemos dados corrompidos
+        console.error(`[RUN ${runId}] [REDIS] Falha CRÍTICA ao LER sessão. Operando sem memória. Erro:`, e);
         sessionData = { history: [], entities: {} };
     }
     
     const historico = sessionData.history || [];
+    console.log(`[RUN ${runId}] [RAIO-X PONTO 6] Histórico de conversa preparado.`);
 
     // 3. Tratamento de Saudação
     if (isSaudacao(userText)) {
+      console.log(`[RUN ${runId}] [RAIO-X PONTO 7] Intenção de saudação detectada.`);
       const resposta = isFirstTurn
         ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região. Como posso te ajudar a ter uma experiência incrível hoje?`
         : "Oi! Como posso te ajudar agora?";
       
       return await updateSessionAndRespond({
-          res, conversationId, userText, aiResponseText: resposta, sessionData, regiaoId: regiao.id
+          res, runId, conversationId, userText, aiResponseText: resposta, sessionData, regiaoId: regiao.id
       });
     }
 
@@ -1208,23 +1202,84 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // 6. Fallback Geral (exemplo, a lógica completa está no seu arquivo)
+    // 6. Fallback Geral (exemplo)
+    console.log(`[RUN ${runId}] [RAIO-X PONTO 8] Roteado para Fallback Geral.`);
     const horaLocalSP = getHoraLocalSP();
     const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP).replace("[[REGIAO]]", regiao.nome).replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(historico)}\n[Pergunta do Usuário]: "${userText}"`;
+    
+    console.log(`[RUN ${runId}] [RAIO-X PONTO 9] Tentando chamar a IA Gemini...`);
     const respostaGeral = await geminiTry(promptGeral);
+    console.log(`[RUN ${runId}] [RAIO-X PONTO 10] Resposta da IA Gemini recebida.`);
 
     return await updateSessionAndRespond({
-        res, conversationId, userText, aiResponseText: respostaGeral, sessionData, regiaoId: regiao.id
+        res, runId, conversationId, userText, aiResponseText: respostaGeral, sessionData, regiaoId: regiao.id
     });
 
   } catch (erro) {
-    // A BLINDAGEM GLOBAL captura qualquer erro não tratado, loga e responde sem travar.
     console.error(`[RUN ${runId}] ERRO FATAL NA ROTA:`, erro);
     return res
       .status(500)
       .json({ reply: "Ops, encontrei um problema temporário. Por favor, tente sua pergunta novamente em um instante." });
   }
 });
+// Adicionando a nova função centralizadora e garantindo que o runId seja logado
+async function updateSessionAndRespond({
+  res,
+  runId, // << NOVO
+  conversationId,
+  userText,
+  aiResponseText,
+  sessionData,
+  regiaoId,
+  partners = [],
+}) {
+  const novoHistorico = [...(sessionData.history || [])];
+  novoHistorico.push({ role: "user", parts: [{ text: userText }] });
+  novoHistorico.push({ role: "model", parts: [{ text: aiResponseText }] });
+
+  const MAX_HISTORY_LENGTH = 12;
+  while (novoHistorico.length > MAX_HISTORY_LENGTH) {
+    novoHistorico.shift();
+  }
+  
+  const novaSessionData = {
+    ...sessionData,
+    history: novoHistorico,
+  };
+
+  const TTL_SECONDS = 900;
+  if (redis) {
+    try {
+      console.log(`[RUN ${runId}] [RAIO-X PONTO FINAL] Salvando sessão no Redis...`);
+      await redis.set(
+        conversationId,
+        JSON.stringify(novaSessionData),
+        "EX",
+        TTL_SECONDS
+      );
+    } catch (e) {
+      console.error(`[RUN ${runId}] [REDIS] Falha ao SALVAR sessão:`, e);
+    }
+  }
+
+  try {
+    await supabase.from("interacoes").insert({
+      conversation_id: conversationId,
+      regiao_id: regiaoId,
+      pergunta_usuario: userText,
+      resposta_ia: aiResponseText,
+      parceiros_sugeridos: partners.length > 0 ? partners : null,
+    });
+  } catch (e) {
+    console.error(`[RUN ${runId}] [SUPABASE] Falha ao salvar interação:`, e);
+  }
+
+  return res.json({
+    reply: aiResponseText,
+    conversationId,
+    partners: partners.length > 0 ? partners : undefined,
+  });
+}
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
 aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
