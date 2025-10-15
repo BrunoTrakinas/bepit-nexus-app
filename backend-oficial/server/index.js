@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.0.2 (Diagnóstico com Raio-X, Anti-Fragilidade)
+// v6.0.3 (Correção de SyntaxError, Diagnóstico com Raio-X)
 // ============================================================================
 
 import "dotenv/config";
@@ -11,10 +11,10 @@ import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
 import { Redis } from 'ioredis';
 
-// (As importações auxiliares permanecem as mesmas)
+// Guardrails essenciais
 import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
+// Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
-
 
 // --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.1 ---
 let redis;
@@ -31,7 +31,7 @@ try {
   redis = new Redis(process.env.UPSTASH_REDIS_URL, redisOptions);
 
   redis.on('connect', () => {
-    console.log('[REDIS] Conexão estabelecida com o Upstash!');
+    console.log('[REDIS] Conectado com sucesso ao Upstash!');
   });
 
   redis.on('error', (err) => {
@@ -95,7 +95,6 @@ aplicacaoExpress.use(
     allowedHeaders: ["Content-Type", "x-admin-key", "authorization", "Accept"],
   })
 );
-
 // ============================== GEMINI REST v1 (sem alterações) ===============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
 const chaveGemini = process.env.GEMINI_API_KEY || "";
@@ -235,8 +234,6 @@ function getHoraLocalSP() {
   }
 }
 
-// ATENÇÃO: Esta função foi MANTIDA para possível uso futuro, mas não é mais
-// chamada no fluxo principal, que agora prioriza o cache do Redis.
 async function construirHistoricoParaGemini(conversationId, limite = 12) {
   try {
     const { data, error } = await supabase
@@ -247,7 +244,6 @@ async function construirHistoricoParaGemini(conversationId, limite = 12) {
     if (error) throw error;
     const rows = data || [];
     const ultimas = rows.slice(-limite);
-
     const contents = [];
     for (const it of ultimas) {
       if (it.pergunta_usuario)
@@ -276,20 +272,10 @@ function historicoParaTextoSimplesWrapper(hc) {
   }
 }
 
-// ======================= NOVA FUNÇÃO CENTRALIZADORA ==========================
-/**
- * Salva a interação no Redis e no Supabase, e envia a resposta final.
- * @param {object} params
- * @param {object} params.res - O objeto de resposta do Express.
- * @param {string} params.conversationId - O ID da conversa.
- * @param {string} params.userText - A pergunta do usuário.
- * @param {string} params.aiResponseText - A resposta da IA.
- * @param {object} params.sessionData - O objeto de sessão atual (com histórico).
- * @param {string} params.regiaoId - O ID da região.
- * @param {Array} [params.partners] - Lista de parceiros sugeridos (opcional).
- */
+// ======================= NOVA FUNÇÃO CENTRALIZADORA (Versão ÚNICA E CORRETA) ==========================
 async function updateSessionAndRespond({
   res,
+  runId,
   conversationId,
   userText,
   aiResponseText,
@@ -297,12 +283,11 @@ async function updateSessionAndRespond({
   regiaoId,
   partners = [],
 }) {
-  // 1. Atualiza o histórico da sessão
+  console.log(`[RUN ${runId}] [RAIO-X FINAL] Preparando para responder e salvar sessão.`);
   const novoHistorico = [...(sessionData.history || [])];
   novoHistorico.push({ role: "user", parts: [{ text: userText }] });
   novoHistorico.push({ role: "model", parts: [{ text: aiResponseText }] });
 
-  // 2. Mantém o histórico com um tamanho máximo (ex: últimos 12 turnos)
   const MAX_HISTORY_LENGTH = 12;
   while (novoHistorico.length > MAX_HISTORY_LENGTH) {
     novoHistorico.shift();
@@ -313,22 +298,22 @@ async function updateSessionAndRespond({
     history: novoHistorico,
   };
 
-  // 3. Salva a sessão atualizada no Redis com expiração de 15 minutos
-  const TTL_SECONDS = 900; // 15 minutos
+  const TTL_SECONDS = 900;
   if (redis) {
     try {
+      console.log(`[RUN ${runId}] [RAIO-X FINAL] Salvando sessão no Redis...`);
       await redis.set(
         conversationId,
         JSON.stringify(novaSessionData),
         "EX",
         TTL_SECONDS
       );
+      console.log(`[RUN ${runId}] [RAIO-X FINAL] Sessão salva no Redis com sucesso.`);
     } catch (e) {
-      console.error(`[REDIS] Falha ao salvar sessão para ${conversationId}:`, e);
+      console.error(`[RUN ${runId}] [REDIS] Falha ao SALVAR sessão:`, e);
     }
   }
 
-  // 4. Salva a interação no Supabase (para histórico de longo prazo e analytics)
   try {
     await supabase.from("interacoes").insert({
       conversation_id: conversationId,
@@ -338,10 +323,9 @@ async function updateSessionAndRespond({
       parceiros_sugeridos: partners.length > 0 ? partners : null,
     });
   } catch (e) {
-    console.error(`[SUPABASE] Falha ao salvar interação para ${conversationId}:`, e);
+    console.error(`[RUN ${runId}] [SUPABASE] Falha ao salvar interação:`, e);
   }
 
-  // 5. Envia a resposta final para o cliente
   return res.json({
     reply: aiResponseText,
     conversationId,
@@ -349,8 +333,7 @@ async function updateSessionAndRespond({
   });
 }
 
-
-// -------------------------- SESSION ENSURER (sem alterações) ---------------------------------
+// -------------------------- SESSION ENSURER ---------------------------------
 async function ensureConversation(req, supabaseClient) {
   const body = req.body || {};
   let conversationId = body.conversationId || body.threadId || body.sessionId || null;
@@ -382,13 +365,16 @@ async function ensureConversation(req, supabaseClient) {
     }
   }
 
-  // A verificação de isFirstTurn agora pode ser feita pela existência da sessão no cache
   let isFirstTurn = false;
   if (redis) {
-      const sessionExists = await redis.exists(conversationId);
-      isFirstTurn = !sessionExists;
+      try {
+        const sessionExists = await redis.exists(conversationId);
+        isFirstTurn = !sessionExists;
+      } catch (e) {
+        console.warn(`[REDIS] Falha ao checar existência da sessão ${conversationId}. Assumindo primeiro turno.`, e);
+        isFirstTurn = true;
+      }
   } else {
-      // Fallback para o método antigo se o Redis não estiver disponível
       try {
           const { count } = await supabaseClient
             .from("interacoes")
@@ -404,7 +390,7 @@ async function ensureConversation(req, supabaseClient) {
   return { conversationId, isFirstTurn };
 }
 
-// ---------------------- CLASSIFICAÇÃO DETERMINÍSTICA (sem alterações) ------------------------
+// ---------------------- CLASSIFICAÇÃO DETERMINÍSTICA ------------------------
 function isSaudacao(texto) {
   const t = normalizarTexto(texto);
   const saudacoes = [
@@ -1058,9 +1044,8 @@ async function lidarComNovaBusca({
   }
 }
 
-// ============================== ROTA PRINCIPAL ===============================
 // ============================================================================
-// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.1 (ANTI-FRÁGIL) <<<<<<<<<<<
+// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.2 (COM RAIO-X) <<<<<<<<<<<
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
@@ -1202,7 +1187,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // 6. Fallback Geral (exemplo)
+    // 6. Fallback Geral (pergunta genérica)
     console.log(`[RUN ${runId}] [RAIO-X PONTO 8] Roteado para Fallback Geral.`);
     const horaLocalSP = getHoraLocalSP();
     const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP).replace("[[REGIAO]]", regiao.nome).replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(historico)}\n[Pergunta do Usuário]: "${userText}"`;
