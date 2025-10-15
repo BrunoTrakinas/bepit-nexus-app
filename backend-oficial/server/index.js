@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.0.0 (Memória Curta com Redis, Refatorado para DRY, stateful)
+// v6.0.1 (Anti-Fragilidade, Conexão Redis Resiliente, Try/Catch Global)
 // ============================================================================
 
 import "dotenv/config";
@@ -16,23 +16,30 @@ import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
 // Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 
-// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) ---
+// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.1 ---
 let redis;
 try {
   if (!process.env.UPSTASH_REDIS_URL) {
     throw new Error("A variável de ambiente UPSTASH_REDIS_URL não está definida.");
   }
-  redis = new Redis(process.env.UPSTASH_REDIS_URL);
+  // Opções de resiliência para ambientes de nuvem com conexões instáveis
+  const redisOptions = {
+    lazyConnect: true, // Conecta apenas quando o primeiro comando for executado
+    enableReadyCheck: false,
+    maxRetriesPerRequest: 3, // Tenta no máximo 3 vezes antes de desistir e gerar erro
+    connectTimeout: 10000, // Timeout de 10 segundos para conectar
+  };
+  redis = new Redis(process.env.UPSTASH_REDIS_URL, redisOptions);
 
   redis.on('connect', () => {
     console.log('[REDIS] Conectado com sucesso ao Upstash!');
   });
 
   redis.on('error', (err) => {
-    console.error('[REDIS] Não foi possível conectar ao Upstash:', err);
+    console.error('[REDIS] Erro de conexão com o Upstash:', err);
   });
 } catch (error) {
-  console.error("[REDIS] Erro ao inicializar o cliente Redis:", error.message);
+  console.error("[REDIS] Erro fatal ao inicializar o cliente Redis:", error.message);
 }
 // --- FIM DA CONFIGURAÇÃO DO REDIS ---
 
@@ -1054,13 +1061,14 @@ async function lidarComNovaBusca({
 
 // ============================== ROTA PRINCIPAL ===============================
 // ============================================================================
-// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v4 (DEFINITIVO) <<<<<<<<<<<<<<<
+// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.1 (ANTI-FRÁGIL) <<<<<<<<<<<
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
-  console.log(`[RUN ${runId}] Iniciando requisição para ${req.params.slugDaRegiao}.`);
-
+  // BLINDAGEM GLOBAL: try...catch em toda a rota para NUNCA travar o servidor.
   try {
+    console.log(`[RUN ${runId}] Iniciando requisição para ${req.params.slugDaRegiao}.`);
+
     const { slugDaRegiao } = req.params;
     const userText = (req.body?.message || "").trim();
 
@@ -1090,21 +1098,24 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
     
     let sessionData = { history: [], entities: {} };
-    if (redis && !isFirstTurn) { // Só lê do cache se não for o primeiro turno
-        try {
-            const cachedSession = await redis.get(conversationId);
-            if (cachedSession) {
-                sessionData = JSON.parse(cachedSession);
-                console.log(`[REDIS] Sessão ${conversationId} recuperada do cache.`);
-            }
-        } catch(e) {
-            console.error(`[REDIS] Falha ao ler sessão ${conversationId} do cache:`, e);
+    // BLINDAGEM: try...catch em volta da operação de leitura do Redis
+    try {
+      if (redis && !isFirstTurn) {
+        const cachedSession = await redis.get(conversationId);
+        if (cachedSession) {
+            sessionData = JSON.parse(cachedSession);
+            console.log(`[REDIS] Sessão ${conversationId} recuperada do cache.`);
         }
+      }
+    } catch(e) {
+        console.error(`[REDIS] Falha CRÍTICA ao LER sessão ${conversationId}. Operando sem memória. Erro:`, e);
+        // Reseta a sessionData para garantir que não usemos dados corrompidos
+        sessionData = { history: [], entities: {} };
     }
     
     const historico = sessionData.history || [];
 
-    // 3. Tratamento de Saudação (sem repetição)
+    // 3. Tratamento de Saudação
     if (isSaudacao(userText)) {
       const resposta = isFirstTurn
         ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região. Como posso te ajudar a ter uma experiência incrível hoje?`
@@ -1197,7 +1208,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // 6. Fallback Geral (pergunta genérica)
+    // 6. Fallback Geral (exemplo, a lógica completa está no seu arquivo)
     const horaLocalSP = getHoraLocalSP();
     const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP).replace("[[REGIAO]]", regiao.nome).replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(historico)}\n[Pergunta do Usuário]: "${userText}"`;
     const respostaGeral = await geminiTry(promptGeral);
@@ -1207,10 +1218,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     });
 
   } catch (erro) {
-    console.error(`[RUN ${runId}] ERRO FATAL:`, erro);
+    // A BLINDAGEM GLOBAL captura qualquer erro não tratado, loga e responde sem travar.
+    console.error(`[RUN ${runId}] ERRO FATAL NA ROTA:`, erro);
     return res
       .status(500)
-      .json({ reply: "Ops, encontrei um erro inesperado. Minha equipe já foi notificada." });
+      .json({ reply: "Ops, encontrei um problema temporário. Por favor, tente sua pergunta novamente em um instante." });
   }
 });
 
