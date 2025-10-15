@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.0.3 (Correção de SyntaxError, Diagnóstico com Raio-X, Resiliência Redis)
+// v6.0.4 (Hotfix Timeout: Redis pronto + timeouts curtos + fallback sem memória)
 // ============================================================================
 
 import "dotenv/config";
@@ -16,13 +16,55 @@ import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
 // Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 
-// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.3 ---
+// -------------------- UTILIDADES DE RESILIÊNCIA REDIS (NOVO) ----------------
+/**
+ * Verifica se o cliente ioredis está realmente pronto para aceitar comandos.
+ * ioredis.status costuma ser: 'wait' | 'connecting' | 'connect' | 'ready' | 'close' | 'end' | 'reconnecting'
+ */
+function isRedisReady(client) {
+  try {
+    return !!client && client.status === "ready";
+  } catch {
+    return false;
+  }
+}
+
+/** Corrida com timeout para promessas (limite curto para não travar a rota). */
+function withTimeout(promise, ms, label = "op") {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`[REDIS TIMEOUT] ${label} excedeu ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+/** GET com timeout curto e checagem de prontidão. */
+async function redisSafeGet(client, key, { timeoutMs = 300 } = {}) {
+  if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (GET).");
+  return await withTimeout(client.get(key), timeoutMs, `GET ${key}`);
+}
+
+/** EXISTS com timeout curto e checagem de prontidão. */
+async function redisSafeExists(client, key, { timeoutMs = 300 } = {}) {
+  if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (EXISTS).");
+  return await withTimeout(client.exists(key), timeoutMs, `EXISTS ${key}`);
+}
+
+/** SET com TTL e timeout curto + checagem de prontidão. */
+async function redisSafeSet(client, key, value, ttlSeconds, { timeoutMs = 300 } = {}) {
+  if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (SET).");
+  return await withTimeout(client.set(key, value, "EX", ttlSeconds), timeoutMs, `SET ${key}`);
+}
+
+// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.4 ---
 let redis;
 try {
   if (!process.env.UPSTASH_REDIS_URL) {
     throw new Error("A variável de ambiente UPSTASH_REDIS_URL não está definida.");
   }
   const redisOptions = {
+    // Evita que a primeira chamada de comando fique "presa" esperando o connect.
     lazyConnect: true,
     enableReadyCheck: false,
     maxRetriesPerRequest: 3,
@@ -30,8 +72,31 @@ try {
   };
   redis = new Redis(process.env.UPSTASH_REDIS_URL, redisOptions);
 
+  // Conexão proativa em background para evitar freeze na 1ª chamada
+  (async () => {
+    try {
+      console.log("[REDIS] Conectando proativamente (background)...");
+      await redis.connect();
+      console.log("[REDIS] Conexão proativa estabelecida.");
+    } catch (err) {
+      console.error("[REDIS] Falha na conexão proativa (seguindo sem memória):", err?.message || err);
+    }
+  })();
+
   redis.on("connect", () => {
-    console.log("[REDIS] Conectado com sucesso ao Upstash!");
+    console.log("[REDIS] Evento 'connect' disparado.");
+  });
+
+  redis.on("ready", () => {
+    console.log("[REDIS] Cliente pronto (status=ready).");
+  });
+
+  redis.on("reconnecting", (t) => {
+    console.warn("[REDIS] Tentando reconectar...", t || "");
+  });
+
+  redis.on("end", () => {
+    console.error("[REDIS] Conexão finalizada (end).");
   });
 
   redis.on("error", (err) => {
@@ -302,18 +367,26 @@ async function updateSessionAndRespond({
     history: novoHistorico,
   };
 
+  // Salva no Redis com timeout curto e apenas se estiver pronto
   const TTL_SECONDS = 900;
-  if (redis) {
+  if (redis && isRedisReady(redis)) {
     try {
-      console.log(`[RUN ${_run}] [RAIO-X FINAL] Salvando sessão no Redis...`);
-      await redis.set(conversationId, JSON.stringify(novaSessionData), "EX", TTL_SECONDS);
+      console.log(`[RUN ${_run}] [RAIO-X FINAL] Salvando sessão no Redis (timeout curto)...`);
+      await redisSafeSet(redis, conversationId, JSON.stringify(novaSessionData), TTL_SECONDS, {
+        timeoutMs: 300,
+      });
       console.log(`[RUN ${_run}] [RAIO-X FINAL] Sessão salva no Redis com sucesso.`);
     } catch (e) {
-      console.error(`[RUN ${_run}] [REDIS] Falha ao SALVAR sessão:`, e);
-      // continua sem memória
+      console.error(`[RUN ${_run}] [REDIS] Falha ao SALVAR sessão (seguindo sem memória):`, e?.message || e);
+      // prossegue sem travar a requisição
+    }
+  } else {
+    if (redis) {
+      console.warn(`[RUN ${_run}] [REDIS] Cliente não pronto para SET. Pulando cache.`);
     }
   }
 
+  // Persistência no Supabase (não bloqueia a resposta em caso de erro)
   try {
     await supabase.from("interacoes").insert({
       conversation_id: conversationId,
@@ -334,9 +407,26 @@ async function updateSessionAndRespond({
 }
 
 // -------------------------- SESSION ENSURER ---------------------------------
+/**
+ * Hotfix principal: o congelamento acontecia logo após o PONTO 2, durante
+ * a chamada a ensureConversation. A raiz provável:
+ *  - Primeiro comando Redis (EXISTS) com lazyConnect, em ambiente instável,
+ *    ficava aguardando conexão e retries por muitos segundos.
+ *  - Sem timeout curto, a rota aguardava indefinidamente, gerando "pending"
+ *    no navegador até o cancel (~44s).
+ *
+ * Correções:
+ *  - Conexão proativa ao subir (background).
+ *  - Checagem de prontidão: se não estiver "ready", não chama Redis.
+ *  - Timeouts curtos por comando (300 ms).
+ *  - Logs detalhados de Raio-X entre os passos 2.1 e 2.4.
+ */
 async function ensureConversation(req, supabaseClient) {
   const body = req.body || {};
   let conversationId = body.conversationId || body.threadId || body.sessionId || null;
+
+  console.log("[RAIO-X PONTO 2.1] ensureConversation iniciado.");
+
   if (!conversationId || typeof conversationId !== "string" || conversationId.trim().length < 10) {
     conversationId = randomUUID();
     try {
@@ -365,19 +455,32 @@ async function ensureConversation(req, supabaseClient) {
     }
   }
 
+  console.log("[RAIO-X PONTO 2.2] Conversa garantida no Supabase. Checando 1º turno...");
+
   let isFirstTurn = false;
-  if (redis) {
+
+  // Caminho via Redis com *timeouts curtos* e apenas se realmente pronto
+  if (redis && isRedisReady(redis)) {
     try {
-      const sessionExists = await redis.exists(conversationId);
+      console.log("[RAIO-X PONTO 2.3] Redis pronto. EXISTS (timeout curto)...");
+      const sessionExists = await redisSafeExists(redis, conversationId, { timeoutMs: 300 });
       isFirstTurn = !sessionExists;
+      console.log(`[RAIO-X PONTO 2.3] EXISTS concluído. sessionExists=${!!sessionExists}`);
     } catch (e) {
-      console.warn(
-        `[REDIS] Falha ao checar existência da sessão ${conversationId}. Assumindo primeiro turno.`,
-        e
-      );
-      isFirstTurn = true;
+      console.warn("[RAIO-X PONTO 2.3] Falha no Redis EXISTS. Fallback para Supabase.", e?.message || e);
+      try {
+        const { count } = await supabaseClient
+          .from("interacoes")
+          .select("*", { count: "exact", head: true })
+          .eq("conversation_id", conversationId);
+        isFirstTurn = (count || 0) === 0;
+      } catch {
+        isFirstTurn = false;
+      }
     }
   } else {
+    // Redis indisponível ou não pronto → caminho DB
+    console.warn("[RAIO-X PONTO 2.3] Redis não pronto. Usando Supabase para checar 1º turno.");
     try {
       const { count } = await supabaseClient
         .from("interacoes")
@@ -388,6 +491,10 @@ async function ensureConversation(req, supabaseClient) {
       isFirstTurn = false;
     }
   }
+
+  console.log(
+    `[RAIO-X PONTO 2.4] ensureConversation concluído. conversationId=${conversationId}, isFirstTurn=${isFirstTurn}`
+  );
 
   req.ctx = Object.assign({}, req.ctx || {}, { conversationId, isFirstTurn });
   return { conversationId, isFirstTurn };
@@ -827,7 +934,7 @@ async function gerarRespostaGeralPrompteada({
       const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
       return texto || "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
     } catch {
-      return "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
+      return "Estou com alta demanda agora. Posco te ajudar com indicações e dados disponíveis.";
     }
   }
 }
@@ -1089,7 +1196,7 @@ async function lidarComNovaBusca({
 }
 
 // ============================================================================
-// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.3 (COM RAIO-X) <<<<<<<<<<
+// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.4 (COM RAIO-X) <<<<<<<<<<
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
@@ -1122,28 +1229,30 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const cidadesAtivas = cidades || [];
     console.log(`[RUN ${runId}] [RAIO-X PONTO 2] Contexto de região e cidades carregado.`);
 
-    // 2. Gerenciamento de Sessão
+    // 2. Gerenciamento de Sessão (com hotfix de timeout)
     const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
     console.log(
       `[RUN ${runId}] [RAIO-X PONTO 3] Sessão garantida. ID: ${conversationId}, É o primeiro turno: ${isFirstTurn}`
     );
 
-    // 2.1. Carregar Memória Curta (Redis) — tolerante a falhas
+    // 2.1. Carregar Memória Curta (Redis) — tolerante a falhas e sem travar
     let sessionData = { history: [], entities: {} };
     try {
-      if (redis && !isFirstTurn) {
-        console.log(`[RUN ${runId}] [RAIO-X PONTO 4] Tentando ler do cache Redis...`);
-        const cachedSession = await redis.get(conversationId);
+      if (redis && isRedisReady(redis) && !isFirstTurn) {
+        console.log(`[RUN ${runId}] [RAIO-X PONTO 4] Tentando ler do cache Redis (timeout curto)...`);
+        const cachedSession = await redisSafeGet(redis, conversationId, { timeoutMs: 300 });
         console.log(`[RUN ${runId}] [RAIO-X PONTO 5] Leitura do Redis concluída.`);
         if (cachedSession) {
           sessionData = JSON.parse(cachedSession);
           console.log(`[RUN ${runId}] [REDIS] Sessão recuperada do cache.`);
         }
+      } else if (redis && !isRedisReady(redis)) {
+        console.warn(`[RUN ${runId}] [REDIS] Cliente não pronto para GET. Pulando cache.`);
       }
     } catch (e) {
       console.error(
-        `[RUN ${runId}] [REDIS] Falha CRÍTICA ao LER sessão. Operando sem memória. Erro:`,
-        e
+        `[RUN ${runId}] [REDIS] Falha ao LER sessão (operando sem memória):`,
+        e?.message || e
       );
       sessionData = { history: [], entities: {} };
     }
