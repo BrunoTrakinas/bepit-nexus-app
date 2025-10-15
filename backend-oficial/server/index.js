@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.0.4 (Hotfix Timeout: Redis pronto + timeouts curtos + fallback sem memória)
+// v6.0.4 (Hotfix Timeout + Remoção de duplicata de função)
 // ============================================================================
 
 import "dotenv/config";
@@ -17,10 +17,6 @@ import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 
 // -------------------- UTILIDADES DE RESILIÊNCIA REDIS (NOVO) ----------------
-/**
- * Verifica se o cliente ioredis está realmente pronto para aceitar comandos.
- * ioredis.status costuma ser: 'wait' | 'connecting' | 'connect' | 'ready' | 'close' | 'end' | 'reconnecting'
- */
 function isRedisReady(client) {
   try {
     return !!client && client.status === "ready";
@@ -29,7 +25,6 @@ function isRedisReady(client) {
   }
 }
 
-/** Corrida com timeout para promessas (limite curto para não travar a rota). */
 function withTimeout(promise, ms, label = "op") {
   return Promise.race([
     promise,
@@ -39,19 +34,16 @@ function withTimeout(promise, ms, label = "op") {
   ]);
 }
 
-/** GET com timeout curto e checagem de prontidão. */
 async function redisSafeGet(client, key, { timeoutMs = 300 } = {}) {
   if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (GET).");
   return await withTimeout(client.get(key), timeoutMs, `GET ${key}`);
 }
 
-/** EXISTS com timeout curto e checagem de prontidão. */
 async function redisSafeExists(client, key, { timeoutMs = 300 } = {}) {
   if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (EXISTS).");
   return await withTimeout(client.exists(key), timeoutMs, `EXISTS ${key}`);
 }
 
-/** SET com TTL e timeout curto + checagem de prontidão. */
 async function redisSafeSet(client, key, value, ttlSeconds, { timeoutMs = 300 } = {}) {
   if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (SET).");
   return await withTimeout(client.set(key, value, "EX", ttlSeconds), timeoutMs, `SET ${key}`);
@@ -64,7 +56,6 @@ try {
     throw new Error("A variável de ambiente UPSTASH_REDIS_URL não está definida.");
   }
   const redisOptions = {
-    // Evita que a primeira chamada de comando fique "presa" esperando o connect.
     lazyConnect: true,
     enableReadyCheck: false,
     maxRetriesPerRequest: 3,
@@ -72,7 +63,6 @@ try {
   };
   redis = new Redis(process.env.UPSTASH_REDIS_URL, redisOptions);
 
-  // Conexão proativa em background para evitar freeze na 1ª chamada
   (async () => {
     try {
       console.log("[REDIS] Conectando proativamente (background)...");
@@ -86,19 +76,15 @@ try {
   redis.on("connect", () => {
     console.log("[REDIS] Evento 'connect' disparado.");
   });
-
   redis.on("ready", () => {
     console.log("[REDIS] Cliente pronto (status=ready).");
   });
-
   redis.on("reconnecting", (t) => {
     console.warn("[REDIS] Tentando reconectar...", t || "");
   });
-
   redis.on("end", () => {
     console.error("[REDIS] Conexão finalizada (end).");
   });
-
   redis.on("error", (err) => {
     console.error("[REDIS] Erro de conexão com o Upstash:", err);
   });
@@ -133,7 +119,7 @@ const ALLOWED_ORIGIN_PATTERNS = [
 ];
 
 function isOriginAllowed(origin) {
-  if (!origin) return true; // cURL/Postman/apps nativas
+  if (!origin) return true;
   if (EXPLICIT_ALLOWED_ORIGINS.has(origin)) return true;
   return ALLOWED_ORIGIN_PATTERNS.some((rx) => rx.test(origin));
 }
@@ -161,7 +147,7 @@ aplicacaoExpress.use(
   })
 );
 
-// ============================== GEMINI REST v1 (sem alterações) ===============================
+// ============================== GEMINI REST v1 ===============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
 const chaveGemini = process.env.GEMINI_API_KEY || "";
 const AI_DISABLED = String(process.env.AI_DISABLED || "") === "1";
@@ -273,7 +259,7 @@ async function geminiTry(texto, { retries = 2, baseDelay = 500 } = {}) {
   }
 }
 
-// ============================== HELPERS (sem alterações) =====================================
+// ============================== HELPERS =====================================
 function normalizarTexto(texto) {
   return String(texto || "")
     .normalize("NFD")
@@ -367,7 +353,6 @@ async function updateSessionAndRespond({
     history: novoHistorico,
   };
 
-  // Salva no Redis com timeout curto e apenas se estiver pronto
   const TTL_SECONDS = 900;
   if (redis && isRedisReady(redis)) {
     try {
@@ -377,16 +362,15 @@ async function updateSessionAndRespond({
       });
       console.log(`[RUN ${_run}] [RAIO-X FINAL] Sessão salva no Redis com sucesso.`);
     } catch (e) {
-      console.error(`[RUN ${_run}] [REDIS] Falha ao SALVAR sessão (seguindo sem memória):`, e?.message || e);
-      // prossegue sem travar a requisição
+      console.error(
+        `[RUN ${_run}] [REDIS] Falha ao SALVAR sessão (seguindo sem memória):`,
+        e?.message || e
+      );
     }
-  } else {
-    if (redis) {
-      console.warn(`[RUN ${_run}] [REDIS] Cliente não pronto para SET. Pulando cache.`);
-    }
+  } else if (redis) {
+    console.warn(`[RUN ${_run}] [REDIS] Cliente não pronto para SET. Pulando cache.`);
   }
 
-  // Persistência no Supabase (não bloqueia a resposta em caso de erro)
   try {
     await supabase.from("interacoes").insert({
       conversation_id: conversationId,
@@ -407,20 +391,6 @@ async function updateSessionAndRespond({
 }
 
 // -------------------------- SESSION ENSURER ---------------------------------
-/**
- * Hotfix principal: o congelamento acontecia logo após o PONTO 2, durante
- * a chamada a ensureConversation. A raiz provável:
- *  - Primeiro comando Redis (EXISTS) com lazyConnect, em ambiente instável,
- *    ficava aguardando conexão e retries por muitos segundos.
- *  - Sem timeout curto, a rota aguardava indefinidamente, gerando "pending"
- *    no navegador até o cancel (~44s).
- *
- * Correções:
- *  - Conexão proativa ao subir (background).
- *  - Checagem de prontidão: se não estiver "ready", não chama Redis.
- *  - Timeouts curtos por comando (300 ms).
- *  - Logs detalhados de Raio-X entre os passos 2.1 e 2.4.
- */
 async function ensureConversation(req, supabaseClient) {
   const body = req.body || {};
   let conversationId = body.conversationId || body.threadId || body.sessionId || null;
@@ -459,7 +429,6 @@ async function ensureConversation(req, supabaseClient) {
 
   let isFirstTurn = false;
 
-  // Caminho via Redis com *timeouts curtos* e apenas se realmente pronto
   if (redis && isRedisReady(redis)) {
     try {
       console.log("[RAIO-X PONTO 2.3] Redis pronto. EXISTS (timeout curto)...");
@@ -467,7 +436,10 @@ async function ensureConversation(req, supabaseClient) {
       isFirstTurn = !sessionExists;
       console.log(`[RAIO-X PONTO 2.3] EXISTS concluído. sessionExists=${!!sessionExists}`);
     } catch (e) {
-      console.warn("[RAIO-X PONTO 2.3] Falha no Redis EXISTS. Fallback para Supabase.", e?.message || e);
+      console.warn(
+        "[RAIO-X PONTO 2.3] Falha no Redis EXISTS. Fallback para Supabase.",
+        e?.message || e
+      );
       try {
         const { count } = await supabaseClient
           .from("interacoes")
@@ -479,7 +451,6 @@ async function ensureConversation(req, supabaseClient) {
       }
     }
   } else {
-    // Redis indisponível ou não pronto → caminho DB
     console.warn("[RAIO-X PONTO 2.3] Redis não pronto. Usando Supabase para checar 1º turno.");
     try {
       const { count } = await supabaseClient
@@ -599,7 +570,7 @@ function isRegionQuery(texto) {
   return mencionaRegiao;
 }
 
-// -------------------------- PROMPT MESTRE v1.3 (sem alterações) ------------------------------
+// -------------------------- PROMPT MESTRE v1.3 ------------------------------
 const PROMPT_MESTRE_V13 = `
 # 1. IDENTIDADE E MISSÃO
 - Você é o BEPIT, um concierge de turismo especialista e confiável na Região dos Lagos.
@@ -686,7 +657,6 @@ function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
       )}`;
     }
 
-    // cidade
     const r0 = resultados[0];
     const d = r0?.registro?.dados || {};
     if (r0?.tipo === "previsao_diaria") {
@@ -784,7 +754,6 @@ function forcarBuscaParceiro(texto) {
 async function extrairEntidadesDaBusca(texto) {
   const tNorm = normalizarTexto(texto || "");
 
-  // Cidade (heurística rápida)
   let cidade = null;
   if (tNorm.includes("cabo frio")) cidade = "Cabo Frio";
   else if (tNorm.includes("buzios") || tNorm.includes("búzios")) cidade = "Armação dos Búzios";
@@ -792,7 +761,6 @@ async function extrairEntidadesDaBusca(texto) {
   else if (tNorm.includes("sao pedro") || tNorm.includes("são pedro"))
     cidade = "São Pedro da Aldeia";
 
-  // Termos úteis para ranking
   const DIC_TERMS = [
     "picanha",
     "piconha",
@@ -825,7 +793,6 @@ async function extrairEntidadesDaBusca(texto) {
   const terms = [];
   for (const w of DIC_TERMS) if (tNorm.includes(normalizarTexto(w))) terms.push(w);
 
-  // Cesta macro
   let category = null;
   if (
     [
@@ -934,7 +901,7 @@ async function gerarRespostaGeralPrompteada({
       const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
       return texto || "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
     } catch {
-      return "Estou com alta demanda agora. Posco te ajudar com indicações e dados disponíveis.";
+      return "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
     }
   }
 }
@@ -956,7 +923,6 @@ async function ferramentaBuscarParceirosOuDicas({
   );
   const sinaisVista = ["vista", "vista para o mar", "beira mar", "orla"].some((s) => textoN.includes(s));
 
-  // Resolve cidade (slug) a partir da lista ativa
   const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   let cidadeSlug = "";
   if (cidadeProcurada) {
@@ -1017,7 +983,6 @@ async function ferramentaBuscarParceirosOuDicas({
     ],
   };
 
-  // Priorização mínima
   let categoriasAProcurar = [];
   if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
 
@@ -1040,7 +1005,6 @@ async function ferramentaBuscarParceirosOuDicas({
     categoriasAProcurar = MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada].map(normalizarTexto);
   }
 
-  // Termo opcional
   let termoDeBusca = null;
   if (sinaisCarne) termoDeBusca = "picanha";
   else if (sinaisVista) termoDeBusca = "vista";
@@ -1065,7 +1029,6 @@ async function ferramentaBuscarParceirosOuDicas({
   }
   if (!termoDeBusca && categoriasAProcurar.length > 0) termoDeBusca = categoriasAProcurar[0];
 
-  // Execução de buscas com limites FIXOS
   const agregados = [];
   const vistos = new Set();
   const alvoInicialFix = 3;
@@ -1178,7 +1141,6 @@ async function lidarComNovaBusca({
     }
     return { respostaFinal, parceirosSugeridos };
   } else {
-    // Sem resultados → resposta geral
     const respostaModelo = await gerarRespostaGeralPrompteada({
       pergunta: textoDoUsuario,
       historicoContents: historicoGemini,
@@ -1212,7 +1174,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         .json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId });
     }
 
-    // 1. Setup de Contexto Fixo
     const { data: regiao } = await supabase
       .from("regioes")
       .select("id, nome")
@@ -1229,13 +1190,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const cidadesAtivas = cidades || [];
     console.log(`[RUN ${runId}] [RAIO-X PONTO 2] Contexto de região e cidades carregado.`);
 
-    // 2. Gerenciamento de Sessão (com hotfix de timeout)
     const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
     console.log(
       `[RUN ${runId}] [RAIO-X PONTO 3] Sessão garantida. ID: ${conversationId}, É o primeiro turno: ${isFirstTurn}`
     );
 
-    // 2.1. Carregar Memória Curta (Redis) — tolerante a falhas e sem travar
     let sessionData = { history: [], entities: {} };
     try {
       if (redis && isRedisReady(redis) && !isFirstTurn) {
@@ -1260,7 +1219,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const historico = sessionData.history || [];
     console.log(`[RUN ${runId}] [RAIO-X PONTO 6] Histórico de conversa preparado.`);
 
-    // 3. Tratamento de Saudação (etiqueta e sem repetição)
     if (isSaudacao(userText)) {
       console.log(`[RUN ${runId}] [RAIO-X PONTO 7] Intenção de saudação detectada.`);
       const resposta = isFirstTurn
@@ -1278,7 +1236,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // 4. Roteamento de Intenção: CLIMA
     if (isWeatherQuestion(userText)) {
       const when = detectTemporalWindow(userText);
       const tipoDadoAlvo = when === "future" ? "previsao_diaria" : "clima_atual";
@@ -1373,7 +1330,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       }
     }
 
-    // 5. Roteamento de Intenção: PARCEIROS
     if (forcarBuscaParceiro(userText)) {
       const { respostaFinal, parceirosSugeridos } = await lidarComNovaBusca({
         textoDoUsuario: userText,
@@ -1396,7 +1352,6 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // 6. Fallback Geral (pergunta genérica)
     console.log(`[RUN ${runId}] [RAIO-X PONTO 8] Roteado para Fallback Geral.`);
     const horaLocalSP = getHoraLocalSP();
     const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP)
