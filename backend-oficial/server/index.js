@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Session Ensurer + Classificador + Roteamento"
-// v5.0 (stateful, robusto e com inteligência temporal / clima)
+// v5.1.1 (stateful, robusto, CORS fixo, tolerância a rate-limit e prompt completo)
 // ============================================================================
 
 import "dotenv/config";
@@ -10,16 +10,11 @@ import cors from "cors";
 import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
 
-import {
-  finalizeAssistantResponse,
-  buildNoPartnerFallback,
-  BEPIT_SYSTEM_PROMPT_APPENDIX, // permanece disponível para partes herdadas
-} from "./utils/bepitGuardrails.js";
+// Guardrails essenciais
+import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
 
-import {
-  buscarParceirosTolerante,
-  normalizeTerm as normalizeSearchTerm,
-} from "./utils/searchPartners.js";
+// Busca de parceiros
+import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 
 // ============================== CONFIG BÁSICA ================================
 const aplicacaoExpress = express();
@@ -27,22 +22,20 @@ const portaDoServidor = process.env.PORT || 3002;
 aplicacaoExpress.use(express.json({ limit: "2mb" }));
 
 // ------------------------------ CORS (permanente e seguro) ------------------
-// Origem permitida (exato + regex). Você pode adicionar extras via env: CORS_EXTRA_ORIGINS="https://meusite.com,https://app.meusite.com"
+// Whitelist explícita + padrões Netlify + extras por variável de ambiente
 const EXPLICIT_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
   "https://bepitnexus.netlify.app",
   "https://bepit-nexus.netlify.app",
 ]);
-
-// Adiciona origens extras via env (opcional)
 if (process.env.CORS_EXTRA_ORIGINS) {
-  for (const o of process.env.CORS_EXTRA_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)) {
-    EXPLICIT_ALLOWED_ORIGINS.add(o);
-  }
+  process.env.CORS_EXTRA_ORIGINS
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .forEach((o) => EXPLICIT_ALLOWED_ORIGINS.add(o));
 }
-
-// Padrões para deploy previews do Netlify (apenas dos seus sites)
 const ALLOWED_ORIGIN_PATTERNS = [
   /^https:\/\/(deploy-preview-\d+--)?bepitnexus\.netlify\.app$/,
   /^https:\/\/(deploy-preview-\d+--)?bepit-nexus\.netlify\.app$/,
@@ -50,12 +43,12 @@ const ALLOWED_ORIGIN_PATTERNS = [
 ];
 
 function isOriginAllowed(origin) {
-  if (!origin) return true; // Postman, cURL, mobile apps etc.
+  if (!origin) return true; // cURL/Postman/apps nativas
   if (EXPLICIT_ALLOWED_ORIGINS.has(origin)) return true;
-  return ALLOWED_ORIGIN_PATTERNS.some(rx => rx.test(origin));
+  return ALLOWED_ORIGIN_PATTERNS.some((rx) => rx.test(origin));
 }
 
-// Preflight dedicado (garante 204 + cabeçalhos corretos e "echo" do Origin)
+// Preflight dedicado (OPTIONS)
 aplicacaoExpress.use((req, res, next) => {
   if (req.method !== "OPTIONS") return next();
   const origin = req.headers.origin || "";
@@ -66,28 +59,25 @@ aplicacaoExpress.use((req, res, next) => {
   res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Credentials", "true");
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-key, authorization");
+  res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-key, authorization, Accept");
+  res.header("Access-Control-Max-Age", "600");
   return res.sendStatus(204);
 });
 
-// Middleware cors com validação por origem (para as demais requisições)
-const corsOptions = {
-  origin: (origin, callback) => {
-    if (isOriginAllowed(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("CORS: Origem não permitida por política de segurança."));
-    }
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "x-admin-key", "authorization"],
-};
-aplicacaoExpress.use(cors(corsOptions));
+// CORS nas demais rotas
+aplicacaoExpress.use(
+  cors({
+    origin: (origin, cb) => (isOriginAllowed(origin) ? cb(null, true) : cb(new Error("CORS block"))),
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "x-admin-key", "authorization", "Accept"],
+  })
+);
 
 // ============================== GEMINI REST v1 ===============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
 const chaveGemini = process.env.GEMINI_API_KEY || "";
+const AI_DISABLED = String(process.env.AI_DISABLED || "") === "1";
 
 function stripModelsPrefix(id) {
   return String(id || "").replace(/^models\//, "");
@@ -125,7 +115,13 @@ async function selecionarModeloREST() {
     );
   }
 
-  const preferencia = [envModelo && stripModelsPrefix(envModelo), "gemini-1.5-flash-latest", "gemini-1.5-pro-latest"].filter(Boolean);
+  // Preferência explícita pelo 2.5 flash
+  const preferencia = [
+    envModelo && stripModelsPrefix(envModelo),
+    "gemini-2.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro-latest",
+  ].filter(Boolean);
   for (const alvo of preferencia) if (disponiveis.includes(alvo)) return alvo;
 
   const qualquer = disponiveis.find((n) => /^gemini-/.test(n));
@@ -152,9 +148,7 @@ async function gerarConteudoComREST(modelo, texto) {
   }
   const json = await resp.json();
   const parts = json?.candidates?.[0]?.content?.parts;
-  const out = Array.isArray(parts)
-    ? parts.map((p) => p?.text || "").join("\n").trim()
-    : "";
+  const out = Array.isArray(parts) ? parts.map((p) => p?.text || "").join("\n").trim() : "";
   return out || "";
 }
 
@@ -170,6 +164,27 @@ async function obterModeloREST() {
 async function geminiGerarTexto(texto) {
   const modelo = await obterModeloREST();
   return await gerarConteudoComREST(modelo, texto);
+}
+
+// ---- Tolerância a rate-limit / indisponibilidade
+function isRetryableGeminiError(err) {
+  const msg = String(err?.message || err);
+  return /429|RESOURCE_EXHAUSTED|500|502|503|504/i.test(msg);
+}
+async function geminiTry(texto, { retries = 2, baseDelay = 500 } = {}) {
+  if (AI_DISABLED || !usarGeminiREST) throw new Error("AI_DISABLED");
+  let attempt = 0;
+  while (true) {
+    try {
+      return await geminiGerarTexto(texto);
+    } catch (e) {
+      attempt++;
+      if (attempt > retries || !isRetryableGeminiError(e)) throw e;
+      const jitter = Math.floor(Math.random() * 250);
+      const delay = baseDelay * Math.pow(2, attempt - 1) + jitter;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
 }
 
 // ============================== HELPERS =====================================
@@ -192,7 +207,6 @@ function getHoraLocalSP() {
     });
     return fmt.format(new Date());
   } catch {
-    // Fallback simples (-03 fixo)
     const now = new Date();
     const utc = now.getTime() + now.getTimezoneOffset() * 60000;
     const sp = new Date(utc - 3 * 3600000);
@@ -265,10 +279,9 @@ async function ensureConversation(req, supabaseClient) {
         aguardando_refinamento: false,
       });
     } catch (e) {
-      // idempotente — se falhar por unique, seguimos
+      // idempotência
     }
   } else {
-    // Garante existência
     try {
       const { data: existe } = await supabaseClient
         .from("conversas")
@@ -288,10 +301,11 @@ async function ensureConversation(req, supabaseClient) {
           aguardando_refinamento: false,
         });
       }
-    } catch {}
+    } catch {
+      // segue fluxo
+    }
   }
 
-  // Conta interações
   let isFirstTurn = false;
   try {
     const { count } = await supabaseClient
@@ -300,7 +314,6 @@ async function ensureConversation(req, supabaseClient) {
       .eq("conversation_id", conversationId);
     isFirstTurn = (count || 0) === 0;
   } catch {
-    // se falhar a contagem, assume que não é primeiro turno
     isFirstTurn = false;
   }
 
@@ -311,7 +324,17 @@ async function ensureConversation(req, supabaseClient) {
 // ---------------------- CLASSIFICAÇÃO DETERMINÍSTICA ------------------------
 function isSaudacao(texto) {
   const t = normalizarTexto(texto);
-  const saudacoes = ["oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "e ai", "e aí", "tudo bem"];
+  const saudacoes = [
+    "oi",
+    "ola",
+    "olá",
+    "bom dia",
+    "boa tarde",
+    "boa noite",
+    "e ai",
+    "e aí",
+    "tudo bem",
+  ];
   return saudacoes.includes(t);
 }
 
@@ -458,8 +481,67 @@ Com base nas regras e nos dados fornecidos, formule a melhor e mais útil respos
 // ============================== LISTA VIP ===================================
 const CIDADES_VIP = ["arraial do cabo", "cabo frio", "armação dos búzios"];
 
+// ======================= FALLBACKS SEM IA (texto determinístico) =============
+function montarListaParceirosSemIA(parceiros) {
+  const items = (parceiros || []).slice(0, 8);
+  if (!items.length)
+    return "Não encontrei parceiros para esse filtro no momento. Quer tentar com outra categoria ou cidade?";
+  const linhas = items.map(
+    (p, i) => `${i + 1}. **${p.nome}** — ${p.descricao || "sem descrição"}`
+  );
+  return `${linhas.join(
+    "\n"
+  )}\n\nAlguma dessas opções te interessou? Me diga o número ou o nome para ver mais detalhes.`;
+}
+
+function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
+  try {
+    const { when, escopo, resultados = [], cidade } = dadosIA || {};
+    const introWhen = when === "future" ? "para os próximos dias" : "agora";
+    if (!resultados.length) return "Ainda não tenho dados climáticos consolidados para essa consulta.";
+
+    if (escopo === "regiao") {
+      const linhas = resultados.map((r) => {
+        const nome = r.cidade || "Cidade";
+        const tipo = r.tipo;
+        const d = r?.registro?.dados || {};
+        const resumo =
+          tipo === "previsao_diaria"
+            ? `previsão diária disponível (${(d?.daily || []).length || 0} dias)`
+            : `${d?.condicao || d?.descricao || "condições atuais"}${
+                d?.temp ? `, ${d.temp}°C` : ""
+              }`;
+        return `- ${nome}: ${resumo}`;
+      });
+      return `Resumo do clima na ${regiaoNome} ${introWhen} (hora local ${horaLocalSP}):\n${linhas.join(
+        "\n"
+      )}`;
+    }
+
+    // cidade
+    const r0 = resultados[0];
+    const d = r0?.registro?.dados || {};
+    if (r0?.tipo === "previsao_diaria") {
+      const dias = Array.isArray(d?.daily) ? d.daily.slice(0, 5) : [];
+      const linhas = dias.map((dia) => {
+        const label = dia?.data || dia?.date || "";
+        const tmax = dia?.tmax ?? dia?.max ?? "";
+        const tmin = dia?.tmin ?? dia?.min ?? "";
+        const cond = dia?.condicao || dia?.descricao || "";
+        return `- ${label}: ${cond} ${tmin && tmax ? `(${tmin}°C–${tmax}°C)` : ""}`;
+      });
+      return `Previsão para ${cidade?.nome || "a cidade"}: \n${linhas.join("\n")}`;
+    } else {
+      const cond = d?.condicao || d?.descricao || "condições atuais";
+      const t = d?.temp ? `${d.temp}°C` : "";
+      return `Condições em ${cidade?.nome || "a cidade"} ${introWhen}: ${cond} ${t}`.trim();
+    }
+  } catch {
+    return "Não foi possível montar o resumo climático agora.";
+  }
+}
+
 // ============================== PARCEIROS ===================================
-// Heurística de intenção já existente (mantida)
 const PALAVRAS_CHAVE = {
   comida: [
     "restaurante",
@@ -634,7 +716,6 @@ async function analisarIntencaoDoUsuario(textoDoUsuario) {
 }
 
 async function gerarRespostaDeListaParceiros(pergunta, historicoContents, parceiros) {
-  // lista resumida numerada
   const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
   const prompt = [
@@ -648,7 +729,13 @@ async function gerarRespostaDeListaParceiros(pergunta, historicoContents, parcei
     `[Histórico]:\n${historicoTexto}`,
     `[Pergunta do Usuário]: "${pergunta}"`,
   ].join("\n");
-  return await geminiGerarTexto(prompt);
+
+  try {
+    return await geminiTry(prompt, { retries: 2 });
+  } catch (e) {
+    console.warn("[IA indisponível] Listagem de parceiros será gerada sem IA:", e?.message || e);
+    return montarListaParceirosSemIA(parceiros);
+  }
 }
 
 async function gerarRespostaGeralPrompteada({
@@ -670,7 +757,19 @@ async function gerarRespostaGeralPrompteada({
     `[Pergunta do Usuário]: "${pergunta}"`,
   ].join("\n");
 
-  return await geminiGerarTexto(payload);
+  try {
+    return await geminiTry(payload, { retries: 2 });
+  } catch (e) {
+    console.warn("[IA indisponível] Resposta geral será gerada sem IA:", e?.message || e);
+    // Fallback determinístico: se for clima, tentar montar resumo simples com os dados
+    try {
+      const dadosIA = JSON.parse(dadosClimaOuMaresJSON || "{}");
+      const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
+      return texto || "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
+    } catch {
+      return "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
+    }
+  }
 }
 
 // --------------------- BUSCA / REFINO PARCEIROS (mantido) -------------------
@@ -844,7 +943,9 @@ async function ferramentaBuscarParceirosOuDicas({
         cidadeSlug,
       },
     });
-  } catch {}
+  } catch {
+    // analytics não-bloqueante
+  }
 
   return {
     ok: true,
@@ -905,7 +1006,9 @@ async function lidarComNovaBusca({
           topico_atual: entidades?.category || null,
         })
         .eq("id", idDaConversa);
-    } catch {}
+    } catch {
+      // segue
+    }
     return { respostaFinal, parceirosSugeridos };
   } else {
     // Sem resultados → resposta geral (blindada por guardrails externos, se aplicável)
@@ -973,11 +1076,36 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           resposta_ia: respostaSaudacao,
           parceiros_sugeridos: [],
         });
-      } catch {}
+      } catch {
+        // ignora
+      }
       return res.status(200).json({
         reply: respostaSaudacao,
         conversationId,
         intent: "saudacao_inicial",
+        partners: [],
+      });
+    }
+
+    // 3.1) Saudação fora do primeiro turno: resposta curta sem IA
+    if (isSaudacao(textoDoUsuario) && !isFirstTurn) {
+      const msg =
+        "Oi! Como posso te ajudar agora? Posso sugerir passeios, restaurantes, praias e previsão do tempo. 🙂";
+      try {
+        await supabase.from("interacoes").insert({
+          regiao_id: regiao.id,
+          conversation_id: conversationId,
+          pergunta_usuario: textoDoUsuario,
+          resposta_ia: msg,
+          parceiros_sugeridos: [],
+        });
+      } catch {
+        // ignora
+      }
+      return res.status(200).json({
+        reply: msg,
+        conversationId,
+        intent: "saudacao_continuacao",
         partners: [],
       });
     }
@@ -1022,7 +1150,11 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
             .order("data_hora_consulta", { ascending: false })
             .limit(1);
           if (Array.isArray(climaRow) && climaRow.length > 0) {
-            dadosIA.resultados.push({ cidade: nomeCidade, tipo: tipoDadoRegiao, registro: climaRow[0] });
+            dadosIA.resultados.push({
+              cidade: nomeCidade,
+              tipo: tipoDadoRegiao,
+              registro: climaRow[0],
+            });
           }
         }
       } else if (cidadeEscopo) {
@@ -1044,7 +1176,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           });
         }
 
-        // Se for VIP, tenta dados de maré e temperatura água (últimos registros)
+        // Se for VIP, tenta dados de maré e temperatura da água (últimos registros)
         if (CIDADES_VIP.includes(normalizarTexto(cidadeEscopo.nome))) {
           const { data: dMare } = await supabase
             .from("dados_climaticos")
@@ -1090,7 +1222,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
             resposta_ia: msgFallback,
             parceiros_sugeridos: [],
           });
-        } catch {}
+        } catch {
+          // ignora
+        }
         return res.status(200).json({
           reply: msgFallback,
           conversationId,
@@ -1130,7 +1264,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           .select("id")
           .single();
         interactionId = nova?.id || null;
-      } catch {}
+      } catch {
+        // ignora
+      }
 
       return res.status(200).json({
         reply: respostaFinal,
@@ -1177,7 +1313,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         });
         try {
           await supabase.from("conversas").update({ parceiro_em_foco: null }).eq("id", conversationId);
-        } catch {}
+        } catch {
+          // ignora
+        }
         break;
       }
     }
@@ -1201,7 +1339,9 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         .select("id")
         .single();
       interactionId = nova?.id || null;
-    } catch {}
+    } catch {
+      // ignora
+    }
 
     const fotos = (parceirosSugeridos || [])
       .flatMap((p) => p?.fotos_parceiros || [])
@@ -1216,10 +1356,20 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       partners: parceirosSugeridos,
     });
   } catch (erro) {
+    // Importante: não exponha 429 do provedor para o cliente final
+    const msg = String(erro?.message || erro);
+    if (isRetryableGeminiError(erro) || /AI_DISABLED/.test(msg)) {
+      return res.status(200).json({
+        reply:
+          "Estou com demanda alta agora e posso demorar um pouco para elaborar sugestões avançadas. Mas posso te ajudar com dados locais e indicações — me diga o que você procura! 😊",
+        intent: "degraded_mode",
+      });
+    }
     console.error("[/api/chat/:slugDaRegiao] Erro:", erro);
-    return res
-      .status(500)
-      .json({ error: "Erro interno no servidor do BEPIT.", internal: { message: String(erro?.message || erro) } });
+    return res.status(500).json({
+      error: "Erro interno no servidor do BEPIT.",
+      internal: { message: msg },
+    });
   }
 });
 
@@ -1286,7 +1436,6 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
 aplicacaoExpress.get("/", (_req, res) => {
   res.status(200).send("BEPIT backend ativo ✅");
 });
-
 aplicacaoExpress.get("/ping", (_req, res) => {
   res.status(200).json({ pong: true, ts: Date.now() });
 });
