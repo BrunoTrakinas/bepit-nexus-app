@@ -1,7 +1,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express)
 // Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.0.3 (Correção de SyntaxError, Diagnóstico com Raio-X)
+// v6.0.3 (Correção de SyntaxError, Diagnóstico com Raio-X, Resiliência Redis)
 // ============================================================================
 
 import "dotenv/config";
@@ -9,14 +9,14 @@ import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabaseClient.js";
-import { Redis } from 'ioredis';
+import { Redis } from "ioredis";
 
 // Guardrails essenciais
 import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
 // Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 
-// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.1 ---
+// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.3 ---
 let redis;
 try {
   if (!process.env.UPSTASH_REDIS_URL) {
@@ -30,12 +30,12 @@ try {
   };
   redis = new Redis(process.env.UPSTASH_REDIS_URL, redisOptions);
 
-  redis.on('connect', () => {
-    console.log('[REDIS] Conectado com sucesso ao Upstash!');
+  redis.on("connect", () => {
+    console.log("[REDIS] Conectado com sucesso ao Upstash!");
   });
 
-  redis.on('error', (err) => {
-    console.error('[REDIS] Erro de conexão com o Upstash:', err);
+  redis.on("error", (err) => {
+    console.error("[REDIS] Erro de conexão com o Upstash:", err);
   });
 } catch (error) {
   console.error("[REDIS] Erro fatal ao inicializar o cliente Redis:", error.message);
@@ -95,6 +95,7 @@ aplicacaoExpress.use(
     allowedHeaders: ["Content-Type", "x-admin-key", "authorization", "Accept"],
   })
 );
+
 // ============================== GEMINI REST v1 (sem alterações) ===============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
 const chaveGemini = process.env.GEMINI_API_KEY || "";
@@ -167,8 +168,9 @@ async function gerarConteudoComREST(modelo, texto) {
   }
   const json = await resp.json();
   const parts = json?.candidates?.[0]?.content?.parts;
-  const out = Array.isArray(parts) ?
-  parts.map((p) => p?.text || "").join("\n").trim() : "";
+  const out = Array.isArray(parts)
+    ? parts.map((p) => p?.text || "").join("\n").trim()
+    : "";
   return out || "";
 }
 
@@ -272,10 +274,10 @@ function historicoParaTextoSimplesWrapper(hc) {
   }
 }
 
-// ======================= NOVA FUNÇÃO CENTRALIZADORA (Versão ÚNICA E CORRETA) ==========================
+// ======================= FUNÇÃO CENTRALIZADORA (ÚNICA e CORRETA) ==========================
 async function updateSessionAndRespond({
   res,
-  runId,
+  runId, // opcional para logs
   conversationId,
   userText,
   aiResponseText,
@@ -283,8 +285,10 @@ async function updateSessionAndRespond({
   regiaoId,
   partners = [],
 }) {
-  console.log(`[RUN ${runId}] [RAIO-X FINAL] Preparando para responder e salvar sessão.`);
-  const novoHistorico = [...(sessionData.history || [])];
+  const _run = runId || "NO-RUNID";
+  console.log(`[RUN ${_run}] [RAIO-X FINAL] Preparando para responder e salvar sessão.`);
+
+  const novoHistorico = [...(sessionData?.history || [])];
   novoHistorico.push({ role: "user", parts: [{ text: userText }] });
   novoHistorico.push({ role: "model", parts: [{ text: aiResponseText }] });
 
@@ -292,25 +296,21 @@ async function updateSessionAndRespond({
   while (novoHistorico.length > MAX_HISTORY_LENGTH) {
     novoHistorico.shift();
   }
-  
+
   const novaSessionData = {
-    ...sessionData,
+    ...(sessionData || {}),
     history: novoHistorico,
   };
 
   const TTL_SECONDS = 900;
   if (redis) {
     try {
-      console.log(`[RUN ${runId}] [RAIO-X FINAL] Salvando sessão no Redis...`);
-      await redis.set(
-        conversationId,
-        JSON.stringify(novaSessionData),
-        "EX",
-        TTL_SECONDS
-      );
-      console.log(`[RUN ${runId}] [RAIO-X FINAL] Sessão salva no Redis com sucesso.`);
+      console.log(`[RUN ${_run}] [RAIO-X FINAL] Salvando sessão no Redis...`);
+      await redis.set(conversationId, JSON.stringify(novaSessionData), "EX", TTL_SECONDS);
+      console.log(`[RUN ${_run}] [RAIO-X FINAL] Sessão salva no Redis com sucesso.`);
     } catch (e) {
-      console.error(`[RUN ${runId}] [REDIS] Falha ao SALVAR sessão:`, e);
+      console.error(`[RUN ${_run}] [REDIS] Falha ao SALVAR sessão:`, e);
+      // continua sem memória
     }
   }
 
@@ -323,7 +323,7 @@ async function updateSessionAndRespond({
       parceiros_sugeridos: partners.length > 0 ? partners : null,
     });
   } catch (e) {
-    console.error(`[RUN ${runId}] [SUPABASE] Falha ao salvar interação:`, e);
+    console.error(`[RUN ${_run}] [SUPABASE] Falha ao salvar interação:`, e);
   }
 
   return res.json({
@@ -344,7 +344,7 @@ async function ensureConversation(req, supabaseClient) {
         id: conversationId,
         regiao_id: req.ctx?.regiao?.id || null,
       });
-    } catch (e) {
+    } catch {
       // idempotência
     }
   } else {
@@ -367,23 +367,26 @@ async function ensureConversation(req, supabaseClient) {
 
   let isFirstTurn = false;
   if (redis) {
-      try {
-        const sessionExists = await redis.exists(conversationId);
-        isFirstTurn = !sessionExists;
-      } catch (e) {
-        console.warn(`[REDIS] Falha ao checar existência da sessão ${conversationId}. Assumindo primeiro turno.`, e);
-        isFirstTurn = true;
-      }
+    try {
+      const sessionExists = await redis.exists(conversationId);
+      isFirstTurn = !sessionExists;
+    } catch (e) {
+      console.warn(
+        `[REDIS] Falha ao checar existência da sessão ${conversationId}. Assumindo primeiro turno.`,
+        e
+      );
+      isFirstTurn = true;
+    }
   } else {
-      try {
-          const { count } = await supabaseClient
-            .from("interacoes")
-            .select("*", { count: "exact", head: true })
-            .eq("conversation_id", conversationId);
-          isFirstTurn = (count || 0) === 0;
-      } catch {
-          isFirstTurn = false;
-      }
+    try {
+      const { count } = await supabaseClient
+        .from("interacoes")
+        .select("*", { count: "exact", head: true })
+        .eq("conversation_id", conversationId);
+      isFirstTurn = (count || 0) === 0;
+    } catch {
+      isFirstTurn = false;
+    }
   }
 
   req.ctx = Object.assign({}, req.ctx || {}, { conversationId, isFirstTurn });
@@ -394,7 +397,15 @@ async function ensureConversation(req, supabaseClient) {
 function isSaudacao(texto) {
   const t = normalizarTexto(texto);
   const saudacoes = [
-    "oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "e ai", "e aí", "tudo bem",
+    "oi",
+    "ola",
+    "olá",
+    "bom dia",
+    "boa tarde",
+    "boa noite",
+    "e ai",
+    "e aí",
+    "tudo bem",
   ];
   return saudacoes.includes(t);
 }
@@ -402,8 +413,25 @@ function isSaudacao(texto) {
 function isWeatherQuestion(texto) {
   const t = normalizarTexto(texto);
   const termos = [
-    "clima", "tempo", "previsao", "previsão", "vento", "mar", "marea", "maré", "ondas", "onda",
-    "temperatura", "graus", "calor", "frio", "chovendo", "chuva", "sol", "ensolarado", "nublado",
+    "clima",
+    "tempo",
+    "previsao",
+    "previsão",
+    "vento",
+    "mar",
+    "marea",
+    "maré",
+    "ondas",
+    "onda",
+    "temperatura",
+    "graus",
+    "calor",
+    "frio",
+    "chovendo",
+    "chuva",
+    "sol",
+    "ensolarado",
+    "nublado",
   ];
   return termos.some((k) => t.includes(k));
 }
@@ -411,8 +439,17 @@ function isWeatherQuestion(texto) {
 function detectTemporalWindow(texto) {
   const t = normalizarTexto(texto);
   const sinaisFuturo = [
-    "amanha", "amanhã", "semana que vem", "proxima semana", "próxima semana", "sabado", "sábado",
-    "domingo", "proximos dias", "próximos dias", "daqui a",
+    "amanha",
+    "amanhã",
+    "semana que vem",
+    "proxima semana",
+    "próxima semana",
+    "sabado",
+    "sábado",
+    "domingo",
+    "proximos dias",
+    "próximos dias",
+    "daqui a",
   ];
   return sinaisFuturo.some((s) => t.includes(s)) ? "future" : "present";
 }
@@ -421,11 +458,16 @@ function extractCity(texto, cidadesAtivas) {
   const t = normalizarTexto(texto || "");
   const lista = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   const apelidos = [
-    { key: "arraial", nome: "Arraial do Cabo" }, { key: "arraial do cabo", nome: "Arraial do Cabo" },
-    { key: "cabo frio", nome: "Cabo Frio" }, { key: "buzios", nome: "Armação dos Búzios" },
-    { key: "búzios", nome: "Armação dos Búzios" }, { key: "armacao dos buzios", nome: "Armação dos Búzios" },
-    { key: "armação dos búzios", nome: "Armação dos Búzios" }, { key: "rio das ostras", nome: "Rio das Ostras" },
-    { key: "sao pedro", nome: "São Pedro da Aldeia" }, { key: "são pedro", nome: "São Pedro da Aldeia" },
+    { key: "arraial", nome: "Arraial do Cabo" },
+    { key: "arraial do cabo", nome: "Arraial do Cabo" },
+    { key: "cabo frio", nome: "Cabo Frio" },
+    { key: "buzios", nome: "Armação dos Búzios" },
+    { key: "búzios", nome: "Armação dos Búzios" },
+    { key: "armacao dos buzios", nome: "Armação dos Búzios" },
+    { key: "armação dos búzios", nome: "Armação dos Búzios" },
+    { key: "rio das ostras", nome: "Rio das Ostras" },
+    { key: "sao pedro", nome: "São Pedro da Aldeia" },
+    { key: "são pedro", nome: "São Pedro da Aldeia" },
   ];
   const hitApelido = apelidos.find((a) => t.includes(a.key));
   if (hitApelido) {
@@ -443,7 +485,10 @@ function extractCity(texto, cidadesAtivas) {
 function isRegionQuery(texto) {
   const t = normalizarTexto(texto);
   const mencionaRegiao =
-    t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
+    t.includes("regiao") ||
+    t.includes("região") ||
+    t.includes("regiao dos lagos") ||
+    t.includes("região dos lagos");
   return mencionaRegiao;
 }
 
@@ -777,7 +822,6 @@ async function gerarRespostaGeralPrompteada({
     return await geminiTry(payload, { retries: 2 });
   } catch (e) {
     console.warn("[IA indisponível] Resposta geral será gerada sem IA:", e?.message || e);
-    // Fallback determinístico: se for clima, tentar montar resumo simples com os dados
     try {
       const dadosIA = JSON.parse(dadosClimaOuMaresJSON || "{}");
       const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
@@ -1045,7 +1089,7 @@ async function lidarComNovaBusca({
 }
 
 // ============================================================================
-// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.2 (COM RAIO-X) <<<<<<<<<<<
+// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.3 (COM RAIO-X) <<<<<<<<<<
 // ============================================================================
 aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
@@ -1062,18 +1106,29 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     }
 
     // 1. Setup de Contexto Fixo
-    const { data: regiao } = await supabase.from("regioes").select("id, nome").eq("slug", slugDaRegiao).single();
+    const { data: regiao } = await supabase
+      .from("regioes")
+      .select("id, nome")
+      .eq("slug", slugDaRegiao)
+      .single();
     if (!regiao) return res.status(404).json({ error: "Região não encontrada." });
     req.ctx = { regiao };
 
-    const { data: cidades } = await supabase.from("cidades").select("id, nome, slug").eq("regiao_id", regiao.id).eq("ativo", true);
+    const { data: cidades } = await supabase
+      .from("cidades")
+      .select("id, nome, slug")
+      .eq("regiao_id", regiao.id)
+      .eq("ativo", true);
     const cidadesAtivas = cidades || [];
     console.log(`[RUN ${runId}] [RAIO-X PONTO 2] Contexto de região e cidades carregado.`);
 
     // 2. Gerenciamento de Sessão
     const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
-    console.log(`[RUN ${runId}] [RAIO-X PONTO 3] Sessão garantida. ID: ${conversationId}, É o primeiro turno: ${isFirstTurn}`);
-    
+    console.log(
+      `[RUN ${runId}] [RAIO-X PONTO 3] Sessão garantida. ID: ${conversationId}, É o primeiro turno: ${isFirstTurn}`
+    );
+
+    // 2.1. Carregar Memória Curta (Redis) — tolerante a falhas
     let sessionData = { history: [], entities: {} };
     try {
       if (redis && !isFirstTurn) {
@@ -1081,27 +1136,36 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         const cachedSession = await redis.get(conversationId);
         console.log(`[RUN ${runId}] [RAIO-X PONTO 5] Leitura do Redis concluída.`);
         if (cachedSession) {
-            sessionData = JSON.parse(cachedSession);
-            console.log(`[RUN ${runId}] [REDIS] Sessão recuperada do cache.`);
+          sessionData = JSON.parse(cachedSession);
+          console.log(`[RUN ${runId}] [REDIS] Sessão recuperada do cache.`);
         }
       }
-    } catch(e) {
-        console.error(`[RUN ${runId}] [REDIS] Falha CRÍTICA ao LER sessão. Operando sem memória. Erro:`, e);
-        sessionData = { history: [], entities: {} };
+    } catch (e) {
+      console.error(
+        `[RUN ${runId}] [REDIS] Falha CRÍTICA ao LER sessão. Operando sem memória. Erro:`,
+        e
+      );
+      sessionData = { history: [], entities: {} };
     }
-    
+
     const historico = sessionData.history || [];
     console.log(`[RUN ${runId}] [RAIO-X PONTO 6] Histórico de conversa preparado.`);
 
-    // 3. Tratamento de Saudação
+    // 3. Tratamento de Saudação (etiqueta e sem repetição)
     if (isSaudacao(userText)) {
       console.log(`[RUN ${runId}] [RAIO-X PONTO 7] Intenção de saudação detectada.`);
       const resposta = isFirstTurn
         ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região. Como posso te ajudar a ter uma experiência incrível hoje?`
         : "Oi! Como posso te ajudar agora?";
-      
+
       return await updateSessionAndRespond({
-          res, runId, conversationId, userText, aiResponseText: resposta, sessionData, regiaoId: regiao.id
+        res,
+        runId,
+        conversationId,
+        userText,
+        aiResponseText: resposta,
+        sessionData,
+        regiaoId: regiao.id,
       });
     }
 
@@ -1136,11 +1200,24 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
             if (!data) return null;
 
             let registro = { cidade: cidade.nome, [tipoDadoAlvo]: data.dados };
-            
-            const CIDADES_VIP = ["arraial do cabo", "cabo frio", "armação dos búzios"];
+
             if (when === "present" && CIDADES_VIP.includes(normalizarTexto(cidade.nome))) {
-              const { data: mare } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", cidade.id).eq("tipo_dado", "dados_mare").order("data_hora_consulta", { ascending: false }).limit(1).single();
-              const { data: agua } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", cidade.id).eq("tipo_dado", "temperatura_agua").order("data_hora_consulta", { ascending: false }).limit(1).single();
+              const { data: mare } = await supabase
+                .from("dados_climaticos")
+                .select("dados")
+                .eq("cidade_id", cidade.id)
+                .eq("tipo_dado", "dados_mare")
+                .order("data_hora_consulta", { ascending: false })
+                .limit(1)
+                .single();
+              const { data: agua } = await supabase
+                .from("dados_climaticos")
+                .select("dados")
+                .eq("cidade_id", cidade.id)
+                .eq("tipo_dado", "temperatura_agua")
+                .order("data_hora_consulta", { ascending: false })
+                .limit(1)
+                .single();
               if (mare) registro.dados_mare = mare.dados;
               if (agua) registro.temperatura_agua = agua.dados;
             }
@@ -1148,7 +1225,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           })
         )
       ).filter(Boolean);
-      
+
       if (dadosClimaticos.length > 0) {
         const payload = {
           tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica",
@@ -1156,17 +1233,33 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
           dados: dadosClimaticos,
         };
         const horaLocal = getHoraLocalSP();
-        const promptFinal = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocal).replace("[[REGIAO]]", regiao.nome).replace("[[DADOS_JSON]]", JSON.stringify(payload))}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(historico)}\n[Pergunta do Usuário]: "${userText}"`;
+        const promptFinal = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocal)
+          .replace("[[REGIAO]]", regiao.nome)
+          .replace("[[DADOS_JSON]]", JSON.stringify(payload))}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
+          historico
+        )}\n[Pergunta do Usuário]: "${userText}"`;
         const respostaIA = await geminiTry(promptFinal);
-        
-        return await updateSessionAndRespond({
-            res, conversationId, userText, aiResponseText: respostaIA, sessionData, regiaoId: regiao.id
-        });
 
-      } else {
-        const fallback = "Ainda não tenho os dados consolidados para esta previsão. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.";
         return await updateSessionAndRespond({
-            res, conversationId, userText, aiResponseText: fallback, sessionData, regiaoId: regiao.id
+          res,
+          runId,
+          conversationId,
+          userText,
+          aiResponseText: respostaIA,
+          sessionData,
+          regiaoId: regiao.id,
+        });
+      } else {
+        const fallback =
+          "Ainda não tenho os dados consolidados para esta previsão. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.";
+        return await updateSessionAndRespond({
+          res,
+          runId,
+          conversationId,
+          userText,
+          aiResponseText: fallback,
+          sessionData,
+          regiaoId: regiao.id,
         });
       }
     }
@@ -1183,88 +1276,47 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         excludeIds: [],
       });
       return await updateSessionAndRespond({
-          res, conversationId, userText, aiResponseText: respostaFinal, sessionData, regiaoId: regiao.id, partners: parceirosSugeridos
+        res,
+        runId,
+        conversationId,
+        userText,
+        aiResponseText: respostaFinal,
+        sessionData,
+        regiaoId: regiao.id,
+        partners: parceirosSugeridos,
       });
     }
 
     // 6. Fallback Geral (pergunta genérica)
     console.log(`[RUN ${runId}] [RAIO-X PONTO 8] Roteado para Fallback Geral.`);
     const horaLocalSP = getHoraLocalSP();
-    const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP).replace("[[REGIAO]]", regiao.nome).replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(historico)}\n[Pergunta do Usuário]: "${userText}"`;
-    
+    const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP)
+      .replace("[[REGIAO]]", regiao.nome)
+      .replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
+      historico
+    )}\n[Pergunta do Usuário]: "${userText}"`;
+
     console.log(`[RUN ${runId}] [RAIO-X PONTO 9] Tentando chamar a IA Gemini...`);
     const respostaGeral = await geminiTry(promptGeral);
     console.log(`[RUN ${runId}] [RAIO-X PONTO 10] Resposta da IA Gemini recebida.`);
 
     return await updateSessionAndRespond({
-        res, runId, conversationId, userText, aiResponseText: respostaGeral, sessionData, regiaoId: regiao.id
+      res,
+      runId,
+      conversationId,
+      userText,
+      aiResponseText: respostaGeral,
+      sessionData,
+      regiaoId: regiao.id,
     });
-
   } catch (erro) {
     console.error(`[RUN ${runId}] ERRO FATAL NA ROTA:`, erro);
-    return res
-      .status(500)
-      .json({ reply: "Ops, encontrei um problema temporário. Por favor, tente sua pergunta novamente em um instante." });
+    return res.status(500).json({
+      reply:
+        "Ops, encontrei um problema temporário. Por favor, tente sua pergunta novamente em um instante.",
+    });
   }
 });
-// Adicionando a nova função centralizadora e garantindo que o runId seja logado
-async function updateSessionAndRespond({
-  res,
-  runId, // << NOVO
-  conversationId,
-  userText,
-  aiResponseText,
-  sessionData,
-  regiaoId,
-  partners = [],
-}) {
-  const novoHistorico = [...(sessionData.history || [])];
-  novoHistorico.push({ role: "user", parts: [{ text: userText }] });
-  novoHistorico.push({ role: "model", parts: [{ text: aiResponseText }] });
-
-  const MAX_HISTORY_LENGTH = 12;
-  while (novoHistorico.length > MAX_HISTORY_LENGTH) {
-    novoHistorico.shift();
-  }
-  
-  const novaSessionData = {
-    ...sessionData,
-    history: novoHistorico,
-  };
-
-  const TTL_SECONDS = 900;
-  if (redis) {
-    try {
-      console.log(`[RUN ${runId}] [RAIO-X PONTO FINAL] Salvando sessão no Redis...`);
-      await redis.set(
-        conversationId,
-        JSON.stringify(novaSessionData),
-        "EX",
-        TTL_SECONDS
-      );
-    } catch (e) {
-      console.error(`[RUN ${runId}] [REDIS] Falha ao SALVAR sessão:`, e);
-    }
-  }
-
-  try {
-    await supabase.from("interacoes").insert({
-      conversation_id: conversationId,
-      regiao_id: regiaoId,
-      pergunta_usuario: userText,
-      resposta_ia: aiResponseText,
-      parceiros_sugeridos: partners.length > 0 ? partners : null,
-    });
-  } catch (e) {
-    console.error(`[RUN ${runId}] [SUPABASE] Falha ao salvar interação:`, e);
-  }
-
-  return res.json({
-    reply: aiResponseText,
-    conversationId,
-    partners: partners.length > 0 ? partners : undefined,
-  });
-}
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
 aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
