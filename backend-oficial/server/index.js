@@ -16,6 +16,30 @@ import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
 // Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 
+import { Redis } from 'ioredis';
+// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) ---
+let redis;
+try {
+  if (!process.env.UPSTASH_REDIS_URL) {
+    throw new Error("A variável de ambiente UPSTASH_REDIS_URL não está definida.");
+  }
+  redis = new Redis(process.env.UPSTASH_REDIS_URL);
+
+  redis.on('connect', () => {
+    console.log('[REDIS] Conectado com sucesso ao Upstash!');
+  });
+
+  redis.on('error', (err) => {
+    console.error('[REDIS] Não foi possível conectar ao Upstash:', err);
+    // Em um ambiente de produção real, você poderia querer
+    // tomar uma ação aqui, como desabilitar funcionalidades
+    // que dependem do cache.
+  });
+
+} catch (error) {
+  console.error("[REDIS] Erro ao inicializar o cliente Redis:", error.message);
+}
+// --- FIM DA CONFIGURAÇÃO DO REDIS ---
 // ============================== CONFIG BÁSICA ================================
 const aplicacaoExpress = express();
 const portaDoServidor = process.env.PORT || 3002;
