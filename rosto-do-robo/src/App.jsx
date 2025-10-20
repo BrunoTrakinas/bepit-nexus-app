@@ -2,9 +2,17 @@
 import React, { useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 
-// Ajuste estes paths se seus arquivos estiverem em outro lugar:
+// Páginas existentes
 import RegionSelection from "./components/RegionSelection.jsx";
 import ChatPage from "./components/ChatPage.jsx";
+
+// ADMIN
+import AdminLogin from "./admin/AdminLogin.jsx";     // login (não protegido)
+import AdminPortal from "./admin/AdminPortal.jsx";   // portal (protegido)
+import AdminMidia from "./admin/AdminMidia.jsx";     // mídia (protegido)
+
+// Proteção de rotas do Admin (usa children)
+import ProtectedRoute from "./components/ProtectedRoute.jsx";
 
 /**
  * Aplica a classe 'dark' no <html> conforme preferência salva.
@@ -38,6 +46,7 @@ function ScrollToTop() {
 
 function AppRoutes() {
   useApplyThemeFromStorage();
+
   return (
     <>
       <ScrollToTop />
@@ -47,6 +56,43 @@ function AppRoutes() {
 
         {/* Tela do chat */}
         <Route path="/chat" element={<ChatPage />} />
+
+        {/* ===================== ADMIN (NÃO PROTEGIDO) ===================== */}
+        {/* Tela de login do Admin */}
+        <Route path="/admin/login" element={<AdminLogin />} />
+
+        {/* ===================== ADMIN (PROTEGIDO) ===================== */}
+        {/* Portal principal do Admin */}
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute>
+              <AdminPortal />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Página Admin para consultar mídias por Partner ID */}
+        {/* Aceita:
+            - /admin/midia                  (digita o Partner ID e clica "Carregar")
+            - /admin/midia/:id              (abre direto por path param)
+            - /admin/midia?partner=<UUID>   (abre por querystring) */}
+        <Route
+          path="/admin/midia"
+          element={
+            <ProtectedRoute>
+              <AdminMidia />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/midia/:id"
+          element={
+            <ProtectedRoute>
+              <AdminMidia />
+            </ProtectedRoute>
+          }
+        />
 
         {/* Fallback: qualquer outra rota volta pra home */}
         <Route path="*" element={<Navigate to="/" replace />} />

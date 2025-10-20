@@ -1,216 +1,269 @@
-// rosto-do-robo/src/admin/adminApi.js
+// src/admin/adminApi.js
 // ============================================================================
-// Camada de chamadas administrativas do frontend (Admin Dashboard)
-// - Autenticação por chave: POST /api/auth/login  -> { ok: true } quando válido
-// - **Agora usa sessionStorage** (encerra ao fechar aba) e registra lastActivity
-// - Todas as chamadas admin enviam o header "X-Admin-Key"
-// - Usa baseURL do .env (VITE_API_BASE_URL) quando presente; caso contrário usa
-//   caminho relativo (para funcionar com proxy do Netlify /api/*).
-// - Expiração por inatividade: 15 minutos (controlada pelo AuthProvider).
+// Camada de acesso ao backend administrativo do BEPIT (versão estendida)
+// - Compatível com o dashboard atualizado e com possíveis chamadas antigas
+// - Todos os métodos retornam { ok: boolean, data?, error?, status? }
+// - Inclui CRUD de Regiões, Cidades, Parceiros, Dicas, Avisos, Métricas e Logs
+// - Possui utilitários e "aliases" para manter compatibilidade de nomes
 // ============================================================================
 
-const STORAGE_KEY = "adminKey";
-const LAST_ACTIVITY_KEY = "adminLastActivity";
-const API_BASE = (import.meta?.env?.VITE_API_BASE_URL || "").trim();
+/** Base da API (pode vir do .env do front: VITE_API_BASE) */
+const API_BASE = import.meta?.env?.VITE_API_BASE || "";
 
-/**
- * Concatena a base da API quando definida; senão retorna o path como está.
- * Exemplo:
- * - Com API_BASE = "https://bepit-nexus-backend.onrender.com"
- *   makeUrl("/api/health") -> "https://bepit-nexus-backend.onrender.com/api/health"
- * - Sem API_BASE:
- *   makeUrl("/api/health") -> "/api/health" (usado pelo Netlify proxy)
- */
-function makeUrl(path) {
-  if (!path || typeof path !== "string") throw new Error("Parâmetro 'path' inválido.");
-  if (API_BASE) {
-    const base = API_BASE.endsWith("/") ? API_BASE.slice(0, -1) : API_BASE;
-    const p = path.startsWith("/") ? path : `/${path}`;
-    return `${base}${p}`;
+/** Lê a X-Admin-Key (salva pelo login) */
+function getAdminKey() {
+  return (
+    sessionStorage.getItem("adminKey") ||
+    localStorage.getItem("adminKey") ||
+    ""
+  );
+}
+
+/** Normaliza erro em string amigável */
+function normalizeError(resp, payload) {
+  if (!resp) return "Falha de rede";
+  const text =
+    payload?.error ||
+    payload?.message ||
+    (typeof payload === "string" ? payload : null) ||
+    `${resp.status} ${resp.statusText}`;
+  return text;
+}
+
+/** Chamada genérica */
+async function apiFetch(method, path, body) {
+  const url = `${API_BASE}${path}`;
+  const headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Admin-Key": getAdminKey(),
+  };
+
+  try {
+    const resp = await fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const isJson = (resp.headers.get("content-type") || "").includes(
+      "application/json"
+    );
+    const payload = isJson ? await resp.json().catch(() => null) : null;
+
+    if (!resp.ok) {
+      return { ok: false, error: normalizeError(resp, payload), status: resp.status };
+    }
+    return { ok: true, data: payload };
+  } catch (e) {
+    return { ok: false, error: e?.message || "Falha de rede" };
   }
-  return path;
 }
 
-// ---------------------------- Persistência da chave --------------------------
-// Agora em sessionStorage (derruba ao fechar a aba/janela).
-export function setAdminKey(k) {
-  if (typeof k !== "string" || !k.trim()) {
-    throw new Error("Chave administrativa inválida.");
-  }
-  sessionStorage.setItem(STORAGE_KEY, k.trim());
-  touchAdminActivity();
+// ============================================================================
+// Regiões
+// ============================================================================
+export async function getRegioes({ q, limit = 200 } = {}) {
+  const qs = new URLSearchParams();
+  if (q) qs.set("q", q);
+  if (limit) qs.set("limit", String(limit));
+  return apiFetch("GET", `/api/admin/regioes?${qs.toString()}`);
+}
+export async function createRegiao({ nome }) {
+  return apiFetch("POST", "/api/admin/regioes", { nome });
+}
+export async function updateRegiao(id, { nome }) {
+  return apiFetch("PATCH", `/api/admin/regioes/${id}`, { nome });
+}
+export async function deleteRegiao(id) {
+  return apiFetch("DELETE", `/api/admin/regioes/${id}`);
 }
 
-export function getAdminKey() {
-  return sessionStorage.getItem(STORAGE_KEY) || "";
+// ============================================================================
+// Cidades
+// ============================================================================
+export async function getCidades({ regiaoId, q, limit = 500 } = {}) {
+  const qs = new URLSearchParams();
+  if (regiaoId) qs.set("regiaoId", regiaoId);
+  if (q) qs.set("q", q);
+  if (limit) qs.set("limit", String(limit));
+  return apiFetch("GET", `/api/admin/cidades?${qs.toString()}`);
+}
+export async function createCidade({ nome, regiaoId }) {
+  return apiFetch("POST", "/api/admin/cidades", { nome, regiaoId });
+}
+export async function updateCidade(id, { nome, regiaoId }) {
+  return apiFetch("PATCH", `/api/admin/cidades/${id}`, { nome, regiaoId });
+}
+export async function deleteCidade(id) {
+  return apiFetch("DELETE", `/api/admin/cidades/${id}`);
 }
 
-export function clearAdminKey() {
-  sessionStorage.removeItem(STORAGE_KEY);
-  sessionStorage.removeItem(LAST_ACTIVITY_KEY);
+// ============================================================================
+// Parceiros
+// ============================================================================
+export async function getParceiros({ nome, cidadeId, page = 1, limit = 50 } = {}) {
+  const qs = new URLSearchParams();
+  if (nome) qs.set("nome", nome);
+  if (cidadeId) qs.set("cidadeId", cidadeId);
+  if (page) qs.set("page", String(page));
+  if (limit) qs.set("limit", String(limit));
+  return apiFetch("GET", `/api/admin/parceiros?${qs.toString()}`);
+}
+export async function getParceiroById(id) {
+  return apiFetch("GET", `/api/admin/parceiros/${id}`);
+}
+export async function createParceiro(input) {
+  // Campos leigos na UI → API espera colunas equivalentes
+  const body = {
+    nome: input.nome,
+    cidadeId: input.cidadeId,
+    logradouro: input.logradouro,
+    numero: input.numero,
+    bairro: input.bairro || null,
+    cep: input.cep || null,
+    descricao: input.descricao || null,
+    categoria: input.categoria || null,
+    referencias: input.referencias || null, // string solta
+    contato: input.contato || null,         // telefone/site
+  };
+  return apiFetch("POST", "/api/admin/parceiros", body);
+}
+export async function updateParceiro(id, patch) {
+  const body = {
+    nome: patch.nome,
+    cidadeId: patch.cidadeId,
+    logradouro: patch.logradouro,
+    numero: patch.numero,
+    bairro: patch.bairro,
+    cep: patch.cep,
+    descricao: patch.descricao,
+    categoria: patch.categoria,
+    referencias: patch.referencias,
+    contato: patch.contato,
+  };
+  return apiFetch("PATCH", `/api/admin/parceiros/${id}`, body);
+}
+export async function deleteParceiro(id) {
+  return apiFetch("DELETE", `/api/admin/parceiros/${id}`);
 }
 
-// Marca atividade (atualiza relógio de inatividade)
-export function touchAdminActivity() {
-  sessionStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
+/** (Opcional) Importação em lote — aceita um array de parceiros */
+export async function bulkCreateParceiros(items = []) {
+  return apiFetch("POST", "/api/admin/parceiros:bulk", { items });
 }
 
-// Lê timestamp de última atividade
-export function getLastActivityTs() {
-  const v = sessionStorage.getItem(LAST_ACTIVITY_KEY);
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
+// ============================================================================
+// Dicas
+// ============================================================================
+export async function getDicas({ cidadeId, titulo, page = 1, limit = 50 } = {}) {
+  const qs = new URLSearchParams();
+  if (cidadeId) qs.set("cidadeId", cidadeId);
+  if (titulo) qs.set("titulo", titulo);
+  if (page) qs.set("page", String(page));
+  if (limit) qs.set("limit", String(limit));
+  return apiFetch("GET", `/api/admin/dicas?${qs.toString()}`);
 }
-
-// --------------------------------- Auth --------------------------------------
-/**
- * Login por chave administrativa (rotina nova do backend)
- * POST /api/auth/login  -> body: { key }
- * Sucesso: { ok: true }
- */
-export async function adminLoginByKey(key) {
-  const candidate = (key || "").trim();
-  if (!candidate) throw new Error("missing_key");
-
-  const res = await fetch(makeUrl("/api/auth/login"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: candidate }),
-    credentials: "include"
+export async function getDicaById(id) {
+  return apiFetch("GET", `/api/admin/dicas/${id}`);
+}
+export async function createDica({ cidadeId, titulo, conteudo, categoria }) {
+  return apiFetch("POST", "/api/admin/dicas", {
+    cidadeId,
+    titulo,
+    conteudo,
+    categoria,
   });
-
-  if (!res.ok) {
-    let errPayload = null;
-    try { errPayload = await res.json(); } catch { /* ignore */ }
-    const message = errPayload?.error || `HTTP ${res.status}`;
-    throw new Error(message);
-  }
-
-  const data = await res.json().catch(() => ({}));
-  if (data?.ok === true) {
-    setAdminKey(candidate);    // já grava em sessionStorage
-    return true;
-  }
-
-  throw new Error(data?.error || "invalid_key");
+}
+export async function updateDica(id, patch) {
+  return apiFetch("PATCH", `/api/admin/dicas/${id}`, patch);
+}
+export async function deleteDica(id) {
+  return apiFetch("DELETE", `/api/admin/dicas/${id}`);
 }
 
-// ------------------------------ Helpers HTTP ---------------------------------
-async function httpGet(path) {
-  const key = getAdminKey();
-  const res = await fetch(makeUrl(path), {
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Key": key
-    },
-    credentials: "include"
+// ============================================================================
+// Avisos
+// ============================================================================
+export async function getAvisos({ cidadeId, regiaoId, page = 1, limit = 50 } = {}) {
+  const qs = new URLSearchParams();
+  if (cidadeId) qs.set("cidadeId", cidadeId);
+  if (regiaoId) qs.set("regiaoId", regiaoId);
+  if (page) qs.set("page", String(page));
+  if (limit) qs.set("limit", String(limit));
+  return apiFetch("GET", `/api/admin/avisos?${qs.toString()}`);
+}
+export async function createAviso({ titulo, mensagem, cidadeIds = [], regiaoId = null }) {
+  return apiFetch("POST", "/api/admin/avisos", {
+    titulo,
+    mensagem,
+    cidadeIds,
+    regiaoId,
   });
-  touchAdminActivity();
-  if (!res.ok) {
-    let errPayload = null;
-    try { errPayload = await res.json(); } catch { /* ignore */ }
-    const message = errPayload?.error || `HTTP ${res.status}`;
-    throw new Error(message);
-  }
-  return res.json();
+}
+export async function deleteAviso(id) {
+  return apiFetch("DELETE", `/api/admin/avisos/${id}`);
 }
 
-async function httpPost(path, body) {
-  const key = getAdminKey();
-  const res = await fetch(makeUrl(path), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Key": key
-    },
-    body: JSON.stringify(body || {}),
-    credentials: "include"
-  });
-  touchAdminActivity();
-  if (!res.ok) {
-    let errPayload = null;
-    try { errPayload = await res.json(); } catch { /* ignore */ }
-    const message = errPayload?.error || `HTTP ${res.status}`;
-    throw new Error(message);
-  }
-  return res.json();
+// ============================================================================
+// Métricas
+// ============================================================================
+export async function getMetricsSummary() {
+  return apiFetch("GET", "/api/admin/metrics/summary");
+}
+export async function getMetricsApis() {
+  return apiFetch("GET", "/api/admin/metrics/apis");
+}
+export async function getMetricsConversas({ de, ate } = {}) {
+  const qs = new URLSearchParams();
+  if (de) qs.set("de", de);
+  if (ate) qs.set("ate", ate);
+  return apiFetch("GET", `/api/admin/metrics/conversas?${qs.toString()}`);
+}
+export async function getMetricsParceiros({ de, ate } = {}) {
+  const qs = new URLSearchParams();
+  if (de) qs.set("de", de);
+  if (ate) qs.set("ate", ate);
+  return apiFetch("GET", `/api/admin/metrics/parceiros?${qs.toString()}`);
 }
 
-async function httpPut(path, body) {
-  const key = getAdminKey();
-  const res = await fetch(makeUrl(path), {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Key": key
-    },
-    body: JSON.stringify(body || {}),
-    credentials: "include"
-  });
-  touchAdminActivity();
-  if (!res.ok) {
-    let errPayload = null;
-    try { errPayload = await res.json(); } catch { /* ignore */ }
-    const message = errPayload?.error || `HTTP ${res.status}`;
-    throw new Error(message);
-  }
-  return res.json();
+// ============================================================================
+// Logs
+// ============================================================================
+export async function getLogs({ tipo, de, ate, limit = 100 } = {}) {
+  const qs = new URLSearchParams();
+  if (tipo) qs.set("tipo", tipo);
+  if (de) qs.set("de", de);
+  if (ate) qs.set("ate", ate);
+  if (limit) qs.set("limit", String(limit));
+  return apiFetch("GET", `/api/admin/logs?${qs.toString()}`);
 }
 
-// ----------------------- Funções genéricas (export) --------------------------
-export async function adminGet(path) {
-  return httpGet(path);
-}
-export async function adminPost(path, body) {
-  return httpPost(path, body);
-}
-export async function adminPut(path, body) {
-  return httpPut(path, body);
+/** (Opcional) Registro de log manual */
+export async function putLog({ tipo, mensagem, contexto }) {
+  return apiFetch("POST", "/api/admin/logs", { tipo, mensagem, contexto });
 }
 
-// ---------------------- Atalhos específicos (opcional) -----------------------
-export async function adminListarParceiros(regiaoSlug, cidadeSlug) {
-  if (!regiaoSlug || !cidadeSlug) throw new Error("Parâmetros 'regiaoSlug' e 'cidadeSlug' são obrigatórios.");
-  const path = `/api/admin/parceiros/${encodeURIComponent(regiaoSlug)}/${encodeURIComponent(cidadeSlug)}`;
-  return httpGet(path);
+// ============================================================================
+// Utilidades (comuns no dashboard)
+// ============================================================================
+export function byId(arr = [], id) {
+  return (arr || []).find((x) => x.id === id) || null;
+}
+export function toOptions(arr = [], labelKey = "nome") {
+  return (arr || []).map((x) => ({
+    value: x.id,
+    label: x[labelKey] || x.id,
+  }));
 }
 
-export async function adminCriarParceiro(payload) {
-  return httpPost("/api/admin/parceiros", payload);
-}
+/** (Compat) Alias antigos possíveis */
+export const adminPost = (path, body) => apiFetch("POST", path, body);
+export const adminGet = (path) => apiFetch("GET", path);
+export const adminPut = (path, body) => apiFetch("PATCH", path, body);
+export const adminDelete = (path) => apiFetch("DELETE", path);
 
-export async function adminAtualizarParceiro(id, payload) {
-  if (!id) throw new Error("Parâmetro 'id' é obrigatório.");
-  return httpPut(`/api/admin/parceiros/${encodeURIComponent(String(id))}`, payload);
-}
-
-export async function adminCriarRegiao(payload) {
-  return httpPost("/api/admin/regioes", payload);
-}
-
-export async function adminCriarCidade(payload) {
-  return httpPost("/api/admin/cidades", payload);
-}
-
-export async function adminMetricsSummary(params = {}) {
-  const usp = new URLSearchParams();
-  if (params.regiaoSlug) usp.set("regiaoSlug", params.regiaoSlug);
-  if (params.cidadeSlug) usp.set("cidadeSlug", params.cidadeSlug);
-  const qs = usp.toString() ? `?${usp.toString()}` : "";
-  return httpGet(`/api/admin/metrics/summary${qs}`);
-}
-
-export async function adminLogs(params = {}) {
-  const usp = new URLSearchParams();
-  if (params.tipo) usp.set("tipo", params.tipo);
-  if (params.regiaoSlug) usp.set("regiaoSlug", params.regiaoSlug);
-  if (params.cidadeSlug) usp.set("cidadeSlug", params.cidadeSlug);
-  if (params.parceiroId) usp.set("parceiroId", params.parceiroId);
-  if (params.conversationId) usp.set("conversationId", params.conversationId);
-  if (params.since) usp.set("since", params.since);
-  if (params.until) usp.set("until", params.until);
-  if (Number.isFinite(params.limit)) usp.set("limit", String(params.limit));
-  const qs = usp.toString() ? `?${usp.toString()}` : "";
-  return httpGet(`/api/admin/logs${qs}`);
-}
+/** (Compat) Nomes legados para evitar quebrar chamadas antigas da UI */
+export const listRegioes = getRegioes;
+export const listCidades = getCidades;
+export const listParceiros = getParceiros;
+export const listDicas = getDicas;
+export const listAvisos = getAvisos;

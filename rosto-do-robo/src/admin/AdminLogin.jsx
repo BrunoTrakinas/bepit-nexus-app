@@ -1,20 +1,21 @@
 // src/admin/AdminLogin.jsx
 // ============================================================================
 // Tela de login do Admin:
-// - Chama apiClient.authLoginByKey(key) que já existe no seu projeto
-// - Em caso de ok:true, salva a chave em localStorage E sessionStorage
-//   * localStorage: persistência opcional
-//   * sessionStorage ("bepit_admin_key"): lida pelo apiClient para enviar X-Admin-Key
-// - Redireciona para /admin
+// - Chama apiClient.authLoginByKey(key) (já existente no projeto).
+// - Em caso de ok:true, salva a chave em localStorage E sessionStorage:
+//      * localStorage ("adminKey"): usado pelo ProtectedRoute.
+//      * sessionStorage ("bepit_admin_key"): lido pelo apiClient p/ X-Admin-Key.
+// - Atualiza adminLastActiveAt (controle de inatividade do ProtectedRoute).
+// - Redireciona para /admin/midia (página Admin standalone de mídia).
 // - Ajustes de acessibilidade/autofill (id/name/autoComplete).
 // ============================================================================
 
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import apiClient from "../lib/apiClient";
 
-const STORAGE_KEY_LOCAL = "adminKey";            // compatibilidade com o que já usava
-const STORAGE_KEY_SESSION = "bepit_admin_key";   // ***lido pelo apiClient para X-Admin-Key***
+const STORAGE_KEY_LOCAL = "adminKey";            // compatível com ProtectedRoute
+const STORAGE_KEY_SESSION = "bepit_admin_key";   // lido pelo apiClient (X-Admin-Key)
 const LAST_ACTIVE_KEY = "adminLastActiveAt";
 
 export default function AdminLogin() {
@@ -22,6 +23,10 @@ export default function AdminLogin() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const navigate = useNavigate();
+  const [search] = useSearchParams();
+
+  // Permite redirecionar para outra rota após login: /admin/login?to=/admin/midia
+  const next = search.get("to") || "/admin/midia";
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -35,19 +40,23 @@ export default function AdminLogin() {
 
     setIsLoading(true);
     try {
-      // ✅ usa o helper existente no seu projeto
+      // ✅ helper existente no projeto
       const resp = await apiClient.authLoginByKey(trimmed);
       const ok = resp?.ok === true;
 
       if (ok) {
-        // 1) Persistência opcional (como você já tinha)
-        localStorage.setItem(STORAGE_KEY_LOCAL, trimmed);
-        localStorage.setItem(LAST_ACTIVE_KEY, String(Date.now()));
+        // 1) Persistência esperada pelo ProtectedRoute
+        try {
+          localStorage.setItem(STORAGE_KEY_LOCAL, trimmed);
+          localStorage.setItem(LAST_ACTIVE_KEY, String(Date.now()));
+        } catch {}
 
-        // 2) ***Fundamental para o X-Admin-Key no interceptor***
-        sessionStorage.setItem(STORAGE_KEY_SESSION, trimmed);
+        // 2) Header para chamadas administrativas (interceptor do apiClient)
+        try {
+          sessionStorage.setItem(STORAGE_KEY_SESSION, trimmed);
+        } catch {}
 
-        navigate("/admin");
+        navigate(next, { replace: true });
       } else {
         setErrorMsg("Chave inválida.");
       }
@@ -77,9 +86,9 @@ export default function AdminLogin() {
             <span className="text-sm font-medium">Chave</span>
             <input
               id="adminKey"
-              name="adminKey"                 // evita o aviso do Chrome
+              name="adminKey"
               type="password"
-              autoComplete="off"              // chave sensível: não sugerir armazenamento
+              autoComplete="off"  // chave sensível
               className="mt-1 w-full border rounded-md px-3 py-2"
               value={key}
               onChange={(e) => setKey(e.target.value)}

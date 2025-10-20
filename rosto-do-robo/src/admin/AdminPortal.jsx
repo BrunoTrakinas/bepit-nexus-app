@@ -1,5 +1,14 @@
-// rosto-do-robo/src/admin/AdminPortal.jsx
-import React, { useState } from "react";
+// src/admin/AdminPortal.jsx
+// ============================================================================
+// Portal administrativo simples (CRUD de parceiros já existente):
+// - Login por chave usando helpers do adminApi.
+// - Mantém compatibilidade com armazenamento da chave:
+//     * localStorage ("adminKey") + "adminLastActiveAt" (ProtectedRoute).
+//     * sessionStorage ("bepit_admin_key") para interceptor de X-Admin-Key.
+// - Form mínimo para criar/listar parceiros.
+// ============================================================================
+
+import React, { useEffect, useState } from "react";
 import {
   adminLoginByKey,
   getAdminKey,
@@ -8,15 +17,38 @@ import {
   adminGet
 } from "./adminApi";
 
+const STORAGE_KEY_LOCAL = "adminKey";
+const STORAGE_KEY_SESSION = "bepit_admin_key";
+const LAST_ACTIVE_KEY = "adminLastActiveAt";
+
 export default function AdminPortal() {
   // -------------------- Login por chave --------------------
   const [adminKeyInput, setAdminKeyInput] = useState("");
   const [authMsg, setAuthMsg] = useState(getAdminKey() ? "Logado." : "Não logado.");
 
+  useEffect(() => {
+    // Mantém adminLastActiveAt atualizado enquanto a página estiver aberta
+    try {
+      if (getAdminKey()) {
+        localStorage.setItem(LAST_ACTIVE_KEY, String(Date.now()));
+      }
+    } catch {}
+  }, []);
+
   async function fazerLogin(e) {
     e?.preventDefault?.();
     try {
       await adminLoginByKey(adminKeyInput);
+
+      // Garante que as duas storages fiquem populadas para o app inteiro
+      try {
+        localStorage.setItem(STORAGE_KEY_LOCAL, adminKeyInput);
+        localStorage.setItem(LAST_ACTIVE_KEY, String(Date.now()));
+      } catch {}
+      try {
+        sessionStorage.setItem(STORAGE_KEY_SESSION, adminKeyInput);
+      } catch {}
+
       setAuthMsg("Logado.");
     } catch (err) {
       setAuthMsg("Erro ao logar: " + (err?.message || "desconhecido"));
@@ -25,6 +57,13 @@ export default function AdminPortal() {
 
   function fazerLogout() {
     clearAdminKey();
+    try {
+      localStorage.removeItem(STORAGE_KEY_LOCAL);
+      localStorage.removeItem(LAST_ACTIVE_KEY);
+    } catch {}
+    try {
+      sessionStorage.removeItem(STORAGE_KEY_SESSION);
+    } catch {}
     setAuthMsg("Não logado.");
   }
 
@@ -67,10 +106,12 @@ export default function AdminPortal() {
       contato: form.contato || null,
       faixa_preco: form.faixa_preco || null,
       horario_funcionamento: form.horario_funcionamento || null,
-      beneficio_bepit: form.beneficio_bepit || null, // o backend ignora promo; ok manter campo
+      beneficio_bepit: form.beneficio_bepit || null,
       tags: form.tags
         ? form.tags.split(",").map((t) => t.trim()).filter(Boolean)
         : null,
+      // "fotos" aqui são URLs livres. Para usar o fluxo de storage,
+      // utilize o módulo de Uploads do Parceiro (uploads + RPC) que já criamos.
       fotos: form.fotos
         ? form.fotos.split(",").map((u) => u.trim()).filter(Boolean)
         : null,
@@ -80,7 +121,19 @@ export default function AdminPortal() {
     try {
       const data = await adminPost("/api/admin/parceiros", payload);
       setStatus(`Criado com sucesso: ${data?.data?.nome || ""}`);
-      setForm((f) => ({ ...f, nome: "", descricao: "", categoria: "", endereco: "", contato: "", faixa_preco: "", horario_funcionamento: "", beneficio_bepit: "", tags: "", fotos: "" }));
+      setForm((f) => ({
+        ...f,
+        nome: "",
+        descricao: "",
+        categoria: "",
+        endereco: "",
+        contato: "",
+        faixa_preco: "",
+        horario_funcionamento: "",
+        beneficio_bepit: "",
+        tags: "",
+        fotos: ""
+      }));
     } catch (err) {
       setStatus(err?.message || "Erro ao criar");
     }
@@ -89,9 +142,13 @@ export default function AdminPortal() {
   async function listar() {
     setStatus("Carregando lista...");
     try {
-      const data = await adminGet(`/api/admin/parceiros/${encodeURIComponent(form.regiaoSlug)}/${encodeURIComponent(form.cidadeSlug)}`);
+      const data = await adminGet(
+        `/api/admin/parceiros/${encodeURIComponent(form.regiaoSlug)}/${encodeURIComponent(form.cidadeSlug)}`
+      );
       setLista(Array.isArray(data?.data) ? data.data : []);
-      setStatus(`Carregado (${Array.isArray(data?.data) ? data.data.length : 0} itens)`);
+      setStatus(
+        `Carregado (${Array.isArray(data?.data) ? data.data.length : 0} itens)`
+      );
     } catch (err) {
       setStatus(err?.message || "Erro ao listar");
     }
@@ -109,10 +166,17 @@ export default function AdminPortal() {
           onChange={(e) => setAdminKeyInput(e.target.value)}
           style={{ flex: 1, padding: 8, borderRadius: 6, border: "1px solid #ccc" }}
         />
-        <button type="submit" style={{ padding: "8px 12px", borderRadius: 6, background: "#0b74de", color: "#fff", border: "none" }}>
+        <button
+          type="submit"
+          style={{ padding: "8px 12px", borderRadius: 6, background: "#0b74de", color: "#fff", border: "none" }}
+        >
           Entrar
         </button>
-        <button type="button" onClick={fazerLogout} style={{ padding: "8px 12px", borderRadius: 6, background: "#d9534f", color: "#fff", border: "none" }}>
+        <button
+          type="button"
+          onClick={fazerLogout}
+          style={{ padding: "8px 12px", borderRadius: 6, background: "#d9534f", color: "#fff", border: "none" }}
+        >
           Sair
         </button>
       </form>
@@ -121,34 +185,95 @@ export default function AdminPortal() {
       {/* Formulário de criação */}
       <form onSubmit={criarParceiro} style={{ display: "grid", gap: 8 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <label>Região (slug)<input name="regiaoSlug" value={form.regiaoSlug} onChange={onChange} /></label>
-          <label>Cidade (slug)<input name="cidadeSlug" value={form.cidadeSlug} onChange={onChange} /></label>
+          <label>
+            Região (slug)
+            <input name="regiaoSlug" value={form.regiaoSlug} onChange={onChange} />
+          </label>
+          <label>
+            Cidade (slug)
+            <input name="cidadeSlug" value={form.cidadeSlug} onChange={onChange} />
+          </label>
         </div>
-        <label>Tipo
+
+        <label>
+          Tipo
           <select name="tipo" value={form.tipo} onChange={onChange}>
             <option value="PARCEIRO">PARCEIRO</option>
             <option value="DICA">DICA</option>
           </select>
         </label>
-        <label>Nome<input name="nome" value={form.nome} onChange={onChange} required /></label>
-        <label>Descrição<textarea name="descricao" value={form.descricao} onChange={onChange} rows={3} /></label>
-        <label>Categoria<input name="categoria" value={form.categoria} onChange={onChange} /></label>
-        <label>Endereço<input name="endereco" value={form.endereco} onChange={onChange} /></label>
-        <label>Contato<input name="contato" value={form.contato} onChange={onChange} /></label>
-        <label>Horário de funcionamento<input name="horario_funcionamento" value={form.horario_funcionamento} onChange={onChange} /></label>
-        <label>Faixa de preço<input name="faixa_preco" value={form.faixa_preco} onChange={onChange} /></label>
-        <label>Benefício (texto livre — não será anunciado ao usuário)<input name="beneficio_bepit" value={form.beneficio_bepit} onChange={onChange} /></label>
-        <label>Tags (sep. por vírgula)<input name="tags" value={form.tags} onChange={onChange} /></label>
-        <label>Fotos (URLs, sep. por vírgula)<input name="fotos" value={form.fotos} onChange={onChange} /></label>
 
-        <button type="submit" style={{ padding: "10px 16px", borderRadius: 6, background: "#2e7d32", color: "#fff", border: "none", fontWeight: 600 }}>
+        <label>
+          Nome
+          <input name="nome" value={form.nome} onChange={onChange} required />
+        </label>
+
+        <label>
+          Descrição
+          <textarea name="descricao" value={form.descricao} onChange={onChange} rows={3} />
+        </label>
+
+        <label>
+          Categoria
+          <input name="categoria" value={form.categoria} onChange={onChange} />
+        </label>
+
+        <label>
+          Endereço
+          <input name="endereco" value={form.endereco} onChange={onChange} />
+        </label>
+
+        <label>
+          Contato
+          <input name="contato" value={form.contato} onChange={onChange} />
+        </label>
+
+        <label>
+          Horário de funcionamento
+          <input name="horario_funcionamento" value={form.horario_funcionamento} onChange={onChange} />
+        </label>
+
+        <label>
+          Faixa de preço
+          <input name="faixa_preco" value={form.faixa_preco} onChange={onChange} />
+        </label>
+
+        <label>
+          Benefício (texto livre — não será anunciado ao usuário)
+          <input name="beneficio_bepit" value={form.beneficio_bepit} onChange={onChange} />
+        </label>
+
+        <label>
+          Tags (sep. por vírgula)
+          <input name="tags" value={form.tags} onChange={onChange} />
+        </label>
+
+        <label>
+          Fotos (URLs, sep. por vírgula)
+          <input name="fotos" value={form.fotos} onChange={onChange} />
+        </label>
+
+        <button
+          type="submit"
+          style={{
+            padding: "10px 16px",
+            borderRadius: 6,
+            background: "#2e7d32",
+            color: "#fff",
+            border: "none",
+            fontWeight: 600
+          }}
+        >
           Criar parceiro/dica
         </button>
       </form>
 
       <hr style={{ margin: "20px 0" }} />
 
-      <button onClick={listar} style={{ padding: "8px 12px", borderRadius: 6, background: "#0b74de", color: "#fff", border: "none" }}>
+      <button
+        onClick={listar}
+        style={{ padding: "8px 12px", borderRadius: 6, background: "#0b74de", color: "#fff", border: "none" }}
+      >
         Listar por região/cidade
       </button>
       <div style={{ marginTop: 10, color: "#333" }}>{status}</div>

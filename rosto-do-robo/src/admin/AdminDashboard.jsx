@@ -1,610 +1,1065 @@
-// rosto-do-robo/src/admin/AdminDashboard.jsx
-import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { adminGet, adminPost, adminPut, clearAdminKey } from "./adminApi";
+// src/admin/AdminDashboard.jsx
+// ============================================================================
+// Painel do Administrador — BEPIT Nexus
+// - Rótulos leigos (sem "slug", sem "tags")
+// - Selects para Região/Cidade
+// - Abas: Cadastro, Alterações, Avisos, Métricas, Logs
+// - Compatível com o adminApi.js ESTENDIDO que te enviei
+// ============================================================================
 
-// ---------------- Abas do topo ----------------
-function Tabs({ tab, setTab, navigate }) {
-  const items = ["cadastro", "alterar", "inclusoes", "metricas", "logs"];
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  // base
+  getRegioes, createRegiao,
+  getCidades, createCidade,
+  // parceiros
+  getParceiros, createParceiro, updateParceiro, deleteParceiro,
+  // dicas
+  getDicas, createDica, updateDica, deleteDica,
+  // avisos
+  getAvisos, createAviso,
+  // métricas e logs
+  getMetricsSummary, getLogs,
+  // utils
+  toOptions, byId,
+} from "./adminApi";
+
+function Box({ title, children }) {
   return (
-    <div className="flex flex-wrap gap-2 border-b pb-2">
-      {items.map((t) => (
-        <button
-          key={t}
-          onClick={() => setTab(t)}
-          className={`px-3 py-1 rounded-md text-sm md:text-base ${tab === t ? "bg-blue-600 text-white" : "bg-gray-200"}`}
-        >
-          {t.toUpperCase()}
-        </button>
+    <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h3 style={{ margin: "0 0 12px", fontSize: 18 }}>{title}</h3>
+      {children}
+    </div>
+  );
+}
+
+function Row({ label, children }) {
+  return (
+    <div style={{ display: "flex", gap: 12, alignItems: "center", margin: "8px 0" }}>
+      <div style={{ minWidth: 180, color: "#333" }}>{label}</div>
+      <div style={{ flex: 1 }}>{children}</div>
+    </div>
+  );
+}
+
+function Input(props) {
+  return (
+    <input
+      {...props}
+      style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ccc" }}
+    />
+  );
+}
+
+function Textarea(props) {
+  return (
+    <textarea
+      {...props}
+      style={{
+        width: "100%",
+        padding: 10,
+        borderRadius: 8,
+        border: "1px solid #ccc",
+        minHeight: 100,
+      }}
+    />
+  );
+}
+
+function Select({ options = [], value, onChange, placeholder = "Selecione...", allowEmpty = true }) {
+  return (
+    <select
+      value={value || ""}
+      onChange={(e) => onChange(e.target.value || null)}
+      style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ccc" }}
+    >
+      {allowEmpty && <option value="">{placeholder}</option>}
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>
+          {opt.label}
+        </option>
       ))}
-      <div className="flex-1" />
-      <button
-        onClick={() => {
-          clearAdminKey();
-          navigate("/admin/login");
-        }}
-        className="px-3 py-1 rounded-md bg-red-500 text-white text-sm md:text-base"
-      >
-        Sair
-      </button>
-    </div>
+    </select>
   );
 }
 
-// ------------- Cadastro de Parceiro/Dica -------------
-function AbaCadastro() {
-  const [form, setForm] = useState({
-    regiaoSlug: "regiao-dos-lagos",
-    cidadeSlug: "cabo-frio",
-    tipo: "PARCEIRO", // ou "DICA"
-    nome: "",
-    descricao: "",
-    categoria: "",
-    beneficio_bepit: "",
-    endereco: "",
-    contato: "",
-    tagsCSV: "",
-    horario_funcionamento: "",
-    faixa_preco: "",
-    fotosCSV: "",
-    ativo: true
-  });
-  const [msg, setMsg] = useState("");
-
-  const salvar = async () => {
-    setMsg("Salvando...");
-    try {
-      const fotosArray = form.fotosCSV
-        ? form.fotosCSV.split(",").map((s) => s.trim()).filter(Boolean)
-        : null;
-
-      const payload = {
-        regiaoSlug: form.regiaoSlug.trim(),
-        cidadeSlug: form.cidadeSlug.trim(),
-        tipo: form.tipo,
-        nome: form.nome,
-        descricao: form.descricao || null,
-        categoria: form.categoria || null,
-        beneficio_bepit: form.beneficio_bepit || null,
-        endereco: form.endereco || null,
-        contato: form.contato || null,
-        tags: form.tagsCSV
-          ? form.tagsCSV.split(",").map((s) => s.trim()).filter(Boolean)
-          : null,
-        horario_funcionamento: form.horario_funcionamento || null,
-        faixa_preco: form.faixa_preco || null,
-        fotos: fotosArray,
-        fotos_parceiros: fotosArray,
-        ativo: Boolean(form.ativo)
-      };
-
-      const res = await adminPost("/api/admin/parceiros", payload);
-      setMsg("Parceiro/Dica criado com sucesso!");
-      console.log(res);
-    } catch (e) {
-      console.error(e);
-      setMsg("Erro ao salvar: " + e.message);
-    }
-  };
-
-  const Input = ({ label, ...p }) => (
-    <label className="block">
-      <span className="text-sm font-medium">{label}</span>
-      <input {...p} className="mt-1 w-full border rounded-md px-3 py-2" />
-    </label>
-  );
-
-  const Textarea = ({ label, ...p }) => (
-    <label className="block">
-      <span className="text-sm font-medium">{label}</span>
-      <textarea {...p} className="mt-1 w-full border rounded-md px-3 py-2" rows={3} />
-    </label>
-  );
-
+function MultiSelect({ options = [], values = [], onChange, placeholder = "Selecione..." }) {
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <Input label="Região (slug)" value={form.regiaoSlug} onChange={(e) => setForm((f) => ({ ...f, regiaoSlug: e.target.value }))} />
-        <Input label="Cidade (slug)" value={form.cidadeSlug} onChange={(e) => setForm((f) => ({ ...f, cidadeSlug: e.target.value }))} />
-        <label className="block">
-          <span className="text-sm font-medium">Tipo</span>
-          <select
-            value={form.tipo}
-            onChange={(e) => setForm((f) => ({ ...f, tipo: e.target.value }))}
-            className="mt-1 w-full border rounded-md px-3 py-2"
-          >
-            <option>PARCEIRO</option>
-            <option>DICA</option>
-          </select>
-        </label>
-        <Input label="Nome" value={form.nome} onChange={(e) => setForm((f) => ({ ...f, nome: e.target.value }))} />
-        <Input label="Categoria" value={form.categoria} onChange={(e) => setForm((f) => ({ ...f, categoria: e.target.value }))} />
-        <Input label="Benefício BEPIT" value={form.beneficio_bepit} onChange={(e) => setForm((f) => ({ ...f, beneficio_bepit: e.target.value }))} />
-        <Input label="Endereço" value={form.endereco} onChange={(e) => setForm((f) => ({ ...f, endereco: e.target.value }))} />
-        <Input label="Contato" value={form.contato} onChange={(e) => setForm((f) => ({ ...f, contato: e.target.value }))} />
-        <Input label="Faixa de preço" value={form.faixa_preco} onChange={(e) => setForm((f) => ({ ...f, faixa_preco: e.target.value }))} />
-        <Input
-          label="Horário de funcionamento"
-          value={form.horario_funcionamento}
-          onChange={(e) => setForm((f) => ({ ...f, horario_funcionamento: e.target.value }))}
-        />
-        <Input label="Tags (separe por vírgula)" value={form.tagsCSV} onChange={(e) => setForm((f) => ({ ...f, tagsCSV: e.target.value }))} />
-        <Input
-          label="Fotos (URLs separadas por vírgula)"
-          value={form.fotosCSV}
-          onChange={(e) => setForm((f) => ({ ...f, fotosCSV: e.target.value }))}
-        />
-      </div>
-      <Textarea label="Descrição" value={form.descricao} onChange={(e) => setForm((f) => ({ ...f, descricao: e.target.value }))} />
-      <label className="inline-flex items-center gap-2">
-        <input type="checkbox" checked={form.ativo} onChange={(e) => setForm((f) => ({ ...f, ativo: e.target.checked }))} />
-        <span>Ativo</span>
-      </label>
-
-      <div className="flex gap-2">
-        <button onClick={salvar} className="bg-green-600 text-white px-4 py-2 rounded-md">
-          Salvar
-        </button>
-        {msg && <div className="text-sm text-gray-600 self-center">{msg}</div>}
-      </div>
-    </div>
+    <select
+      multiple
+      value={values}
+      onChange={(e) => {
+        const arr = Array.from(e.target.selectedOptions).map((o) => o.value);
+        onChange(arr);
+      }}
+      style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ccc", height: 120 }}
+    >
+      {options.length === 0 ? <option disabled>— {placeholder} —</option> : null}
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>
+          {opt.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
-// ------------- Alterar (lista + editar) -------------
-function AbaAlterar() {
-  const [filtro, setFiltro] = useState({ regiaoSlug: "regiao-dos-lagos", cidadeSlug: "cabo-frio" });
-  const [lista, setLista] = useState([]);
-  const [selecionado, setSelecionado] = useState(null);
-  const [msg, setMsg] = useState("");
+export default function AdminDashboard() {
+  const [aba, setAba] = useState("cadastro");
 
-  const carregar = async () => {
-    setMsg("Carregando...");
-    try {
-      const data = await adminGet(`/api/admin/parceiros/${filtro.regiaoSlug}/${filtro.cidadeSlug}`);
-      const arr = Array.isArray(data?.data) ? data.data : [];
+  // bases
+  const [regioes, setRegioes] = useState([]);
+  const [cidades, setCidades] = useState([]);
 
-      const normalizado = arr.map((p) => ({
-        ...p,
-        fotos_parceiros: Array.isArray(p.fotos_parceiros)
-          ? p.fotos_parceiros
-          : Array.isArray(p.fotos)
-          ? p.fotos
-          : []
-      }));
-
-      setLista(normalizado);
-      setMsg(`Encontrados: ${normalizado.length}`);
-    } catch (e) {
-      setMsg("Erro: " + e.message);
-    }
+  // feedback
+  const [msg, setMsg] = useState(null);
+  const note = (m) => {
+    setMsg(m);
+    setTimeout(() => setMsg(null), 5000);
   };
+
+  async function carregarBases() {
+    const [r1, r2] = await Promise.all([getRegioes(), getCidades()]);
+    if (r1.ok) setRegioes(r1.data?.regioes || r1.data || []);
+    if (r2.ok) setCidades(r2.data?.cidades || r2.data || []);
+  }
 
   useEffect(() => {
-    // carregar(); // Descomente para carregar automaticamente
+    carregarBases();
   }, []);
 
-  const salvarEdicao = async () => {
-    if (!selecionado?.id) return;
-    setMsg("Salvando alterações...");
-    try {
-      const body = {
-        nome: selecionado.nome || null,
-        categoria: selecionado.categoria || null,
-        descricao: selecionado.descricao || null,
-        beneficio_bepit: selecionado.beneficio_bepit || null,
-        endereco: selecionado.endereco || null,
-        contato: selecionado.contato || null,
-        tags: Array.isArray(selecionado.tags) ? selecionado.tags : null,
-        horario_funcionamento: selecionado.horario_funcionamento || null,
-        faixa_preco: selecionado.faixa_preco || null,
-        fotos: Array.isArray(selecionado.fotos_parceiros) ? selecionado.fotos_parceiros : null,
-        fotos_parceiros: Array.isArray(selecionado.fotos_parceiros) ? selecionado.fotos_parceiros : null,
-        ativo: selecionado.ativo !== false
-      };
+  const opRegioes = useMemo(() => toOptions(regioes, "nome"), [regioes]);
+  const opCidades = useMemo(() => toOptions(cidades, "nome"), [cidades]);
 
-      await adminPut(`/api/admin/parceiros/${selecionado.id}`, body);
-      setMsg("Alterado com sucesso!");
-    } catch (e) {
-      setMsg("Erro ao salvar: " + e.message);
+  // ------------------------ ABA: CADASTRO -----------------------------------
+
+  // regiões
+  const [regiaoNome, setRegiaoNome] = useState("");
+
+  async function salvarRegiao() {
+    if (!regiaoNome.trim()) return note("Informe o nome da Região.");
+    const r = await createRegiao({ nome: regiaoNome.trim() });
+    if (!r.ok) return note(`Erro: ${r.error}`);
+    setRegiaoNome("");
+    await carregarBases();
+    note("Região cadastrada com sucesso.");
+  }
+
+  // cidades
+  const [cidadeNome, setCidadeNome] = useState("");
+  const [cidadeRegiaoId, setCidadeRegiaoId] = useState(null);
+
+  async function salvarCidade() {
+    if (!cidadeNome.trim() || !cidadeRegiaoId) {
+      return note("Informe Cidade e Região.");
     }
-  };
+    const r = await createCidade({ nome: cidadeNome.trim(), regiaoId: cidadeRegiaoId });
+    if (!r.ok) return note(`Erro: ${r.error}`);
+    setCidadeNome("");
+    setCidadeRegiaoId(null);
+    await carregarBases();
+    note("Cidade cadastrada com sucesso.");
+  }
 
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div className="space-y-2">
-        <input
-          className="w-full border rounded-md px-3 py-2"
-          placeholder="regiaoSlug"
-          value={filtro.regiaoSlug}
-          onChange={(e) => setFiltro((f) => ({ ...f, regiaoSlug: e.target.value }))}
-        />
-        <input
-          className="w-full border rounded-md px-3 py-2"
-          placeholder="cidadeSlug"
-          value={filtro.cidadeSlug}
-          onChange={(e) => setFiltro((f) => ({ ...f, cidadeSlug: e.target.value }))}
-        />
-        <button onClick={carregar} className="bg-blue-600 text-white px-3 py-2 rounded-md w-full">
-          Buscar
-        </button>
-        <div className="text-sm text-gray-600">{msg}</div>
-
-        <div className="border rounded-md divide-y max-h-80 overflow-auto">
-          {lista.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => setSelecionado(JSON.parse(JSON.stringify(p)))}
-              className={`w-full text-left px-3 py-2 hover:bg-gray-100 ${selecionado?.id === p.id ? "bg-gray-200" : ""}`}
-            >
-              <div className="font-semibold">{p.nome}</div>
-              <div className="text-xs text-gray-600">
-                {p.categoria} · {p.endereco || "—"}
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="md:col-span-2">
-        {!selecionado ? (
-          <div className="text-gray-500">Selecione um item à esquerda para editar.</div>
-        ) : (
-          <div className="space-y-2">
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              value={selecionado.nome || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, nome: e.target.value }))}
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="categoria"
-              value={selecionado.categoria || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, categoria: e.target.value }))}
-            />
-            <textarea
-              className="w-full border rounded-md px-3 py-2"
-              rows={3}
-              placeholder="descricao"
-              value={selecionado.descricao || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, descricao: e.target.value }))}
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="beneficio_bepit"
-              value={selecionado.beneficio_bepit || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, beneficio_bepit: e.target.value }))}
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="endereco"
-              value={selecionado.endereco || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, endereco: e.target.value }))}
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="contato"
-              value={selecionado.contato || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, contato: e.target.value }))}
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="faixa_preco"
-              value={selecionado.faixa_preco || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, faixa_preco: e.target.value }))}
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="horario_funcionamento"
-              value={selecionado.horario_funcionamento || ""}
-              onChange={(e) => setSelecionado((s) => ({ ...s, horario_funcionamento: e.target.value }))}
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="tags (a,b,c)"
-              value={Array.isArray(selecionado.tags) ? selecionado.tags.join(", ") : ""}
-              onChange={(e) =>
-                setSelecionado((s) => ({
-                  ...s,
-                  tags: e.target.value.split(",").map((x) => x.trim()).filter(Boolean)
-                }))
-              }
-            />
-            <input
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="fotos (urls separadas por vírgula)"
-              value={
-                Array.isArray(selecionado.fotos_parceiros)
-                  ? selecionado.fotos_parceiros.join(", ")
-                  : ""
-              }
-              onChange={(e) =>
-                setSelecionado((s) => ({
-                  ...s,
-                  fotos_parceiros: e.target.value.split(",").map((x) => x.trim()).filter(Boolean)
-                }))
-              }
-            />
-
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={selecionado.ativo !== false}
-                onChange={(e) => setSelecionado((s) => ({ ...s, ativo: e.target.checked }))}
-              />
-              <span>Ativo</span>
-            </label>
-
-            <button onClick={salvarEdicao} className="bg-green-600 text-white px-4 py-2 rounded-md">
-              Salvar alterações
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ------------- Inclusões (Regiões e Cidades) -------------
-function AbaInclusoes() {
-  const [reg, setReg] = useState({ nome: "", slug: "", ativo: true, msg: "" });
-  const [cid, setCid] = useState({
-    regiaoSlug: "regiao-dos-lagos",
+  // parceiros (criação)
+  const [p, setP] = useState({
     nome: "",
-    slug: "",
-    ativo: true,
-    msg: ""
+    cidadeId: null,
+    logradouro: "",
+    numero: "",
+    bairro: "",
+    cep: "",
+    descricao: "",
+    categoria: "",
+    referencias: "",
+    contato: "",
   });
 
-  const criarRegiao = async () => {
-    try {
-      setReg((r) => ({ ...r, msg: "Salvando..." }));
-      await adminPost("/api/admin/regioes", {
-        nome: reg.nome,
-        slug: reg.slug,
-        ativo: reg.ativo
-      });
-      setReg((r) => ({ ...r, msg: "Região criada!" }));
-    } catch (e) {
-      setReg((r) => ({ ...r, msg: "Erro: " + e.message }));
+  async function salvarParceiro() {
+    const obrig = ["nome", "cidadeId", "logradouro", "numero"];
+    for (const k of obrig) {
+      if (!String(p[k] || "").trim()) {
+        return note("Preencha: Nome, Cidade, Rua/Avenida e Número.");
+      }
     }
-  };
+    const r = await createParceiro(p);
+    if (!r.ok) return note(`Erro: ${r.error}`);
+    setP({
+      nome: "",
+      cidadeId: null,
+      logradouro: "",
+      numero: "",
+      bairro: "",
+      cep: "",
+      descricao: "",
+      categoria: "",
+      referencias: "",
+      contato: "",
+    });
+    note("Parceiro cadastrado com sucesso.");
+  }
 
-  const criarCidade = async () => {
-    try {
-      setCid((s) => ({ ...s, msg: "Salvando..." }));
-      await adminPost("/api/admin/cidades", {
-        regiaoSlug: cid.regiaoSlug,
-        nome: cid.nome,
-        slug: cid.slug,
-        ativo: cid.ativo
-      });
-      setCid((s) => ({ ...s, msg: "Cidade criada!" }));
-    } catch (e) {
-      setCid((s) => ({ ...s, msg: "Erro: " + e.message }));
+  // dicas (criação)
+  const [d, setD] = useState({ cidadeId: null, titulo: "", conteudo: "", categoria: "" });
+
+  async function salvarDica() {
+    if (!d.cidadeId || !d.titulo.trim() || !d.conteudo.trim()) {
+      return note("Informe Cidade, Título e Conteúdo.");
     }
-  };
+    const r = await createDica(d);
+    if (!r.ok) return note(`Erro: ${r.error}`);
+    setD({ cidadeId: null, titulo: "", conteudo: "", categoria: "" });
+    note("Dica cadastrada com sucesso.");
+  }
 
-  const Line = ({ label, value, onChange, type = "text" }) => (
-    <label className="block">
-      <span className="text-sm font-medium">{label}</span>
-      <input type={type} value={value} onChange={onChange} className="mt-1 w-full border rounded-md px-3 py-2" />
-    </label>
-  );
+  // ------------------------ ABA: ALTERAÇÕES ---------------------------------
+
+  // filtros e listas
+  const [filtroNomeParceiro, setFiltroNomeParceiro] = useState("");
+  const [filtroCidadeParceiro, setFiltroCidadeParceiro] = useState(null);
+  const [listaParceiros, setListaParceiros] = useState([]);
+
+  async function buscarParceiros() {
+    const r = await getParceiros({
+      nome: filtroNomeParceiro || undefined,
+      cidadeId: filtroCidadeParceiro || undefined,
+      limit: 100,
+    });
+    if (!r.ok) return note(`Erro ao buscar: ${r.error}`);
+    setListaParceiros(r.data?.parceiros || r.data || []);
+  }
+
+  // edição
+  const [editId, setEditId] = useState(null);
+  const [editObj, setEditObj] = useState({});
+
+  async function salvarEdicaoParceiro() {
+    const r = await updateParceiro(editId, editObj);
+    if (!r.ok) return note(`Erro ao salvar: ${r.error}`);
+    setEditId(null);
+    setEditObj({});
+    await buscarParceiros();
+    note("Parceiro atualizado com sucesso.");
+  }
+
+  async function excluirParceiro(id) {
+    if (!window.confirm("Tem certeza que deseja excluir este parceiro?")) return;
+    const r = await deleteParceiro(id);
+    if (!r.ok) return note(`Erro ao excluir: ${r.error}`);
+    await buscarParceiros();
+    note("Parceiro excluído.");
+  }
+
+  // dicas (alterar/excluir)
+  const [filtroCidadeDica, setFiltroCidadeDica] = useState(null);
+  const [filtroTituloDica, setFiltroTituloDica] = useState("");
+  const [listaDicas, setListaDicas] = useState([]);
+  const [editDicaId, setEditDicaId] = useState(null);
+  const [editDicaObj, setEditDicaObj] = useState({});
+
+  async function buscarDicas() {
+    const r = await getDicas({
+      cidadeId: filtroCidadeDica || undefined,
+      titulo: filtroTituloDica || undefined,
+      limit: 100,
+    });
+    if (!r.ok) return note(`Erro ao buscar: ${r.error}`);
+    setListaDicas(r.data?.dicas || r.data || []);
+  }
+
+  async function salvarEdicaoDica() {
+    const r = await updateDica(editDicaId, editDicaObj);
+    if (!r.ok) return note(`Erro ao salvar: ${r.error}`);
+    setEditDicaId(null);
+    setEditDicaObj({});
+    await buscarDicas();
+    note("Dica atualizada com sucesso.");
+  }
+
+  async function excluirDica(id) {
+    if (!window.confirm("Tem certeza que deseja excluir esta dica?")) return;
+    const r = await deleteDica(id);
+    if (!r.ok) return note(`Erro ao excluir: ${r.error}`);
+    await buscarDicas();
+    note("Dica excluída.");
+  }
+
+  // ------------------------ ABA: AVISOS -------------------------------------
+
+  const [avTitulo, setAvTitulo] = useState("");
+  const [avMensagem, setAvMensagem] = useState("");
+  const [avRegiaoId, setAvRegiaoId] = useState(null);
+  const [avCidadeIds, setAvCidadeIds] = useState([]);
+  const [avisos, setAvisos] = useState([]);
+
+  async function carregarAvisos() {
+    const r = await getAvisos({});
+    if (r.ok) setAvisos(r.data?.avisos || r.data || []);
+  }
+
+  async function salvarAviso() {
+    if (!avTitulo.trim() || !avMensagem.trim()) {
+      return note("Informe Título e Mensagem do aviso.");
+    }
+    const payload = {
+      titulo: avTitulo.trim(),
+      mensagem: avMensagem.trim(),
+      cidadeIds: avCidadeIds,
+      regiaoId: avCidadeIds.length ? null : avRegiaoId || null,
+    };
+    const r = await createAviso(payload);
+    if (!r.ok) return note(`Erro ao publicar aviso: ${r.error}`);
+    setAvTitulo("");
+    setAvMensagem("");
+    setAvRegiaoId(null);
+    setAvCidadeIds([]);
+    await carregarAvisos();
+    note("Aviso publicado com sucesso.");
+  }
+
+  useEffect(() => {
+    carregarAvisos();
+  }, []);
+
+  // ------------------------ ABA: MÉTRICAS -----------------------------------
+
+  const [metrics, setMetrics] = useState(null);
+
+  async function carregarMetrics() {
+    const r = await getMetricsSummary();
+    if (r.ok) setMetrics(r.data || {});
+  }
+
+  useEffect(() => {
+    carregarMetrics();
+  }, []);
+
+  // ------------------------ ABA: LOGS ---------------------------------------
+
+  const [logTipo, setLogTipo] = useState("");
+  const [logLimit, setLogLimit] = useState(100);
+  const [logs, setLogs] = useState([]);
+
+  async function carregarLogs() {
+    const r = await getLogs({ tipo: logTipo || undefined, limit: logLimit || 100 });
+    if (r.ok) setLogs(r.data?.logs || r.data || []);
+  }
+
+  useEffect(() => {
+    carregarLogs();
+  }, []);
+
+  // --------------------------------- UI -------------------------------------
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-      <div>
-        <h3 className="font-bold mb-2">Criar Região</h3>
-        <div className="space-y-2">
-          <Line label="Nome" value={reg.nome} onChange={(e) => setReg((r) => ({ ...r, nome: e.target.value }))} />
-          <Line label="Slug" value={reg.slug} onChange={(e) => setReg((r) => ({ ...r, slug: e.target.value }))} />
-          <label className="inline-flex items-center gap-2">
-            <input type="checkbox" checked={reg.ativo} onChange={(e) => setReg((r) => ({ ...r, ativo: e.target.checked }))} />
-            <span>Ativo</span>
-          </label>
-          <button onClick={criarRegiao} className="bg-blue-600 text-white px-3 py-2 rounded-md">
-            Salvar Região
+    <div style={{ maxWidth: 1100, margin: "24px auto", padding: 16 }}>
+      <h1 style={{ marginBottom: 8 }}>Painel do Administrador — BEPIT</h1>
+      <p style={{ marginTop: 0, color: "#555" }}>
+        Aqui você cadastra e gerencia conteúdos do aplicativo, sem termos técnicos.
+      </p>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 8, margin: "16px 0 24px" }}>
+        {["cadastro", "alteracoes", "avisos", "metricas", "logs"].map((t) => (
+          <button
+            key={t}
+            onClick={() => setAba(t)}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #ccc",
+              background: aba === t ? "#007bff" : "#f8f8f8",
+              color: aba === t ? "#fff" : "#333",
+              cursor: "pointer",
+            }}
+          >
+            {t === "cadastro" && "Cadastro"}
+            {t === "alteracoes" && "Alterações"}
+            {t === "avisos" && "Avisos"}
+            {t === "metricas" && "Métricas"}
+            {t === "logs" && "Logs"}
           </button>
-          <div className="text-sm text-gray-600">{reg.msg}</div>
-        </div>
+        ))}
       </div>
 
-      <div>
-        <h3 className="font-bold mb-2">Criar Cidade</h3>
-        <div className="space-y-2">
-          <Line
-            label="Região (slug)"
-            value={cid.regiaoSlug}
-            onChange={(e) => setCid((s) => ({ ...s, regiaoSlug: e.target.value }))}
-          />
-          <Line label="Nome" value={cid.nome} onChange={(e) => setCid((s) => ({ ...s, nome: e.target.value }))} />
-          <Line label="Slug" value={cid.slug} onChange={(e) => setCid((s) => ({ ...s, slug: e.target.value }))} />
-          <label className="inline-flex items-center gap-2">
-            <input type="checkbox" checked={cid.ativo} onChange={(e) => setCid((s) => ({ ...s, ativo: e.target.checked }))} />
-            <span>Ativo</span>
-          </label>
-          <button onClick={criarCidade} className="bg-green-600 text-white px-3 py-2 rounded-md">
-            Salvar Cidade
-          </button>
-          <div className="text-sm text-gray-600">{cid.msg}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ------------- Métricas -------------
-function AbaMetricas() {
-  const [q, setQ] = useState({ regiaoSlug: "regiao-dos-lagos", cidadeSlug: "" });
-  const [data, setData] = useState(null);
-  const [msg, setMsg] = useState("");
-
-  const carregar = async () => {
-    setMsg("Carregando...");
-    try {
-      const qs = q.cidadeSlug
-        ? `?regiaoSlug=${encodeURIComponent(q.regiaoSlug)}&cidadeSlug=${encodeURIComponent(q.cidadeSlug)}`
-        : `?regiaoSlug=${encodeURIComponent(q.regiaoSlug)}`;
-      const res = await adminGet(`/api/admin/metrics/summary${qs}`);
-      setData(res);
-      setMsg("");
-    } catch (e) {
-      setMsg("Erro: " + e.message);
-    }
-  };
-
-  return (
-    <div className="space-y-2">
-      <div className="flex gap-2">
-        <input
-          className="border rounded-md px-3 py-2"
-          placeholder="regiaoSlug"
-          value={q.regiaoSlug}
-          onChange={(e) => setQ((s) => ({ ...s, regiaoSlug: e.target.value }))}
-        />
-        <input
-          className="border rounded-md px-3 py-2"
-          placeholder="(opcional) cidadeSlug"
-          value={q.cidadeSlug}
-          onChange={(e) => setQ((s) => ({ ...s, cidadeSlug: e.target.value }))}
-        />
-        <button onClick={carregar} className="bg-blue-600 text-white px-3 py-2 rounded-md">
-          Ver métricas
-        </button>
-      </div>
-
-      {msg && <div className="text-sm text-gray-600">{msg}</div>}
-
-      {data && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="p-4 rounded-md border">
-            <div className="text-xs text-gray-500">Parceiros Ativos</div>
-            <div className="text-2xl font-bold">{data.total_parceiros_ativos}</div>
-          </div>
-          <div className="p-4 rounded-md border">
-            <div className="text-xs text-gray-500">Buscas</div>
-            <div className="text-2xl font-bold">{data.total_buscas}</div>
-          </div>
-          <div className="p-4 rounded-md border">
-            <div className="text-xs text-gray-500">Interações</div>
-            <div className="text-2xl font-bold">{data.total_interacoes}</div>
-          </div>
-
-          <div className="md:col-span-3 p-4 rounded-md border">
-            <div className="font-semibold mb-2">Top 5 parceiros por views</div>
-            <div className="divide-y">
-              {data.top5_parceiros_por_views?.length
-                ? data.top5_parceiros_por_views.map((x) => (
-                    <div key={x.parceiro_id} className="py-2 flex justify-between">
-                      <div>
-                        <div className="font-medium">{x.nome}</div>
-                        <div className="text-xs text-gray-500">{x.categoria}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-lg font-bold">{x.views_total}</div>
-                        <div className="text-xs text-gray-500">{x.last_view_at}</div>
-                      </div>
-                    </div>
-                  ))
-                : <div className="text-sm text-gray-500">Sem dados.</div>}
-            </div>
-          </div>
+      {msg && (
+        <div
+          style={{
+            background: "#eef7ee",
+            border: "1px solid #bfe5bf",
+            padding: 10,
+            borderRadius: 8,
+            marginBottom: 16,
+          }}
+        >
+          {msg}
         </div>
       )}
-    </div>
-  );
-}
 
-// ------------- Logs -------------
-function AbaLogs() {
-  const [tipo, setTipo] = useState("");
-  const [limit, setLimit] = useState(50);
-  const [lista, setLista] = useState([]);
-  const [msg, setMsg] = useState("");
+      {/* ------------------------- ABA CADASTRO ------------------------------ */}
+      {aba === "cadastro" && (
+        <>
+          <Box title="Cadastrar Região">
+            <Row label="Nome da Região">
+              <Input
+                value={regiaoNome}
+                onChange={(e) => setRegiaoNome(e.target.value)}
+                placeholder="Ex.: Região dos Lagos"
+              />
+            </Row>
+            <button
+              onClick={salvarRegiao}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Salvar Região
+            </button>
+          </Box>
 
-  const carregar = async () => {
-    setMsg("Carregando...");
-    try {
-      const q = [];
-      if (tipo) q.push(`tipo=${encodeURIComponent(tipo)}`);
-      if (limit) q.push(`limit=${encodeURIComponent(limit)}`);
-      const qs = q.length ? `?${q.join("&")}` : "";
-      const data = await adminGet(`/api/admin/logs${qs}`);
-      setLista(Array.isArray(data?.data) ? data.data : []);
-      setMsg("");
-    } catch (e) {
-      setMsg("Erro: " + e.message);
-    }
-  };
+          <Box title="Cadastrar Cidade">
+            <Row label="Cidade">
+              <Input
+                value={cidadeNome}
+                onChange={(e) => setCidadeNome(e.target.value)}
+                placeholder="Ex.: Cabo Frio"
+              />
+            </Row>
+            <Row label="Região">
+              <Select
+                options={opRegioes}
+                value={cidadeRegiaoId}
+                onChange={setCidadeRegiaoId}
+                placeholder="Escolha a região"
+              />
+            </Row>
+            <button
+              onClick={salvarCidade}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Salvar Cidade
+            </button>
+          </Box>
 
-  return (
-    <div className="space-y-2">
-      <div className="flex gap-2">
-        <input
-          className="border rounded-md px-3 py-2"
-          placeholder="tipo (opcional)"
-          value={tipo}
-          onChange={(e) => setTipo(e.target.value)}
-        />
-        <input
-          className="border rounded-md px-3 py-2"
-          type="number"
-          placeholder="limit"
-          value={limit}
-          onChange={(e) => setLimit(Number(e.target.value || 50))}
-        />
-        <button onClick={carregar} className="bg-blue-600 text-white px-3 py-2 rounded-md">
-          Carregar
-        </button>
-      </div>
+          <Box title="Cadastrar Parceiro">
+            <Row label="Nome do Parceiro *">
+              <Input
+                value={p.nome}
+                onChange={(e) => setP({ ...p, nome: e.target.value })}
+                placeholder="Ex.: Passeios do Zé"
+              />
+            </Row>
+            <Row label="Cidade *">
+              <Select
+                options={opCidades}
+                value={p.cidadeId}
+                onChange={(v) => setP({ ...p, cidadeId: v })}
+                placeholder="Escolha a cidade"
+              />
+            </Row>
+            <Row label="Endereço (Rua/Avenida) *">
+              <Input
+                value={p.logradouro}
+                onChange={(e) => setP({ ...p, logradouro: e.target.value })}
+                placeholder="Ex.: Rua A"
+              />
+            </Row>
+            <Row label="Número *">
+              <Input
+                value={p.numero}
+                onChange={(e) => setP({ ...p, numero: e.target.value })}
+                placeholder="Ex.: 123"
+              />
+            </Row>
+            <Row label="Bairro">
+              <Input
+                value={p.bairro}
+                onChange={(e) => setP({ ...p, bairro: e.target.value })}
+                placeholder="Ex.: Centro"
+              />
+            </Row>
+            <Row label="CEP">
+              <Input
+                value={p.cep}
+                onChange={(e) => setP({ ...p, cep: e.target.value })}
+                placeholder="Ex.: 28900-000"
+              />
+            </Row>
+            <Row label="Descrição">
+              <Textarea
+                value={p.descricao}
+                onChange={(e) => setP({ ...p, descricao: e.target.value })}
+                placeholder="Um pequeno resumo sobre o parceiro..."
+              />
+            </Row>
+            <Row label="Categoria">
+              <Input
+                value={p.categoria}
+                onChange={(e) => setP({ ...p, categoria: e.target.value })}
+                placeholder="Ex.: Restaurante, Passeio, Hospedagem..."
+              />
+            </Row>
+            <Row label="Referências">
+              <Input
+                value={p.referencias}
+                onChange={(e) => setP({ ...p, referencias: e.target.value })}
+                placeholder="Palavras separadas por vírgula"
+              />
+            </Row>
+            <Row label="Contato (telefone/site)">
+              <Input
+                value={p.contato}
+                onChange={(e) => setP({ ...p, contato: e.target.value })}
+                placeholder="(22) 99999-9999 / site"
+              />
+            </Row>
+            <button
+              onClick={salvarParceiro}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Salvar Parceiro
+            </button>
+          </Box>
 
-      {msg && <div className="text-sm text-gray-600">{msg}</div>}
+          <Box title="Cadastrar Dica">
+            <Row label="Cidade">
+              <Select
+                options={opCidades}
+                value={d.cidadeId}
+                onChange={(v) => setD({ ...d, cidadeId: v })}
+                placeholder="Escolha a cidade"
+              />
+            </Row>
+            <Row label="Título">
+              <Input
+                value={d.titulo}
+                onChange={(e) => setD({ ...d, titulo: e.target.value })}
+                placeholder="Ex.: Onde ver o pôr do sol"
+              />
+            </Row>
+            <Row label="Conteúdo">
+              <Textarea
+                value={d.conteudo}
+                onChange={(e) => setD({ ...d, conteudo: e.target.value })}
+                placeholder="Escreva a dica completa..."
+              />
+            </Row>
+            <Row label="Categoria (opcional)">
+              <Input
+                value={d.categoria}
+                onChange={(e) => setD({ ...d, categoria: e.target.value })}
+                placeholder="Ex.: Natureza, Gastronomia..."
+              />
+            </Row>
+            <button
+              onClick={salvarDica}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Salvar Dica
+            </button>
+          </Box>
+        </>
+      )}
 
-      <div className="border rounded-md max-h-96 overflow-auto divide-y">
-        {lista.length ? (
-          lista.map((row, i) => (
-            <div key={i} className="p-2">
-              <div className="text-xs text-gray-500">{row.created_at || "—"}</div>
-              <div className="font-medium">{row.tipo_evento}</div>
-              <pre className="text-xs bg-gray-100 p-2 rounded">{JSON.stringify(row.payload, null, 2)}</pre>
+      {/* ------------------------- ABA ALTERAÇÕES ----------------------------- */}
+      {aba === "alteracoes" && (
+        <>
+          <Box title="Buscar Parceiros para Editar/Excluir">
+            <Row label="Nome (opcional)">
+              <Input
+                value={filtroNomeParceiro}
+                onChange={(e) => setFiltroNomeParceiro(e.target.value)}
+                placeholder="Ex.: Picolino"
+              />
+            </Row>
+            <Row label="Cidade (opcional)">
+              <Select
+                options={opCidades}
+                value={filtroCidadeParceiro}
+                onChange={setFiltroCidadeParceiro}
+                placeholder="Escolha a cidade"
+              />
+            </Row>
+            <button
+              onClick={buscarParceiros}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Buscar
+            </button>
+
+            <div style={{ marginTop: 16 }}>
+              {(listaParceiros || []).map((it) => (
+                <div
+                  key={it.id}
+                  style={{
+                    border: "1px solid #eee",
+                    borderRadius: 10,
+                    padding: 12,
+                    marginBottom: 10,
+                  }}
+                >
+                  {editId === it.id ? (
+                    <>
+                      <Row label="Nome">
+                        <Input
+                          value={editObj.nome ?? it.nome ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, nome: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Cidade">
+                        <Select
+                          options={opCidades}
+                          value={editObj.cidadeId ?? it.cidade_id ?? ""}
+                          onChange={(v) =>
+                            setEditObj({ ...editObj, cidadeId: v })
+                          }
+                        />
+                      </Row>
+                      <Row label="Endereço (Rua/Avenida)">
+                        <Input
+                          value={editObj.logradouro ?? it.endereco_logradouro ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, logradouro: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Número">
+                        <Input
+                          value={editObj.numero ?? it.endereco_numero ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, numero: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Bairro">
+                        <Input
+                          value={editObj.bairro ?? it.bairro ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, bairro: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="CEP">
+                        <Input
+                          value={editObj.cep ?? it.cep ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, cep: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Descrição">
+                        <Textarea
+                          value={editObj.descricao ?? it.descricao ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, descricao: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Categoria">
+                        <Input
+                          value={editObj.categoria ?? it.categoria ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, categoria: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Referências">
+                        <Input
+                          value={editObj.referencias ?? it.referencias ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, referencias: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Contato">
+                        <Input
+                          value={editObj.contato ?? it.contato ?? ""}
+                          onChange={(e) =>
+                            setEditObj({ ...editObj, contato: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          onClick={salvarEdicaoParceiro}
+                          style={{
+                            padding: "10px 14px",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Salvar
+                        </button>
+                        <button
+                          onClick={() => {
+                            setEditId(null);
+                            setEditObj({});
+                          }}
+                          style={{
+                            padding: "10px 14px",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                            background: "#eee",
+                          }}
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 600 }}>{it.nome}</div>
+                      <div style={{ fontSize: 12, color: "#666" }}>
+                        Cidade: {byId(cidades, it.cidade_id)?.nome || it.cidade_id} • Endereço:{" "}
+                        {it.endereco_logradouro || "—"}
+                        {it.endereco_numero ? `, ${it.endereco_numero}` : ""}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button
+                          onClick={() => {
+                            setEditId(it.id);
+                            setEditObj({});
+                          }}
+                          style={{ padding: "8px 12px", borderRadius: 8, cursor: "pointer" }}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          onClick={() => excluirParceiro(it.id)}
+                          style={{
+                            padding: "8px 12px",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                            background: "#ffe7e7",
+                          }}
+                        >
+                          Excluir
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
             </div>
-          ))
-        ) : (
-          <div className="p-2 text-sm text-gray-500">Sem logs.</div>
-        )}
-      </div>
-    </div>
-  );
-}
+          </Box>
 
-// ------------- Componente principal -------------
-export default function AdminDashboard() {
-  const [tab, setTab] = useState("cadastro");
-  const navigate = useNavigate();
+          <Box title="Editar/Excluir Dicas">
+            <Row label="Cidade (opcional)">
+              <Select
+                options={opCidades}
+                value={filtroCidadeDica}
+                onChange={setFiltroCidadeDica}
+                placeholder="Escolha a cidade"
+              />
+            </Row>
+            <Row label="Título (opcional)">
+              <Input
+                value={filtroTituloDica}
+                onChange={(e) => setFiltroTituloDica(e.target.value)}
+                placeholder="trecho do título..."
+              />
+            </Row>
+            <button
+              onClick={buscarDicas}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Buscar
+            </button>
 
-  return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
-      <div className="max-w-5xl mx-auto p-4">
-        <div className="flex items-center gap-4 mb-4">
-          <img
-            src="/bepit-logo.png"
-            alt="Logo BEPIT"
-            className="h-12 w-12"
-          />
-          <h1 className="text-2xl font-bold">Painel do Administrador</h1>
-        </div>
+            <div style={{ marginTop: 16 }}>
+              {(listaDicas || []).map((it) => (
+                <div
+                  key={it.id}
+                  style={{
+                    border: "1px solid #eee",
+                    borderRadius: 10,
+                    padding: 12,
+                    marginBottom: 10,
+                  }}
+                >
+                  {editDicaId === it.id ? (
+                    <>
+                      <Row label="Cidade">
+                        <Select
+                          options={opCidades}
+                          value={editDicaObj.cidadeId ?? it.cidade_id ?? ""}
+                          onChange={(v) =>
+                            setEditDicaObj({ ...editDicaObj, cidadeId: v })
+                          }
+                        />
+                      </Row>
+                      <Row label="Título">
+                        <Input
+                          value={editDicaObj.titulo ?? it.titulo ?? ""}
+                          onChange={(e) =>
+                            setEditDicaObj({ ...editDicaObj, titulo: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Conteúdo">
+                        <Textarea
+                          value={editDicaObj.conteudo ?? it.conteudo ?? ""}
+                          onChange={(e) =>
+                            setEditDicaObj({ ...editDicaObj, conteudo: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <Row label="Categoria">
+                        <Input
+                          value={editDicaObj.categoria ?? it.categoria ?? ""}
+                          onChange={(e) =>
+                            setEditDicaObj({ ...editDicaObj, categoria: e.target.value })
+                          }
+                        />
+                      </Row>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          onClick={salvarEdicaoDica}
+                          style={{
+                            padding: "10px 14px",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Salvar
+                        </button>
+                        <button
+                          onClick={() => {
+                            setEditDicaId(null);
+                            setEditDicaObj({});
+                          }}
+                          style={{
+                            padding: "10px 14px",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                            background: "#eee",
+                          }}
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 600 }}>{it.titulo}</div>
+                      <div style={{ fontSize: 12, color: "#666" }}>
+                        Cidade: {byId(cidades, it.cidade_id)?.nome || it.cidade_id} • Categoria:{" "}
+                        {it.categoria || "—"}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button
+                          onClick={() => {
+                            setEditDicaId(it.id);
+                            setEditDicaObj({});
+                          }}
+                          style={{ padding: "8px 12px", borderRadius: 8, cursor: "pointer" }}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          onClick={() => excluirDica(it.id)}
+                          style={{
+                            padding: "8px 12px",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                            background: "#ffe7e7",
+                          }}
+                        >
+                          Excluir
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Box>
+        </>
+      )}
 
-        <Tabs tab={tab} setTab={setTab} navigate={navigate} />
+      {/* ------------------------- ABA AVISOS -------------------------------- */}
+      {aba === "avisos" && (
+        <>
+          <Box title="Publicar Aviso">
+            <Row label="Título">
+              <Input
+                value={avTitulo}
+                onChange={(e) => setAvTitulo(e.target.value)}
+                placeholder="Ex.: Mar agitado hoje"
+              />
+            </Row>
+            <Row label="Mensagem">
+              <Textarea
+                value={avMensagem}
+                onChange={(e) => setAvMensagem(e.target.value)}
+                placeholder="Escreva o aviso completo..."
+              />
+            </Row>
+            <Row label="Região (opcional)">
+              <Select
+                options={opRegioes}
+                value={avRegiaoId}
+                onChange={setAvRegiaoId}
+                placeholder="Escolha uma região (opcional)"
+              />
+            </Row>
+            <Row label="Cidades (opcional — selecione várias se quiser)">
+              <MultiSelect
+                options={opCidades}
+                values={avCidadeIds}
+                onChange={setAvCidadeIds}
+                placeholder="Selecione uma ou mais cidades"
+              />
+            </Row>
+            <div style={{ color: "#666", marginBottom: 8 }}>
+              Dica: se selecionar cidades, o aviso será publicado <b>somente nelas</b>. Se não
+              selecionar cidades e escolher uma Região, o aviso vale para <b>todas</b> as cidades da
+              Região.
+            </div>
+            <button
+              onClick={salvarAviso}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Publicar Aviso
+            </button>
+          </Box>
 
-        <div className="bg-white dark:bg-gray-800 rounded-md shadow p-4 mt-3">
-          {tab === "cadastro" && <AbaCadastro />}
-          {tab === "alterar" && <AbaAlterar />}
-          {tab === "inclusoes" && <AbaInclusoes />}
-          {tab === "metricas" && <AbaMetricas />}
-          {tab === "logs" && <AbaLogs />}
-        </div>
-      </div>
+          <Box title="Avisos Publicados (mais recentes)">
+            {(avisos || []).length === 0 ? (
+              <div>Nenhum aviso cadastrado ainda.</div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                {avisos.map((a) => (
+                  <div key={a.id} style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                    <div style={{ fontWeight: 600 }}>{a.titulo}</div>
+                    <div style={{ fontSize: 12, color: "#666" }}>
+                      {new Date(a.created_at || a.data || Date.now()).toLocaleString()}
+                    </div>
+                    <div style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>{a.mensagem}</div>
+                    {!!(a.cidades && a.cidades.length) && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: "#555" }}>
+                        Cidades: {a.cidades.map((id) => byId(cidades, id)?.nome || id).join(", ")}
+                      </div>
+                    )}
+                    {a.regiao_id && (
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#555" }}>
+                        Região: {byId(regioes, a.regiao_id)?.nome || a.regiao_id}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Box>
+        </>
+      )}
+
+      {/* ------------------------- ABA MÉTRICAS ------------------------------- */}
+      {aba === "metricas" && (
+        <>
+          <Box title="Resumo de Consumo — APIs e Sistema">
+            {!metrics ? (
+              <div>Carregando...</div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontWeight: 600 }}>OpenWeather</div>
+                  <div>Chamadas: {metrics.openweather?.calls ?? "—"}</div>
+                  <div>Custo estimado: {metrics.openweather?.cost ?? "—"}</div>
+                </div>
+                <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontWeight: 600 }}>Stormglass</div>
+                  <div>Chamadas: {metrics.stormglass?.calls ?? "—"}</div>
+                  <div>Custo estimado: {metrics.stormglass?.cost ?? "—"}</div>
+                </div>
+                <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontWeight: 600 }}>Gemini</div>
+                  <div>Chamadas: {metrics.gemini?.calls ?? "—"}</div>
+                  <div>Custo estimado: {metrics.gemini?.cost ?? "—"}</div>
+                </div>
+                <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontWeight: 600 }}>Upstash</div>
+                  <div>GET/SET: {metrics.upstash?.ops ?? "—"}</div>
+                  <div>Erros: {metrics.upstash?.errors ?? "—"}</div>
+                </div>
+                <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontWeight: 600 }}>Supabase</div>
+                  <div>Queries: {metrics.supabase?.queries ?? "—"}</div>
+                  <div>Erros: {metrics.supabase?.errors ?? "—"}</div>
+                </div>
+                <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontWeight: 600 }}>Conversas</div>
+                  <div>Total (hoje): {metrics.conversas?.today ?? "—"}</div>
+                  <div>Sem resposta: {metrics.conversas?.noAnswer ?? "—"}</div>
+                </div>
+              </div>
+            )}
+          </Box>
+        </>
+      )}
+
+      {/* ------------------------- ABA LOGS ----------------------------------- */}
+      {aba === "logs" && (
+        <>
+          <Box title="Filtrar Logs">
+            <Row label="Tipo (opcional)">
+              <Select
+                value={logTipo}
+                onChange={setLogTipo}
+                options={[
+                  { value: "", label: "Todos" },
+                  { value: "coletor", label: "Coletor de Clima" },
+                  { value: "erro", label: "Erros do Sistema" },
+                  { value: "cache", label: "Cache/Upstash" },
+                  { value: "publicacao", label: "Publicações (avisos/dicas)" },
+                  { value: "cadastro", label: "Cadastros/Edições/Exclusões" },
+                ]}
+                allowEmpty={false}
+              />
+            </Row>
+            <Row label="Quantidade">
+              <Input
+                type="number"
+                min={10}
+                max={500}
+                value={logLimit}
+                onChange={(e) => setLogLimit(Number(e.target.value) || 100)}
+              />
+            </Row>
+            <button
+              onClick={carregarLogs}
+              style={{ padding: "10px 14px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Atualizar Logs
+            </button>
+          </Box>
+
+          <Box title="Últimos Eventos">
+            {(logs || []).length === 0 ? (
+              <div>Nenhum log disponível.</div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                {logs.map((lg, idx) => (
+                  <div key={lg.id || idx} style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+                    <div style={{ fontWeight: 600 }}>{lg.tipo || "Evento"}</div>
+                    <div style={{ fontSize: 12, color: "#666" }}>
+                      {new Date(lg.created_at || lg.data || Date.now()).toLocaleString()}
+                    </div>
+                    <div style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
+                      {lg.mensagem || lg.msg || lg.message || "-"}
+                    </div>
+                    {lg.contexto ? (
+                      <pre style={{ marginTop: 8, background: "#fafafa", padding: 8, borderRadius: 6, overflowX: "auto" }}>
+                        {JSON.stringify(lg.contexto, null, 2)}
+                      </pre>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Box>
+        </>
+      )}
     </div>
   );
 }
