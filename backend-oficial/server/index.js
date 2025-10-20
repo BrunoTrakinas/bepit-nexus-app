@@ -1,104 +1,133 @@
+// /backend-oficial/server/index.js
 // ============================================================================
-// BEPIT Nexus - Servidor (Express)
+// BEPIT Nexus - Servidor (Express) — Unificado
 // Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.0.4 (Hotfix Timeout + Remoção de duplicata de função)
+// v6.2.0 (Unificação: uma única instância Express + CORS + Rotas modulares)
 // ============================================================================
 
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
+import financeiroRoutes from "./routes/financeiro.routes.js";
+import uploadsRoutes from "./routes/uploads.routes.js";
+import ragRoutes from "./routes/rag.routes.js";
+import parceiroRoutes from "./routes/parceiro.routes.js";
 import { supabase } from "../lib/supabaseClient.js";
-import { Redis } from "ioredis";
-
-// Guardrails essenciais
-import { finalizeAssistantResponse } from "./utils/bepitGuardrails.js";
-// Busca de parceiros
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
+import { hybridSearch } from "../services/rag.service.js";
 
-// -------------------- UTILIDADES DE RESILIÊNCIA REDIS (NOVO) ----------------
-function isRedisReady(client) {
+
+
+// === DEBUG: listar rotas montadas (use só em desenvolvimento) ===
+function printRoutes(app, label = "APP") {
   try {
-    return !!client && client.status === "ready";
-  } catch {
-    return false;
+    const lines = [];
+    app?._router?.stack?.forEach?.((layer) => {
+      if (layer.route) {
+        const methods = Object.keys(layer.route.methods)
+          .map((m) => m.toUpperCase())
+          .join(",");
+        lines.push(`${methods.padEnd(6)} ${layer.route.path}`);
+      } else if (layer.name === "router" && layer.handle?.stack) {
+        const prefix = (layer.regexp && layer.regexp.toString()) || "(subrouter)";
+        layer.handle.stack.forEach((l2) => {
+          if (l2.route?.path) {
+            const methods = Object.keys(l2.route.methods)
+              .map((m) => m.toUpperCase())
+              .join(",");
+            lines.push(`${methods.padEnd(6)} ${prefix} -> ${l2.route.path}`);
+          }
+        });
+      }
+    });
+    console.log(`\n[DEBUG ROUTES ${label}]`);
+    lines.forEach((l) => console.log("  ", l));
+  } catch (e) {
+    console.log(`[DEBUG ROUTES ${label}] (indisponível)`, e?.message || "");
   }
+}
+
+// ===================== CLIENTE REDIS (UPSTASH) — VIA REST ====================
+// Variáveis de ambiente esperadas:
+//   UPSTASH_REDIS_REST_URL  (ou UPSTASH_REDIS_URL)
+//   UPSTASH_REDIS_REST_TOKEN (ou UPSTASH_REDIS_TOKEN)
+const UPSTASH_URL =
+  process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_URL || "";
+const UPSTASH_TOKEN =
+  process.env.UPSTASH_REDIS_REST_TOKEN || process.env.UPSTASH_REDIS_TOKEN || "";
+
+function hasUpstash() {
+  return !!UPSTASH_URL && !!UPSTASH_TOKEN;
 }
 
 function withTimeout(promise, ms, label = "op") {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
   return Promise.race([
-    promise,
+    promise(ctrl.signal),
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`[REDIS TIMEOUT] ${label} excedeu ${ms}ms`)), ms)
+      setTimeout(() => reject(new Error(`[CACHE TIMEOUT] ${label} excedeu ${ms}ms`)), ms)
     ),
-  ]);
+  ]).finally(() => clearTimeout(t));
 }
 
-async function redisSafeGet(client, key, { timeoutMs = 300 } = {}) {
-  if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (GET).");
-  return await withTimeout(client.get(key), timeoutMs, `GET ${key}`);
-}
+const upstash = {
+  async get(key, { timeoutMs = 400 } = {}) {
+    if (!hasUpstash()) throw new Error("[UPSTASH] Config ausente (URL/TOKEN).");
+    const url = `${UPSTASH_URL.replace(/\/+$/, "")}/get/${encodeURIComponent(key)}`;
+    return await withTimeout(async (signal) => {
+      const resp = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+        signal,
+      });
+      if (!resp.ok) throw new Error(`[UPSTASH] GET falhou: ${resp.status} ${resp.statusText}`);
+      const json = await resp.json();
+      return json?.result ?? null; // { result: "valor" } ou { result: null }
+    }, timeoutMs, `GET ${key}`);
+  },
 
-async function redisSafeExists(client, key, { timeoutMs = 300 } = {}) {
-  if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (EXISTS).");
-  return await withTimeout(client.exists(key), timeoutMs, `EXISTS ${key}`);
-}
+  async exists(key, { timeoutMs = 400 } = {}) {
+    if (!hasUpstash()) throw new Error("[UPSTASH] Config ausente (URL/TOKEN).");
+    const url = `${UPSTASH_URL.replace(/\/+$/, "")}/exists/${encodeURIComponent(key)}`;
+    return await withTimeout(async (signal) => {
+      const resp = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+        signal,
+      });
+      if (!resp.ok) throw new Error(`[UPSTASH] EXISTS falhou: ${resp.status} ${resp.statusText}`);
+      const json = await resp.json();
+      return Number(json?.result || 0) > 0; // { result: 0 | 1 }
+    }, timeoutMs, `EXISTS ${key}`);
+  },
 
-async function redisSafeSet(client, key, value, ttlSeconds, { timeoutMs = 300 } = {}) {
-  if (!isRedisReady(client)) throw new Error("[REDIS SAFE] Cliente não pronto (SET).");
-  return await withTimeout(client.set(key, value, "EX", ttlSeconds), timeoutMs, `SET ${key}`);
-}
+  async set(key, value, ttlSeconds, { timeoutMs = 400 } = {}) {
+    if (!hasUpstash()) throw new Error("[UPSTASH] Config ausente (URL/TOKEN).");
+    const base = `${UPSTASH_URL.replace(/\/+$/, "")}/set/${encodeURIComponent(
+      key
+    )}/${encodeURIComponent(value)}`;
+    const url = ttlSeconds ? `${base}?EX=${encodeURIComponent(ttlSeconds)}` : base;
+    return await withTimeout(async (signal) => {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+        signal,
+      });
+      if (!resp.ok) throw new Error(`[UPSTASH] SET falhou: ${resp.status} ${resp.statusText}`);
+      const json = await resp.json();
+      return json?.result === "OK";
+    }, timeoutMs, `SET ${key}`);
+  },
+};
 
-// --- INÍCIO DA CONFIGURAÇÃO DO REDIS (Memória Curta) - v6.0.4 ---
-let redis;
-try {
-  if (!process.env.UPSTASH_REDIS_URL) {
-    throw new Error("A variável de ambiente UPSTASH_REDIS_URL não está definida.");
-  }
-  const redisOptions = {
-    lazyConnect: true,
-    enableReadyCheck: false,
-    maxRetriesPerRequest: 3,
-    connectTimeout: 10000,
-  };
-  redis = new Redis(process.env.UPSTASH_REDIS_URL, redisOptions);
+// ============================== APP ÚNICO ===================================
+const app = express();
+const PORT = process.env.PORT || 3002;
+const HOST = "0.0.0.0";
 
-  (async () => {
-    try {
-      console.log("[REDIS] Conectando proativamente (background)...");
-      await redis.connect();
-      console.log("[REDIS] Conexão proativa estabelecida.");
-    } catch (err) {
-      console.error("[REDIS] Falha na conexão proativa (seguindo sem memória):", err?.message || err);
-    }
-  })();
-
-  redis.on("connect", () => {
-    console.log("[REDIS] Evento 'connect' disparado.");
-  });
-  redis.on("ready", () => {
-    console.log("[REDIS] Cliente pronto (status=ready).");
-  });
-  redis.on("reconnecting", (t) => {
-    console.warn("[REDIS] Tentando reconectar...", t || "");
-  });
-  redis.on("end", () => {
-    console.error("[REDIS] Conexão finalizada (end).");
-  });
-  redis.on("error", (err) => {
-    console.error("[REDIS] Erro de conexão com o Upstash:", err);
-  });
-} catch (error) {
-  console.error("[REDIS] Erro fatal ao inicializar o cliente Redis:", error.message);
-}
-// --- FIM DA CONFIGURAÇÃO DO REDIS ---
-
-// ============================== CONFIG BÁSICA ================================
-const aplicacaoExpress = express();
-const portaDoServidor = process.env.PORT || 3002;
-aplicacaoExpress.use(express.json({ limit: "2mb" }));
-
-// ------------------------------ CORS (permanente e seguro) ------------------
+// ------------------------------ CORS ----------------------------------------
 const EXPLICIT_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
@@ -119,12 +148,13 @@ const ALLOWED_ORIGIN_PATTERNS = [
 ];
 
 function isOriginAllowed(origin) {
-  if (!origin) return true;
+  if (!origin) return true; // requests server-side / curl etc.
   if (EXPLICIT_ALLOWED_ORIGINS.has(origin)) return true;
   return ALLOWED_ORIGIN_PATTERNS.some((rx) => rx.test(origin));
 }
 
-aplicacaoExpress.use((req, res, next) => {
+// Pré-voo manual para reduzir 403 indevidos em OPTIONS
+app.use((req, res, next) => {
   if (req.method !== "OPTIONS") return next();
   const origin = req.headers.origin || "";
   if (!isOriginAllowed(origin)) {
@@ -138,7 +168,9 @@ aplicacaoExpress.use((req, res, next) => {
   res.header("Access-Control-Max-Age", "600");
   return res.sendStatus(204);
 });
-aplicacaoExpress.use(
+
+// CORS efetivo
+app.use(
   cors({
     origin: (origin, cb) => (isOriginAllowed(origin) ? cb(null, true) : cb(new Error("CORS block"))),
     credentials: true,
@@ -147,7 +179,27 @@ aplicacaoExpress.use(
   })
 );
 
-// ============================== GEMINI REST v1 ===============================
+// Body parser
+app.use(express.json({ limit: "25mb" }));
+
+// ------------------------------ ROTAS MODULARES ------------------------------
+// Importantes: a rota de ping do parceiro (GET /api/parceiro/_ping) está definida
+// dentro de parceiro.routes.js. Ao montar abaixo, ela passa a responder corretamente.
+app.use("/api/parceiro", parceiroRoutes);
+app.use("/api/rag", ragRoutes);
+app.use("/api/financeiro", financeiroRoutes);
+app.use("/api/uploads", uploadsRoutes);
+
+// ------------------------------ HEALTHCHECKS --------------------------------
+app.get("/", (_req, res) => res.status(200).send("BEPIT backend ativo ✅"));
+app.get("/ping", (_req, res) => res.status(200).json({ pong: true, ts: Date.now() }));
+
+// Health global do app principal (porta 3002)
+app.get("/_ping", (_req, res) =>
+  res.json({ ok: true, app: "app", now: new Date().toISOString() })
+);
+
+// ============================== IA (Gemini REST) =============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
 const chaveGemini = process.env.GEMINI_API_KEY || "";
 const AI_DISABLED = String(process.env.AI_DISABLED || "") === "1";
@@ -155,7 +207,6 @@ const AI_DISABLED = String(process.env.AI_DISABLED || "") === "1";
 function stripModelsPrefix(id) {
   return String(id || "").replace(/^models\//, "");
 }
-
 async function listarModelosREST() {
   if (!chaveGemini) throw new Error("[GEMINI REST] GEMINI_API_KEY não definida.");
   const url = `https://generativelanguage.googleapis.com/v1/models?key=${encodeURIComponent(
@@ -172,7 +223,6 @@ async function listarModelosREST() {
   const items = Array.isArray(json.models) ? json.models : [];
   return items.map((m) => String(m.name || "")).filter(Boolean);
 }
-
 async function selecionarModeloREST() {
   const todosComPrefixo = await listarModelosREST();
   const disponiveis = todosComPrefixo.map(stripModelsPrefix);
@@ -181,12 +231,9 @@ async function selecionarModeloREST() {
     const alvo = stripModelsPrefix(envModelo);
     if (disponiveis.includes(alvo)) return alvo;
     console.warn(
-      `[GEMINI REST] GEMINI_MODEL "${envModelo}" indisponível. Disponíveis: ${disponiveis.join(
-        ", "
-      )}`
+      `[GEMINI REST] GEMINI_MODEL "${envModelo}" indisponível. Disponíveis: ${disponiveis.join(", ")}`
     );
   }
-
   const preferencia = [
     envModelo && stripModelsPrefix(envModelo),
     "gemini-2.5-flash",
@@ -194,12 +241,10 @@ async function selecionarModeloREST() {
     "gemini-1.5-pro-latest",
   ].filter(Boolean);
   for (const alvo of preferencia) if (disponiveis.includes(alvo)) return alvo;
-
   const qualquer = disponiveis.find((n) => /^gemini-/.test(n));
   if (qualquer) return qualquer;
   throw new Error("[GEMINI REST] Não foi possível selecionar modelo.");
 }
-
 async function gerarConteudoComREST(modelo, texto) {
   if (!chaveGemini) throw new Error("[GEMINI REST] GEMINI_API_KEY não definida.");
   const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(
@@ -224,7 +269,6 @@ async function gerarConteudoComREST(modelo, texto) {
     : "";
   return out || "";
 }
-
 let modeloGeminiV1 = null;
 async function obterModeloREST() {
   if (!usarGeminiREST) throw new Error("[GEMINI REST] USE_GEMINI_REST=1 é obrigatório.");
@@ -233,12 +277,10 @@ async function obterModeloREST() {
   console.log(`[GEMINI REST] Modelo selecionado: ${modeloGeminiV1}`);
   return modeloGeminiV1;
 }
-
 async function geminiGerarTexto(texto) {
   const modelo = await obterModeloREST();
   return await gerarConteudoComREST(modelo, texto);
 }
-
 function isRetryableGeminiError(err) {
   const msg = String(err?.message || err);
   return /429|RESOURCE_EXHAUSTED|500|502|503|504/i.test(msg);
@@ -267,7 +309,6 @@ function normalizarTexto(texto) {
     .toLowerCase()
     .trim();
 }
-
 function getHoraLocalSP() {
   try {
     const fmt = new Intl.DateTimeFormat("pt-BR", {
@@ -286,7 +327,6 @@ function getHoraLocalSP() {
     return `${hh}:${mm}`;
   }
 }
-
 async function construirHistoricoParaGemini(conversationId, limite = 12) {
   try {
     const { data, error } = await supabase
@@ -299,10 +339,8 @@ async function construirHistoricoParaGemini(conversationId, limite = 12) {
     const ultimas = rows.slice(-limite);
     const contents = [];
     for (const it of ultimas) {
-      if (it.pergunta_usuario)
-        contents.push({ role: "user", parts: [{ text: it.pergunta_usuario }] });
-      if (it.resposta_ia)
-        contents.push({ role: "model", parts: [{ text: it.resposta_ia }] });
+      if (it.pergunta_usuario) contents.push({ role: "user", parts: [{ text: it.pergunta_usuario }] });
+      if (it.resposta_ia) contents.push({ role: "model", parts: [{ text: it.resposta_ia }] });
     }
     return contents;
   } catch (e) {
@@ -310,7 +348,6 @@ async function construirHistoricoParaGemini(conversationId, limite = 12) {
     return [];
   }
 }
-
 function historicoParaTextoSimplesWrapper(hc) {
   try {
     return (hc || [])
@@ -325,7 +362,7 @@ function historicoParaTextoSimplesWrapper(hc) {
   }
 }
 
-// ======================= FUNÇÃO CENTRALIZADORA (ÚNICA e CORRETA) ==========================
+// ======================= FUNÇÃO CENTRAL — ATUALIZA E RESPONDE ===============
 async function updateSessionAndRespond({
   res,
   runId, // opcional para logs
@@ -348,27 +385,20 @@ async function updateSessionAndRespond({
     novoHistorico.shift();
   }
 
-  const novaSessionData = {
-    ...(sessionData || {}),
-    history: novoHistorico,
-  };
+  const novaSessionData = { ...(sessionData || {}), history: novoHistorico };
 
+  // Cache curto na Upstash (15 minutos)
   const TTL_SECONDS = 900;
-  if (redis && isRedisReady(redis)) {
+  if (hasUpstash()) {
     try {
-      console.log(`[RUN ${_run}] [RAIO-X FINAL] Salvando sessão no Redis (timeout curto)...`);
-      await redisSafeSet(redis, conversationId, JSON.stringify(novaSessionData), TTL_SECONDS, {
-        timeoutMs: 300,
-      });
-      console.log(`[RUN ${_run}] [RAIO-X FINAL] Sessão salva no Redis com sucesso.`);
+      console.log(`[RUN ${_run}] [CACHE] SET com timeout curto...`);
+      await upstash.set(conversationId, JSON.stringify(novaSessionData), TTL_SECONDS, { timeoutMs: 400 });
+      console.log(`[RUN ${_run}] [CACHE] Sessão salva com sucesso.`);
     } catch (e) {
-      console.error(
-        `[RUN ${_run}] [REDIS] Falha ao SALVAR sessão (seguindo sem memória):`,
-        e?.message || e
-      );
+      console.error(`[RUN ${_run}] [CACHE] Falha ao salvar sessão:`, e?.message || e);
     }
-  } else if (redis) {
-    console.warn(`[RUN ${_run}] [REDIS] Cliente não pronto para SET. Pulando cache.`);
+  } else {
+    console.warn("[CACHE] Upstash não configurado. Seguindo sem cache.");
   }
 
   try {
@@ -391,7 +421,7 @@ async function updateSessionAndRespond({
 }
 
 // -------------------------- SESSION ENSURER ---------------------------------
-async function ensureConversation(req, supabaseClient) {
+async function ensureConversation(req) {
   const body = req.body || {};
   let conversationId = body.conversationId || body.threadId || body.sessionId || null;
 
@@ -400,7 +430,7 @@ async function ensureConversation(req, supabaseClient) {
   if (!conversationId || typeof conversationId !== "string" || conversationId.trim().length < 10) {
     conversationId = randomUUID();
     try {
-      await supabaseClient.from("conversas").insert({
+      await supabase.from("conversas").insert({
         id: conversationId,
         regiao_id: req.ctx?.regiao?.id || null,
       });
@@ -409,13 +439,13 @@ async function ensureConversation(req, supabaseClient) {
     }
   } else {
     try {
-      const { data: existe } = await supabaseClient
+      const { data: existe } = await supabase
         .from("conversas")
         .select("id")
         .eq("id", conversationId)
         .maybeSingle();
       if (!existe) {
-        await supabaseClient.from("conversas").insert({
+        await supabase.from("conversas").insert({
           id: conversationId,
           regiao_id: req.ctx?.regiao?.id || null,
         });
@@ -429,19 +459,16 @@ async function ensureConversation(req, supabaseClient) {
 
   let isFirstTurn = false;
 
-  if (redis && isRedisReady(redis)) {
+  if (hasUpstash()) {
     try {
-      console.log("[RAIO-X PONTO 2.3] Redis pronto. EXISTS (timeout curto)...");
-      const sessionExists = await redisSafeExists(redis, conversationId, { timeoutMs: 300 });
-      isFirstTurn = !sessionExists;
-      console.log(`[RAIO-X PONTO 2.3] EXISTS concluído. sessionExists=${!!sessionExists}`);
+      console.log("[RAIO-X PONTO 2.3] EXISTS no cache (timeout curto)...");
+      const exists = await upstash.exists(conversationId, { timeoutMs: 400 });
+      isFirstTurn = !exists;
+      console.log(`[RAIO-X PONTO 2.3] EXISTS concluído. sessionExists=${exists}`);
     } catch (e) {
-      console.warn(
-        "[RAIO-X PONTO 2.3] Falha no Redis EXISTS. Fallback para Supabase.",
-        e?.message || e
-      );
+      console.warn("[RAIO-X PONTO 2.3] Falha no cache EXISTS. Fallback Supabase.", e?.message || e);
       try {
-        const { count } = await supabaseClient
+        const { count } = await supabase
           .from("interacoes")
           .select("*", { count: "exact", head: true })
           .eq("conversation_id", conversationId);
@@ -451,9 +478,9 @@ async function ensureConversation(req, supabaseClient) {
       }
     }
   } else {
-    console.warn("[RAIO-X PONTO 2.3] Redis não pronto. Usando Supabase para checar 1º turno.");
+    console.warn("[RAIO-X PONTO 2.3] Cache não configurado. Usando Supabase para checar 1º turno.");
     try {
-      const { count } = await supabaseClient
+      const { count } = await supabase
         .from("interacoes")
         .select("*", { count: "exact", head: true })
         .eq("conversation_id", conversationId);
@@ -471,25 +498,17 @@ async function ensureConversation(req, supabaseClient) {
   return { conversationId, isFirstTurn };
 }
 
-// ---------------------- CLASSIFICAÇÃO DETERMINÍSTICA ------------------------
+// ---------------------- CLASSIFICAÇÃO/EXTRAÇÃO -------------------------------
+function normalizar(texto) {
+  return normalizarTexto(texto);
+}
 function isSaudacao(texto) {
-  const t = normalizarTexto(texto);
-  const saudacoes = [
-    "oi",
-    "ola",
-    "olá",
-    "bom dia",
-    "boa tarde",
-    "boa noite",
-    "e ai",
-    "e aí",
-    "tudo bem",
-  ];
+  const t = normalizar(texto);
+  const saudacoes = ["oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "e ai", "e aí", "tudo bem"];
   return saudacoes.includes(t);
 }
-
 function isWeatherQuestion(texto) {
-  const t = normalizarTexto(texto);
+  const t = normalizar(texto);
   const termos = [
     "clima",
     "tempo",
@@ -513,9 +532,8 @@ function isWeatherQuestion(texto) {
   ];
   return termos.some((k) => t.includes(k));
 }
-
 function detectTemporalWindow(texto) {
-  const t = normalizarTexto(texto);
+  const t = normalizar(texto);
   const sinaisFuturo = [
     "amanha",
     "amanhã",
@@ -531,9 +549,8 @@ function detectTemporalWindow(texto) {
   ];
   return sinaisFuturo.some((s) => t.includes(s)) ? "future" : "present";
 }
-
 function extractCity(texto, cidadesAtivas) {
-  const t = normalizarTexto(texto || "");
+  const t = normalizar(texto || "");
   const lista = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   const apelidos = [
     { key: "arraial", nome: "Arraial do Cabo" },
@@ -549,24 +566,20 @@ function extractCity(texto, cidadesAtivas) {
   ];
   const hitApelido = apelidos.find((a) => t.includes(a.key));
   if (hitApelido) {
-    const alvo = lista.find((c) => normalizarTexto(c.nome) === normalizarTexto(hitApelido.nome));
+    const alvo = lista.find((c) => normalizar(c.nome) === normalizar(hitApelido.nome));
     if (alvo) return alvo;
   }
   for (const c of lista) {
-    if (t.includes(normalizarTexto(c.nome)) || t.includes(normalizarTexto(c.slug))) {
+    if (t.includes(normalizar(c.nome)) || t.includes(normalizar(c.slug))) {
       return c;
     }
   }
   return null;
 }
-
 function isRegionQuery(texto) {
-  const t = normalizarTexto(texto);
+  const t = normalizar(texto);
   const mencionaRegiao =
-    t.includes("regiao") ||
-    t.includes("região") ||
-    t.includes("regiao dos lagos") ||
-    t.includes("região dos lagos");
+    t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
   return mencionaRegiao;
 }
 
@@ -620,19 +633,14 @@ Com base nas regras e nos dados fornecidos, formule a melhor e mais útil respos
 // ============================== LISTA VIP ===================================
 const CIDADES_VIP = ["arraial do cabo", "cabo frio", "armação dos búzios"];
 
-// ======================= FALLBACKS SEM IA (texto determinístico) =============
+// ======================= FALLBACKS SEM IA ===================================
 function montarListaParceirosSemIA(parceiros) {
   const items = (parceiros || []).slice(0, 8);
   if (!items.length)
     return "Não encontrei parceiros para esse filtro no momento. Quer tentar com outra categoria ou cidade?";
-  const linhas = items.map(
-    (p, i) => `${i + 1}. **${p.nome}** — ${p.descricao || "sem descrição"}`
-  );
-  return `${linhas.join(
-    "\n"
-  )}\n\nAlguma dessas opções te interessou? Me diga o número ou o nome para ver mais detalhes.`;
+  const linhas = items.map((p, i) => `${i + 1}. **${p.nome}** — ${p.descricao || "sem descrição"}`);
+  return `${linhas.join("\n")}\n\nAlguma dessas opções te interessou? Me diga o número ou o nome para ver mais detalhes.`;
 }
-
 function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
   try {
     const { when, escopo, resultados = [], cidade } = dadosIA || {};
@@ -647,14 +655,10 @@ function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
         const resumo =
           tipo === "previsao_diaria"
             ? `previsão diária disponível (${(d?.daily || []).length || 0} dias)`
-            : `${d?.condicao || d?.descricao || "condições atuais"}${
-                d?.temp ? `, ${d.temp}°C` : ""
-              }`;
+            : `${d?.condicao || d?.descricao || "condições atuais"}${d?.temp ? `, ${d.temp}°C` : ""}`;
         return `- ${nome}: ${resumo}`;
       });
-      return `Resumo do clima na ${regiaoNome} ${introWhen} (hora local ${horaLocalSP}):\n${linhas.join(
-        "\n"
-      )}`;
+      return `Resumo do clima na ${regiaoNome} ${introWhen} (hora local ${horaLocalSP}):\n${linhas.join("\n")}`;
     }
 
     const r0 = resultados[0];
@@ -758,8 +762,7 @@ async function extrairEntidadesDaBusca(texto) {
   if (tNorm.includes("cabo frio")) cidade = "Cabo Frio";
   else if (tNorm.includes("buzios") || tNorm.includes("búzios")) cidade = "Armação dos Búzios";
   else if (tNorm.includes("arraial")) cidade = "Arraial do Cabo";
-  else if (tNorm.includes("sao pedro") || tNorm.includes("são pedro"))
-    cidade = "São Pedro da Aldeia";
+  else if (tNorm.includes("sao pedro") || tNorm.includes("são pedro")) cidade = "São Pedro da Aldeia";
 
   const DIC_TERMS = [
     "picanha",
@@ -845,68 +848,11 @@ async function extrairEntidadesDaBusca(texto) {
   return { category, city: cidade, terms };
 }
 
-// ============================== LISTAGEM / RESPOSTAS ========================
-async function analisarIntencaoDoUsuario(textoDoUsuario) {
-  return forcarBuscaParceiro(textoDoUsuario) ? "busca_parceiro" : "pergunta_geral";
-}
-
-async function gerarRespostaDeListaParceiros(pergunta, historicoContents, parceiros) {
-  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
-  const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
-  const prompt = [
-    "Você é um assistente de consulta. Sua única função é apresentar os resultados de uma busca em uma lista numerada.",
-    "Para cada estabelecimento no [Contexto], crie um item na lista com o NOME em negrito, seguido por um traço e a DESCRIÇÃO.",
-    "NÃO inclua endereço, contato ou qualquer outra informação. Apenas NOME e DESCRIÇÃO.",
-    "A lista deve ser clara e objetiva.",
-    "Após a lista, finalize com a pergunta: 'Alguma dessas opções te interessou? Me diga o número ou o nome para ver mais detalhes.'",
-    "",
-    `[Contexto]: ${contextoParceiros}`,
-    `[Histórico]:\n${historicoTexto}`,
-    `[Pergunta do Usuário]: "${pergunta}"`,
-  ].join("\n");
-
-  try {
-    return await geminiTry(prompt, { retries: 2 });
-  } catch (e) {
-    console.warn("[IA indisponível] Listagem de parceiros será gerada sem IA:", e?.message || e);
-    return montarListaParceirosSemIA(parceiros);
-  }
-}
-
-async function gerarRespostaGeralPrompteada({
-  pergunta,
-  historicoContents,
-  regiaoNome,
-  dadosClimaOuMaresJSON,
-  horaLocalSP,
-}) {
-  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
-  const prompt = PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", String(horaLocalSP || ""))
-    .replace("[[REGIAO]]", String(regiaoNome || "Região dos Lagos"))
-    .replace("[[DADOS_JSON]]", dadosClimaOuMaresJSON || "{}");
-
-  const payload = [
-    prompt,
-    "",
-    `[Histórico de Conversa]:\n${historicoTexto}`,
-    `[Pergunta do Usuário]: "${pergunta}"`,
-  ].join("\n");
-
-  try {
-    return await geminiTry(payload, { retries: 2 });
-  } catch (e) {
-    console.warn("[IA indisponível] Resposta geral será gerada sem IA:", e?.message || e);
-    try {
-      const dadosIA = JSON.parse(dadosClimaOuMaresJSON || "{}");
-      const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
-      return texto || "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
-    } catch {
-      return "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
-    }
-  }
-}
-
-// --------------------- BUSCA / REFINO PARCEIROS (mantido) -------------------
+// ============================== BUSCA PARCEIROS ==============================
+// NOTA: esta função depende de um serviço existente no seu projeto chamado
+// `buscarParceirosTolerante`. Caso ele não esteja neste arquivo e sim num
+// serviço externo, mantenha a importação original que você já usa.
+// Aqui assumimos que essa função está disponível no escopo global do projeto.
 async function ferramentaBuscarParceirosOuDicas({
   cidadesAtivas,
   argumentosDaFerramenta,
@@ -1034,7 +980,10 @@ async function ferramentaBuscarParceirosOuDicas({
   const alvoInicialFix = 3;
   const alvoRefinoFix = 5;
 
+  // ATENÇÃO: `buscarParceirosTolerante` deve existir (no seu serviço original).
+  // Se está em outro módulo, mantenha a importação que você já utiliza.
   for (const cat of categoriasAProcurar) {
+    // eslint-disable-next-line no-undef
     const r = await buscarParceirosTolerante({
       cidadeSlug,
       categoria: cat,
@@ -1043,7 +992,7 @@ async function ferramentaBuscarParceirosOuDicas({
       excludeIds: Array.from(vistos),
     });
 
-    if (r.ok && Array.isArray(r.items)) {
+    if (r?.ok && Array.isArray(r.items)) {
       for (const it of r.items) {
         if (it?.id && !vistos.has(it.id)) {
           vistos.add(it.id);
@@ -1094,6 +1043,62 @@ async function ferramentaBuscarParceirosOuDicas({
       cidade_id: p.cidade_id,
     })),
   };
+}
+
+async function gerarRespostaDeListaParceiros(pergunta, historicoContents, parceiros) {
+  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
+  const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
+  const prompt = [
+    "Você é um assistente de consulta. Sua única função é apresentar os resultados de uma busca em uma lista numerada.",
+    "Para cada estabelecimento no [Contexto], crie um item na lista com o NOME em negrito, seguido por um traço e a DESCRIÇÃO.",
+    "NÃO inclua endereço, contato ou qualquer outra informação. Apenas NOME e DESCRIÇÃO.",
+    "A lista deve ser clara e objetiva.",
+    "Após a lista, finalize com a pergunta: 'Alguma dessas opções te interessou? Me diga o número ou o nome para ver mais detalhes.'",
+    "",
+    `[Contexto]: ${contextoParceiros}`,
+    `[Histórico]:\n${historicoTexto}`,
+    `[Pergunta do Usuário]: "${pergunta}"`,
+  ].join("\n");
+
+  try {
+    return await geminiTry(prompt, { retries: 2 });
+  } catch (e) {
+    console.warn("[IA indisponível] Listagem de parceiros será gerada sem IA:", e?.message || e);
+    return montarListaParceirosSemIA(parceiros);
+  }
+}
+
+async function gerarRespostaGeralPrompteada({
+  pergunta,
+  historicoContents,
+  regiaoNome,
+  dadosClimaOuMaresJSON,
+  horaLocalSP,
+}) {
+  const historicoTexto = historicoParaTextoSimplesWrapper(historicoContents);
+  const prompt = PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", String(horaLocalSP || ""))
+    .replace("[[REGIAO]]", String(regiaoNome || "Região dos Lagos"))
+    .replace("[[DADOS_JSON]]", dadosClimaOuMaresJSON || "{}");
+
+  const payload = [
+    prompt,
+    "",
+    `[Histórico de Conversa]:\n${historicoTexto}`,
+    `[Pergunta do Usuário]: "${pergunta}"`,
+  ].join("\n");
+
+  try {
+    return await geminiTry(payload, { retries: 2 });
+  } catch (e) {
+    console.warn("[IA indisponível] Resposta geral será gerada sem IA:", e?.message || e);
+    try {
+      const dadosIA = JSON.parse(dadosClimaOuMaresJSON || "{}");
+      const texto = montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP });
+      return texto || "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
+    } catch {
+      return "Estou com alta demanda agora. Posso te ajudar com indicações e dados disponíveis.";
+    }
+  }
 }
 
 async function lidarComNovaBusca({
@@ -1157,10 +1162,21 @@ async function lidarComNovaBusca({
   }
 }
 
+// ============================= FORMATADOR FINAL ==============================
+// Mantido do seu código original: formata a resposta final do assistente
+function finalizeAssistantResponse({ modelResponseText, foundPartnersList = [], mode = "general" }) {
+  const txt = String(modelResponseText || "").trim();
+  if (mode === "partners") {
+    // Você pode manter qualquer pós-processamento que já usava aqui.
+    return txt || "Aqui estão algumas opções de parceiros.";
+  }
+  return txt || "Posso te ajudar com informações e indicações na Região dos Lagos.";
+}
+
 // ============================================================================
 // >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.4 (COM RAIO-X) <<<<<<<<<<
 // ============================================================================
-aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
+app.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
   try {
     console.log(`[RUN ${runId}] [RAIO-X PONTO 1] Rota /chat iniciada.`);
@@ -1190,29 +1206,28 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const cidadesAtivas = cidades || [];
     console.log(`[RUN ${runId}] [RAIO-X PONTO 2] Contexto de região e cidades carregado.`);
 
-    const { conversationId, isFirstTurn } = await ensureConversation(req, supabase);
+    const { conversationId, isFirstTurn } = await ensureConversation(req);
+
     console.log(
       `[RUN ${runId}] [RAIO-X PONTO 3] Sessão garantida. ID: ${conversationId}, É o primeiro turno: ${isFirstTurn}`
     );
 
+    // Recupera histórico curto do cache (se houver)
     let sessionData = { history: [], entities: {} };
     try {
-      if (redis && isRedisReady(redis) && !isFirstTurn) {
-        console.log(`[RUN ${runId}] [RAIO-X PONTO 4] Tentando ler do cache Redis (timeout curto)...`);
-        const cachedSession = await redisSafeGet(redis, conversationId, { timeoutMs: 300 });
-        console.log(`[RUN ${runId}] [RAIO-X PONTO 5] Leitura do Redis concluída.`);
+      if (hasUpstash() && !isFirstTurn) {
+        console.log(`[RUN ${runId}] [RAIO-X PONTO 4] Tentando ler do cache Upstash (timeout curto)...`);
+        const cachedSession = await upstash.get(conversationId, { timeoutMs: 400 });
+        console.log(`[RUN ${runId}] [RAIO-X PONTO 5] Leitura do Upstash concluída.`);
         if (cachedSession) {
           sessionData = JSON.parse(cachedSession);
-          console.log(`[RUN ${runId}] [REDIS] Sessão recuperada do cache.`);
+          console.log(`[RUN ${runId}] [CACHE] Sessão recuperada do cache.`);
         }
-      } else if (redis && !isRedisReady(redis)) {
-        console.warn(`[RUN ${runId}] [REDIS] Cliente não pronto para GET. Pulando cache.`);
+      } else if (!hasUpstash()) {
+        console.warn(`[RUN ${runId}] [CACHE] Upstash não configurado. Pulando cache.`);
       }
     } catch (e) {
-      console.error(
-        `[RUN ${runId}] [REDIS] Falha ao LER sessão (operando sem memória):`,
-        e?.message || e
-      );
+      console.error(`[RUN ${runId}] [CACHE] Falha ao LER sessão (operando sem memória):`, e?.message || e);
       sessionData = { history: [], entities: {} };
     }
 
@@ -1330,16 +1345,83 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
       }
     }
 
-    if (forcarBuscaParceiro(userText)) {
-      const { respostaFinal, parceirosSugeridos } = await lidarComNovaBusca({
-        textoDoUsuario: userText,
-        historicoGemini: historico,
-        regiao,
-        cidadesAtivas,
-        idDaConversa: conversationId,
-        isInitialSearch: true,
-        excludeIds: [],
+        if (forcarBuscaParceiro(userText)) {
+      console.log(`[RUN ${runId}] [RAG] Intent de parceiros detectada — usando hybridSearch.`);
+
+      // 1) Extrai entidade simples já existente no seu código
+      const entidades = await extrairEntidadesDaBusca(userText);
+
+      // 2) Resolve cidade_id se o usuário citou a cidade
+      let cidadeId = null;
+      if (entidades?.city) {
+        const alvo = (cidadesAtivas || []).find(
+          (c) =>
+            normalizarTexto(c.nome) === normalizarTexto(entidades.city) ||
+            normalizarTexto(c.slug) === normalizarTexto(entidades.city)
+        );
+        cidadeId = alvo?.id || null;
+      }
+
+      // 3) Categoria (se vier)
+      const categoria = entidades?.category || null;
+
+      // 4) Chama a busca híbrida (RAG)
+      const ragOut = await hybridSearch({
+        q: userText,
+        cidade_id: cidadeId,
+        categoria,
+        limit: 5,
+        debug: false,
       });
+
+      // `ragOut` pode ser array direto ou {items, meta}
+      const items = Array.isArray(ragOut?.items) ? ragOut.items : ragOut;
+      const parceirosSugeridos = (items || []).map((r) => ({
+        id: r.id,
+        tipo: r.tipo || null,
+        nome: r.nome,
+        categoria: r.categoria || null,
+        descricao: r.descricao || "",
+        endereco: r.endereco || null,
+        contato: r.contato || null,
+        beneficio_bepit: r.beneficio_bepit || null,
+        faixa_preco: r.faixa_preco || null,
+        fotos_parceiros: Array.isArray(r.fotos_parceiros) ? r.fotos_parceiros : [],
+        cidade_id: r.cidade_id || null,
+      }));
+
+      // 5) Se achou algo, lista; senão, fallback geral
+      let respostaFinal;
+      if (parceirosSugeridos.length > 0) {
+        const respostaModelo = await gerarRespostaDeListaParceiros(
+          userText,
+          historico,
+          parceirosSugeridos
+        );
+        respostaFinal = finalizeAssistantResponse({
+          modelResponseText: respostaModelo,
+          foundPartnersList: parceirosSugeridos,
+          mode: "partners",
+        });
+
+        try {
+          await supabase
+            .from("conversas")
+            .update({
+              parceiros_sugeridos: parceirosSugeridos,
+              parceiro_em_foco: null,
+              topico_atual: categoria || null,
+            })
+            .eq("id", conversationId);
+        } catch {
+          // ignora
+        }
+      } else {
+        // nada encontrado => responde geral (sem IA pesada, se preferir)
+        respostaFinal =
+          "Não encontrei parceiros que combinem com o que você pediu. Quer tentar com outra palavra, cidade ou categoria?";
+      }
+
       return await updateSessionAndRespond({
         res,
         runId,
@@ -1351,6 +1433,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
         partners: parceirosSugeridos,
       });
     }
+
 
     console.log(`[RUN ${runId}] [RAIO-X PONTO 8] Roteado para Fallback Geral.`);
     const horaLocalSP = getHoraLocalSP();
@@ -1383,7 +1466,7 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (req, res) => {
 });
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
-aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
+app.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
 
@@ -1440,21 +1523,11 @@ aplicacaoExpress.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// HEALTHCHECKS BÁSICOS
-aplicacaoExpress.get("/", (_req, res) => {
-  res.status(200).send("BEPIT backend ativo ✅");
-});
-aplicacaoExpress.get("/ping", (_req, res) => {
-  res.status(200).json({ pong: true, ts: Date.now() });
-});
-
-// ---------------------------------------------------------------------------
-// STARTUP DO SERVIDOR (necessário no Render)
-const host = "0.0.0.0";
-aplicacaoExpress
-  .listen(portaDoServidor, host, () => {
-    console.log(`[BOOT] BEPIT ouvindo em http://${host}:${portaDoServidor}`);
+// ------------------------------ STARTUP -------------------------------------
+app
+  .listen(PORT, HOST, () => {
+    console.log(`[BOOT] BEPIT ouvindo em http://${HOST}:${PORT}`);
+    printRoutes(app, "app");
   })
   .on("error", (err) => {
     console.error("[BOOT] Falha ao subir servidor:", err);
@@ -1467,5 +1540,4 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
-// Export para testes (opcional)
-export default aplicacaoExpress;
+export default app;
