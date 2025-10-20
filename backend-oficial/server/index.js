@@ -847,7 +847,57 @@ async function extrairEntidadesDaBusca(texto) {
 
   return { category, city: cidade, terms };
 }
+// ============================== RAG: BUSCA PARCEIROS =========================
+// Usa hybridSearch (vetorial + textual) para achar parceiros a partir do texto do usuário.
+// - Leva em conta cidade e categoria detectadas por extrairEntidadesDaBusca
+// - Normaliza o retorno para o formato esperado pela resposta do chat
+async function searchPartnersRAG({ textoDoUsuario, cidadesAtivas, limit = 5 }) {
+  // 1) extrai cidade/categoria a partir do texto
+  const entidades = await extrairEntidadesDaBusca(textoDoUsuario || "");
+  const categoria = entidades?.category || null;
+  const cidadeNome = entidades?.city || null;
 
+  // 2) resolve cidade_id a partir do nome detectado (se houver)
+  let cidade_id = null;
+  if (cidadeNome && Array.isArray(cidadesAtivas)) {
+    const alvo = cidadesAtivas.find(
+      (c) =>
+        normalizarTexto(c.nome) === normalizarTexto(cidadeNome) ||
+        normalizarTexto(c.slug) === normalizarTexto(cidadeNome)
+    );
+    cidade_id = alvo?.id || null;
+  }
+
+  // 3) chama o RAG híbrido
+  // Passamos o texto completo do usuário como 'q' (o híbrido já faz a mágica)
+  const results = await hybridSearch({
+    q: textoDoUsuario,
+    cidade_id,
+    categoria,
+    limit,
+    debug: false,
+  });
+
+  // hybridSearch pode retornar {items, meta} (quando debug=true) ou apenas array (quando false)
+  const items = Array.isArray(results?.items) ? results.items : Array.isArray(results) ? results : [];
+
+  // 4) normaliza para o formato que seu formatter espera
+  const parceiros = items.map((r) => ({
+    id: r.id,
+    tipo: r.tipo || null,
+    nome: r.nome,
+    categoria: r.categoria || categoria || null,
+    descricao: r.descricao || null,
+    endereco: r.endereco || null,
+    contato: r.contato || null,
+    beneficio_bepit: r.beneficio_bepit || null,
+    faixa_preco: r.faixa_preco || null,
+    fotos_parceiros: Array.isArray(r.fotos_parceiros) ? r.fotos_parceiros : [],
+    cidade_id: r.cidade_id || null,
+  }));
+
+  return { parceiros, entidades };
+}
 // ============================== BUSCA PARCEIROS ==============================
 // NOTA: esta função depende de um serviço existente no seu projeto chamado
 // `buscarParceirosTolerante`. Caso ele não esteja neste arquivo e sim num
@@ -1346,94 +1396,83 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
     }
 
         if (forcarBuscaParceiro(userText)) {
-      console.log(`[RUN ${runId}] [RAG] Intent de parceiros detectada — usando hybridSearch.`);
+  console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada — chamando hybridSearch...`);
 
-      // 1) Extrai entidade simples já existente no seu código
-      const entidades = await extrairEntidadesDaBusca(userText);
+  // 1) Busca via RAG (híbrido)
+  const { parceiros, entidades } = await searchPartnersRAG({
+    textoDoUsuario: userText,
+    cidadesAtivas,
+    limit: 5,
+  });
 
-      // 2) Resolve cidade_id se o usuário citou a cidade
-      let cidadeId = null;
-      if (entidades?.city) {
-        const alvo = (cidadesAtivas || []).find(
-          (c) =>
-            normalizarTexto(c.nome) === normalizarTexto(entidades.city) ||
-            normalizarTexto(c.slug) === normalizarTexto(entidades.city)
-        );
-        cidadeId = alvo?.id || null;
-      }
+  if (parceiros.length > 0) {
+    // 2) Gera lista amigável (usa sua função existente que formata a resposta em lista)
+    const respostaModelo = await gerarRespostaDeListaParceiros(
+      userText,
+      historico,
+      parceiros
+    );
 
-      // 3) Categoria (se vier)
-      const categoria = entidades?.category || null;
+    const respostaFinal = finalizeAssistantResponse({
+      modelResponseText: respostaModelo,
+      foundPartnersList: parceiros,
+      mode: "partners",
+    });
 
-      // 4) Chama a busca híbrida (RAG)
-      const ragOut = await hybridSearch({
-        q: userText,
-        cidade_id: cidadeId,
-        categoria,
-        limit: 5,
-        debug: false,
-      });
-
-      // `ragOut` pode ser array direto ou {items, meta}
-      const items = Array.isArray(ragOut?.items) ? ragOut.items : ragOut;
-      const parceirosSugeridos = (items || []).map((r) => ({
-        id: r.id,
-        tipo: r.tipo || null,
-        nome: r.nome,
-        categoria: r.categoria || null,
-        descricao: r.descricao || "",
-        endereco: r.endereco || null,
-        contato: r.contato || null,
-        beneficio_bepit: r.beneficio_bepit || null,
-        faixa_preco: r.faixa_preco || null,
-        fotos_parceiros: Array.isArray(r.fotos_parceiros) ? r.fotos_parceiros : [],
-        cidade_id: r.cidade_id || null,
-      }));
-
-      // 5) Se achou algo, lista; senão, fallback geral
-      let respostaFinal;
-      if (parceirosSugeridos.length > 0) {
-        const respostaModelo = await gerarRespostaDeListaParceiros(
-          userText,
-          historico,
-          parceirosSugeridos
-        );
-        respostaFinal = finalizeAssistantResponse({
-          modelResponseText: respostaModelo,
-          foundPartnersList: parceirosSugeridos,
-          mode: "partners",
-        });
-
-        try {
-          await supabase
-            .from("conversas")
-            .update({
-              parceiros_sugeridos: parceirosSugeridos,
-              parceiro_em_foco: null,
-              topico_atual: categoria || null,
-            })
-            .eq("id", conversationId);
-        } catch {
-          // ignora
-        }
-      } else {
-        // nada encontrado => responde geral (sem IA pesada, se preferir)
-        respostaFinal =
-          "Não encontrei parceiros que combinem com o que você pediu. Quer tentar com outra palavra, cidade ou categoria?";
-      }
-
-      return await updateSessionAndRespond({
-        res,
-        runId,
-        conversationId,
-        userText,
-        aiResponseText: respostaFinal,
-        sessionData,
-        regiaoId: regiao.id,
-        partners: parceirosSugeridos,
-      });
+    // 3) persiste “estado” da conversa
+    try {
+      await supabase
+        .from("conversas")
+        .update({
+          parceiros_sugeridos: parceiros,
+          parceiro_em_foco: null,
+          topico_atual: entidades?.category || null,
+        })
+        .eq("id", conversationId);
+    } catch {
+      // segue fluxo
     }
 
+    return await updateSessionAndRespond({
+      res,
+      runId,
+      conversationId,
+      userText,
+      aiResponseText: respostaFinal,
+      sessionData,
+      regiaoId: regiao.id,
+      partners: parceiros,
+    });
+  } else {
+    console.log(`[RUN ${runId}] [RAG] Nenhum parceiro encontrado — caindo para resposta geral.`);
+
+    // fallback: resposta geral (sem parceiros)
+    const respostaModelo = await gerarRespostaGeralPrompteada({
+      pergunta: userText,
+      historicoContents: historico,
+      regiaoNome: regiao?.nome,
+      dadosClimaOuMaresJSON: "{}",
+      horaLocalSP: getHoraLocalSP(),
+    });
+
+    const respostaFinal = finalizeAssistantResponse({
+      modelResponseText: respostaModelo,
+      foundPartnersList: [],
+      mode: "general",
+    });
+
+    return await updateSessionAndRespond({
+      res,
+      runId,
+      conversationId,
+      userText,
+      aiResponseText: respostaFinal,
+      sessionData,
+      regiaoId: regiao.id,
+      partners: parceirosSugeridos,
+    });
+  }
+}
 
     console.log(`[RUN ${runId}] [RAIO-X PONTO 8] Roteado para Fallback Geral.`);
     const horaLocalSP = getHoraLocalSP();
