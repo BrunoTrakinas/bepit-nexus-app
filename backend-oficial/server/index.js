@@ -126,12 +126,18 @@ const PORT = process.env.PORT || 3002;
 const HOST = "0.0.0.0";
 
 // ------------------------------ CORS ----------------------------------------
+// ------------------------------ CORS ----------------------------------------
 const EXPLICIT_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
-  "https://bepitnexus.netlify.app",
-  "https://bepit-nexus.netlify.app",
 ]);
+
+// Permite injetar 1 domínio específico (ex.: seu domínio customizado no Netlify)
+if (process.env.FRONTEND_ORIGIN) {
+  EXPLICIT_ALLOWED_ORIGINS.add(process.env.FRONTEND_ORIGIN.trim());
+}
+
+// Lista extra via env (se quiser vários separados por vírgula)
 if (process.env.CORS_EXTRA_ORIGINS) {
   process.env.CORS_EXTRA_ORIGINS
     .split(",")
@@ -139,30 +145,36 @@ if (process.env.CORS_EXTRA_ORIGINS) {
     .filter(Boolean)
     .forEach((o) => EXPLICIT_ALLOWED_ORIGINS.add(o));
 }
+
+// Padrões aceitos (qualquer site do Netlify)
 const ALLOWED_ORIGIN_PATTERNS = [
-  /^https:\/\/(deploy-preview-\d+--)?bepitnexus\.netlify\.app$/,
-  /^https:\/\/(deploy-preview-\d+--)?bepit-nexus\.netlify\.app$/,
-  /^http:\/\/localhost:(3000|5173)$/,
+  /^https:\/\/.*\.netlify\.app$/,                 // qualquer subdomínio do Netlify
+  /^http:\/\/localhost:(3000|5173)$/,             // dev local
 ];
 
+// Modo “abrir tudo” (use só para teste rápido): CORS_ALLOW_ALL=1
+const CORS_ALLOW_ALL = String(process.env.CORS_ALLOW_ALL || "") === "1";
+
 function isOriginAllowed(origin) {
-  if (!origin) return true; // requests server-side / curl etc.
+  if (!origin) return true;                 // chamadas server-side/curl
+  if (CORS_ALLOW_ALL) return true;          // modo aberto temporário
   if (EXPLICIT_ALLOWED_ORIGINS.has(origin)) return true;
   return ALLOWED_ORIGIN_PATTERNS.some((rx) => rx.test(origin));
 }
 
-// Pré-voo manual para reduzir 403 indevidos em OPTIONS
+// Pré-voo manual
 app.use((req, res, next) => {
   if (req.method !== "OPTIONS") return next();
   const origin = req.headers.origin || "";
   if (!isOriginAllowed(origin)) {
-    return res.status(403).send("CORS: Origem não permitida por política de segurança.");
+    return res.status(403).send("CORS: origem não permitida.");
   }
   res.header("Access-Control-Allow-Origin", origin);
   res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Credentials", "true");
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-key, authorization, Accept");
+  // Inclua os headers que o front envia:
+  res.header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key, Authorization, Accept");
   res.header("Access-Control-Max-Age", "600");
   return res.sendStatus(204);
 });
@@ -173,9 +185,11 @@ app.use(
     origin: (origin, cb) => (isOriginAllowed(origin) ? cb(null, true) : cb(new Error("CORS block"))),
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "x-admin-key", "authorization", "Accept"],
+    // Header names são case-insensitive, mas deixe como usa no front:
+    allowedHeaders: ["Content-Type", "X-Admin-Key", "Authorization", "Accept"],
   })
 );
+
 
 // Body parser
 app.use(express.json({ limit: "25mb" }));
