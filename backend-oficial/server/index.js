@@ -1,23 +1,29 @@
 // /backend-oficial/server/index.js
 // ============================================================================
 // BEPIT Nexus - Servidor (Express) — Unificado
-// Orquestrador Lógico — Arquitetura "Cache-First + Classificador + Roteamento"
-// v6.2.0 (Unificação: uma única instância Express + CORS + Rotas modulares)
+// Orquestrador Lógico — "Cache-First + Classificador + Roteamento"
+// v6.2.1 (partners-first, rotas humanas, anti-alucinação, fontes públicas)
 // ============================================================================
 
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
+
+// Rotas modulares (ajuste paths se necessário)
 import financeiroRoutes from "./routes/financeiro.routes.js";
 import uploadsRoutes from "./routes/uploads.routes.js";
 import ragRoutes from "./routes/rag.routes.js";
 import parceiroRoutes from "./routes/parceiro.routes.js";
+
+// Supabase client (ajuste path se necessário)
 import { supabase } from "../lib/supabaseClient.js";
+
+// Busca tolerante (se usar) e RAG híbrido (ajuste path se necessário)
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";
 import { hybridSearch } from "../services/rag.service.js";
 
-// === DEBUG: listar rotas montadas (use só em desenvolvimento) ===
+// ====================== DEBUG: listar rotas montadas =========================
 function printRoutes(app, label = "APP") {
   try {
     const lines = [];
@@ -82,7 +88,7 @@ const upstash = {
       });
       if (!resp.ok) throw new Error(`[UPSTASH] GET falhou: ${resp.status} ${resp.statusText}`);
       const json = await resp.json();
-      return json?.result ?? null; // { result: "valor" } ou { result: null }
+      return json?.result ?? null;
     }, timeoutMs, `GET ${key}`);
   },
 
@@ -97,7 +103,7 @@ const upstash = {
       });
       if (!resp.ok) throw new Error(`[UPSTASH] EXISTS falhou: ${resp.status} ${resp.statusText}`);
       const json = await resp.json();
-      return Number(json?.result || 0) > 0; // { result: 0 | 1 }
+      return Number(json?.result || 0) > 0;
     }, timeoutMs, `EXISTS ${key}`);
   },
 
@@ -126,18 +132,14 @@ const PORT = process.env.PORT || 3002;
 const HOST = "0.0.0.0";
 
 // ------------------------------ CORS ----------------------------------------
-// ------------------------------ CORS ----------------------------------------
 const EXPLICIT_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
 ]);
 
-// Permite injetar 1 domínio específico (ex.: seu domínio customizado no Netlify)
 if (process.env.FRONTEND_ORIGIN) {
   EXPLICIT_ALLOWED_ORIGINS.add(process.env.FRONTEND_ORIGIN.trim());
 }
-
-// Lista extra via env (se quiser vários separados por vírgula)
 if (process.env.CORS_EXTRA_ORIGINS) {
   process.env.CORS_EXTRA_ORIGINS
     .split(",")
@@ -146,18 +148,16 @@ if (process.env.CORS_EXTRA_ORIGINS) {
     .forEach((o) => EXPLICIT_ALLOWED_ORIGINS.add(o));
 }
 
-// Padrões aceitos (qualquer site do Netlify)
 const ALLOWED_ORIGIN_PATTERNS = [
-  /^https:\/\/.*\.netlify\.app$/,                 // qualquer subdomínio do Netlify
-  /^http:\/\/localhost:(3000|5173)$/,             // dev local
+  /^https:\/\/.*\.netlify\.app$/,
+  /^http:\/\/localhost:(3000|5173)$/,
 ];
 
-// Modo “abrir tudo” (use só para teste rápido): CORS_ALLOW_ALL=1
 const CORS_ALLOW_ALL = String(process.env.CORS_ALLOW_ALL || "") === "1";
 
 function isOriginAllowed(origin) {
-  if (!origin) return true;                 // chamadas server-side/curl
-  if (CORS_ALLOW_ALL) return true;          // modo aberto temporário
+  if (!origin) return true;
+  if (CORS_ALLOW_ALL) return true;
   if (EXPLICIT_ALLOWED_ORIGINS.has(origin)) return true;
   return ALLOWED_ORIGIN_PATTERNS.some((rx) => rx.test(origin));
 }
@@ -173,8 +173,10 @@ app.use((req, res, next) => {
   res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Credentials", "true");
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  // Inclua os headers que o front envia:
-  res.header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key, Authorization, Accept");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, X-Admin-Key, Authorization, Accept, X-Requested-With"
+  );
   res.header("Access-Control-Max-Age", "600");
   return res.sendStatus(204);
 });
@@ -185,18 +187,14 @@ app.use(
     origin: (origin, cb) => (isOriginAllowed(origin) ? cb(null, true) : cb(new Error("CORS block"))),
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    // Header names são case-insensitive, mas deixe como usa no front:
-    allowedHeaders: ["Content-Type", "X-Admin-Key", "Authorization", "Accept"],
+    allowedHeaders: ["Content-Type", "X-Admin-Key", "Authorization", "Accept", "X-Requested-With"],
   })
 );
-
 
 // Body parser
 app.use(express.json({ limit: "25mb" }));
 
 // ------------------------------ ROTAS MODULARES ------------------------------
-// Importantes: a rota de ping do parceiro (GET /api/parceiro/_ping) está definida
-// dentro de parceiro.routes.js. Ao montar abaixo, ela passa a responder corretamente.
 app.use("/api/parceiro", parceiroRoutes);
 app.use("/api/rag", ragRoutes);
 app.use("/api/financeiro", financeiroRoutes);
@@ -205,11 +203,7 @@ app.use("/api/uploads", uploadsRoutes);
 // ------------------------------ HEALTHCHECKS --------------------------------
 app.get("/", (_req, res) => res.status(200).send("BEPIT backend ativo ✅"));
 app.get("/ping", (_req, res) => res.status(200).json({ pong: true, ts: Date.now() }));
-
-// Health global do app principal (porta 3002)
-app.get("/_ping", (_req, res) =>
-  res.json({ ok: true, app: "app", now: new Date().toISOString() })
-);
+app.get("/_ping", (_req, res) => res.json({ ok: true, app: "app", now: new Date().toISOString() }));
 
 // ============================== IA (Gemini REST) =============================
 const usarGeminiREST = String(process.env.USE_GEMINI_REST || "") === "1";
@@ -221,15 +215,11 @@ function stripModelsPrefix(id) {
 }
 async function listarModelosREST() {
   if (!chaveGemini) throw new Error("[GEMINI REST] GEMINI_API_KEY não definida.");
-  const url = `https://generativelanguage.googleapis.com/v1/models?key=${encodeURIComponent(
-    chaveGemini
-  )}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models?key=${encodeURIComponent(chaveGemini)}`;
   const resp = await fetch(url, { method: "GET" });
   if (!resp.ok) {
     const texto = await resp.text().catch(() => "");
-    throw new Error(
-      `[GEMINI REST] Falha ao listar modelos: ${resp.status} ${resp.statusText} ${texto}`
-    );
+    throw new Error(`[GEMINI REST] Falha ao listar modelos: ${resp.status} ${resp.statusText} ${texto}`);
   }
   const json = await resp.json();
   const items = Array.isArray(json.models) ? json.models : [];
@@ -242,9 +232,7 @@ async function selecionarModeloREST() {
   if (envModelo) {
     const alvo = stripModelsPrefix(envModelo);
     if (disponiveis.includes(alvo)) return alvo;
-    console.warn(
-      `[GEMINI REST] GEMINI_MODEL "${envModelo}" indisponível. Disponíveis: ${disponiveis.join(", ")}`
-    );
+    console.warn(`[GEMINI REST] GEMINI_MODEL "${envModelo}" indisponível. Disponíveis: ${disponiveis.join(", ")}`);
   }
   const preferencia = [
     envModelo && stripModelsPrefix(envModelo),
@@ -270,15 +258,11 @@ async function gerarConteudoComREST(modelo, texto) {
   });
   if (!resp.ok) {
     const texto = await resp.text().catch(() => "");
-    throw new Error(
-      `[GEMINI REST] Falha no generateContent: ${resp.status} ${resp.statusText} ${texto}`
-    );
+    throw new Error(`[GEMINI REST] Falha no generateContent: ${resp.status} ${resp.statusText} ${texto}`);
   }
   const json = await resp.json();
   const parts = json?.candidates?.[0]?.content?.parts;
-  const out = Array.isArray(parts)
-    ? parts.map((p) => p?.text || "").join("\n").trim()
-    : "";
+  const out = Array.isArray(parts) ? parts.map((p) => p?.text || "").join("\n").trim() : "";
   return out || "";
 }
 let modeloGeminiV1 = null;
@@ -377,7 +361,7 @@ function historicoParaTextoSimplesWrapper(hc) {
 // ======================= FUNÇÃO CENTRAL — ATUALIZA E RESPONDE ===============
 async function updateSessionAndRespond({
   res,
-  runId, // opcional para logs
+  runId,
   conversationId,
   userText,
   aiResponseText,
@@ -399,13 +383,10 @@ async function updateSessionAndRespond({
 
   const novaSessionData = { ...(sessionData || {}), history: novoHistorico };
 
-  // Cache curto na Upstash (15 minutos)
   const TTL_SECONDS = 900;
   if (hasUpstash()) {
     try {
-      console.log(`[RUN ${_run}] [CACHE] SET com timeout curto...`);
       await upstash.set(conversationId, JSON.stringify(novaSessionData), TTL_SECONDS, { timeoutMs: 400 });
-      console.log(`[RUN ${_run}] [CACHE] Sessão salva com sucesso.`);
     } catch (e) {
       console.error(`[RUN ${_run}] [CACHE] Falha ao salvar sessão:`, e?.message || e);
     }
@@ -437,8 +418,6 @@ async function ensureConversation(req) {
   const body = req.body || {};
   let conversationId = body.conversationId || body.threadId || body.sessionId || null;
 
-  console.log("[RAIO-X PONTO 2.1] ensureConversation iniciado.");
-
   if (!conversationId || typeof conversationId !== "string" || conversationId.trim().length < 10) {
     conversationId = randomUUID();
     try {
@@ -467,18 +446,13 @@ async function ensureConversation(req) {
     }
   }
 
-  console.log("[RAIO-X PONTO 2.2] Conversa garantida no Supabase. Checando 1º turno...");
-
   let isFirstTurn = false;
 
   if (hasUpstash()) {
     try {
-      console.log("[RAIO-X PONTO 2.3] EXISTS no cache (timeout curto)...");
       const exists = await upstash.exists(conversationId, { timeoutMs: 400 });
       isFirstTurn = !exists;
-      console.log(`[RAIO-X PONTO 2.3] EXISTS concluído. sessionExists=${exists}`);
-    } catch (e) {
-      console.warn("[RAIO-X PONTO 2.3] Falha no cache EXISTS. Fallback Supabase.", e?.message || e);
+    } catch {
       try {
         const { count } = await supabase
           .from("interacoes")
@@ -490,7 +464,6 @@ async function ensureConversation(req) {
       }
     }
   } else {
-    console.warn("[RAIO-X PONTO 2.3] Cache não configurado. Usando Supabase para checar 1º turno.");
     try {
       const { count } = await supabase
         .from("interacoes")
@@ -501,10 +474,6 @@ async function ensureConversation(req) {
       isFirstTurn = false;
     }
   }
-
-  console.log(
-    `[RAIO-X PONTO 2.4] ensureConversation concluído. conversationId=${conversationId}, isFirstTurn=${isFirstTurn}`
-  );
 
   req.ctx = Object.assign({}, req.ctx || {}, { conversationId, isFirstTurn });
   return { conversationId, isFirstTurn };
@@ -520,45 +489,23 @@ function isSaudacao(texto) {
   return saudacoes.includes(t);
 }
 function isWeatherQuestion(texto) {
+  // Não deixa clima sequestrar quando houver intenção clara de parceiros
+  if (forcarBuscaParceiro(texto)) return false;
   const t = normalizar(texto);
   const termos = [
-    "clima",
-    "tempo",
-    "previsao",
-    "previsão",
-    "vento",
-    "mar",
-    "marea",
-    "maré",
-    "ondas",
-    "onda",
-    "temperatura",
-    "graus",
-    "calor",
-    "frio",
-    "chovendo",
-    "chuva",
-    "sol",
-    "ensolarado",
-    "nublado",
+    "clima","tempo","previsao","previsão","vento","mar","marea","maré","ondas","onda","temperatura",
+    "graus","calor","frio","chovendo","chuva","sol","ensolarado","nublado"
   ];
+  return termos.some((k) => t.includes(k));
+}
+function isRouteQuestion(texto) {
+  const t = normalizar(texto);
+  const termos = ["como chegar", "rota", "ir de", "saindo de", "qual caminho", "trajeto", "direcao", "direção"];
   return termos.some((k) => t.includes(k));
 }
 function detectTemporalWindow(texto) {
   const t = normalizar(texto);
-  const sinaisFuturo = [
-    "amanha",
-    "amanhã",
-    "semana que vem",
-    "proxima semana",
-    "próxima semana",
-    "sabado",
-    "sábado",
-    "domingo",
-    "proximos dias",
-    "próximos dias",
-    "daqui a",
-  ];
+  const sinaisFuturo = ["amanha","amanhã","semana que vem","proxima semana","próxima semana","sabado","sábado","domingo","proximos dias","próximos dias","daqui a"];
   return sinaisFuturo.some((s) => t.includes(s)) ? "future" : "present";
 }
 function extractCity(texto, cidadesAtivas) {
@@ -576,7 +523,6 @@ function extractCity(texto, cidadesAtivas) {
     { key: "sao pedro", nome: "São Pedro da Aldeia" },
     { key: "são pedro", nome: "São Pedro da Aldeia" },
     { key: "iguaba", nome: "Iguaba Grande" },
-    { key: "Iguaba", nome: "Iguaba Grande" },
     { key: "iguabinha", nome: "Iguaba Grande" },
   ];
   const hitApelido = apelidos.find((a) => t.includes(a.key));
@@ -585,64 +531,44 @@ function extractCity(texto, cidadesAtivas) {
     if (alvo) return alvo;
   }
   for (const c of lista) {
-    if (t.includes(normalizar(c.nome)) || t.includes(normalizar(c.slug))) {
-      return c;
-    }
+    if (t.includes(normalizar(c.nome)) || t.includes(normalizar(c.slug))) return c;
   }
   return null;
 }
 function isRegionQuery(texto) {
   const t = normalizar(texto);
-  const mencionaRegiao =
-    t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
+  const mencionaRegiao = t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
   return mencionaRegiao;
 }
 
-// -------------------------- PROMPT MESTRE v1.3 ------------------------------
-const PROMPT_MESTRE_V13 = `
-# 1. IDENTIDADE E MISSÃO
-- Você é o BEPIT, um concierge de turismo especialista e confiável na Região dos Lagos.
-- Sua missão é fornecer informações precisas baseadas EXCLUSIVAMENTE nos dados fornecidos. Você NUNCA usa conhecimento externo.
-# 2. DIRETRIZES GERAIS
-- Seja proativo, amigável e honesto.
-- Priorize sempre os parceiros cadastrados.
-- **REGRA DE ETIQUETA:** Se a conversa já começou (ou seja, se não for a primeira mensagem), NUNCA inicie sua resposta com "Olá!", "Seja bem-vindo" ou qualquer outra saudação.
-Vá direto ao ponto ou use uma transição curta como "Claro," ou "Entendido,".
-# 3. MÓDULO DE RACIOCÍNIO: CONCIERGE DE CLIMA, MARÉS E ATIVIDADES CONTEXTUAIS
-- Sua função é ser um "conselheiro" para o turista, conectando dados brutos a atividades práticas e contextuais.
-- **REGRA DE OURO DE CONTEXTO:** Você DEVE usar a "HORA ATUAL" fornecida para dar sugestões apropriadas.
-- **SE FOR DE MANHÃ (até 10:00):**
-    - Se \`ondas\` e \`vento\` estiverem baixos, sua sugestão principal deve ser um **passeio de barco**.
-Ex: "O dia está simplesmente perfeito para um passeio de barco agora pela manhã!"
-- **SE FOR "MEIO DO DIA" (das 10:01 às 14:00):**
-    - Se \`ondas\` e \`vento\` estiverem baixos, você ainda pode sugerir passeio de barco, mas com um tom de "última chamada".
-Ex: "O tempo está ótimo para um passeio de barco! Se você ainda conseguir uma vaga em alguma embarcação, vale muito a pena!"
-- Se as condições do mar **não** estiverem boas para barco, sua sugestão alternativa deve ser o **Shopping Park Lagos**.
-Ex: "O mar está um pouco agitado para passeios agora, mas é uma ótima oportunidade para conhecer o Shopping Park Lagos em Cabo Frio."
-- **SE FOR DE TARDE (das 14:01 às 17:00):**
-    - **NUNCA MAIS** sugira passeio de barco.
-- Se o tempo estiver bom (sol/sem chuva), sua sugestão principal deve ser **curtir uma praia**.
-Ex: "A tarde está linda e o sol ainda está forte, perfeito para aproveitar a praia!"
-- **SE FOR FIM DE TARDE / NOITE (a partir das 17:01):**
-    - **NUNCA** sugira atividades de praia ou barco como algo a se fazer "agora".
-- Use a temperatura para contextualizar sugestões noturnas.
-    - **EXEMPLO DE SUGESTÃO NOTURNA:** "A noite em Búzios está muito agradável, com cerca de 26°C. É uma temperatura perfeita para uma caminhada pela Rua das Pedras ou para explorar o polo gastronômico do bairro da Passagem em Cabo Frio."
-- Você pode, opcionalmente, mencionar como o dia esteve: "O mar esteve ótimo para mergulho hoje..." mas a sua sugestão de ação deve ser para a noite.
-- **REGRAS ADICIONAIS (qualquer horário):**
-    - Se a \`temperatura da água\` estiver agradável (>22°C), mencione que "o mar está ótimo para um mergulho".
-- Se o \`vento\` estiver moderado/alto (>5 m/s), mencione que "as condições estão favoráveis para esportes a vela, como windsurf ou kitesurf".
-- Se houver dados de maré, informe os horários e a dica sobre a pesca.
-- **Regra para Resumo da Região:** Se você receber uma lista de dados climáticos para múltiplas cidades, sua tarefa é criar um resumo comparativo e conciso para o usuário.
-Comece com uma frase como "O tempo na Região dos Lagos está variado hoje!".
-Em seguida, resuma a condição de cada cidade. Ex: "Em Cabo Frio, o céu está com poucas nuvens e 25°C. Já em Búzios, está ensolarado com 26°C..."
-- **Regra de honestidade futuro:** Se você não receber dados de \`previsao_diaria\` ao ser perguntado sobre o futuro, sua resposta deve ser: "Ainda não tenho os dados consolidados para a previsão futura. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde."
-# 4. DADOS CONTEXTUAIS (serão injetados abaixo)
-- HORA ATUAL (São Paulo): [[HORA_ATUAL]]
-- REGIÃO ATUAL: [[REGIAO]]
-- [DADOS CLIMA / MARÉS / ÁGUA]: 
-[[DADOS_JSON]]
-# 5. TAREFA FINAL
-Com base nas regras e nos dados fornecidos, formule a melhor e mais útil resposta.
+// -------------------------- PROMPT MESTRE (regras novas) --------------------
+const PROMPT_MESTRE_V14 = `
+# IDENTIDADE
+Você é o **BEPIT**, concierge de turismo na Região dos Lagos (RJ).
+Fala de forma humana, direta e útil. Não floreie, não alucine.
+
+# FONTES E LIMITES
+- Sempre priorize **dados internos** (Supabase: parceiros e dados_climaticos).
+- Nunca recomende serviços privados externos (pousadas, restaurantes, passeios etc.).
+- É permitido citar **serviços públicos externos** (bancos, 24h, farmácias, polícia, guarda municipal, capitania dos portos, hospitais, emergências, delegacias) — quando citar, diga que é “consulta pública”.
+- Nunca responda sobre temas fora do turismo local (futebol, política, piadas, assuntos aleatórios).
+
+# PARCEIROS (PRIORIDADE)
+- Sempre que houver intenção de consumo (comer, bar, passeio, hospedagem, transporte), **priorize parceiros internos**.
+- Ao listar, mostre nome, categoria e informações úteis (endereço, contato, faixa de preço, benefícios).
+- Fale como **“indicações confiáveis”** (não mencione “parceria”).
+
+# CLIMA, MARÉS, ÁGUA
+- Use **exclusivamente** a tabela interna \`dados_climaticos\`.
+- Se faltar o tipo pedido (ex.: previsão futura), diga honestamente que ainda não há dados consolidados.
+- Contextualize com a hora local (São Paulo) para sugerir atividades adequadas (sem inventar).
+
+# ROTAS HUMANAS (SEM MAPS)
+- Quando pedirem “como chegar”, explique em **texto humano**, ponto-a-ponto, usando rodovias e referências locais (“saindo de Nova Iguaçu para Cabo Frio, vá pela Dutra, entre na Linha Vermelha...”), sem fornecer links.
+
+# ESTILO
+- Respostas curtas (1–2 parágrafos) + bullets quando útil.
+- Seja amigável e direto. Não inicie com saudação se não for o primeiro turno.
 `.trim();
 
 // ============================== LISTA VIP ===================================
@@ -701,67 +627,22 @@ function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
 // ============================== PARCEIROS ===================================
 const PALAVRAS_CHAVE = {
   comida: [
-    "restaurante",
-    "restaurantes",
-    "almoço",
-    "almoco",
-    "jantar",
-    "comer",
-    "comida",
-    "picanha",
-    "piconha",
-    "carne",
-    "churrasco",
-    "pizza",
-    "pizzaria",
-    "peixe",
-    "frutos do mar",
-    "moqueca",
-    "rodizio",
-    "rodízio",
-    "lanchonete",
-    "burger",
-    "hamburguer",
-    "hambúrguer",
-    "bistrô",
-    "bistro",
+    "restaurante","restaurantes","almoço","almoco","jantar","comer","comida",
+    "picanha","piconha","carne","churrasco","pizza","pizzaria","peixe","frutos do mar",
+    "moqueca","rodizio","rodízio","lanchonete","burger","hamburguer","hambúrguer","bistrô","bistro"
   ],
-  hospedagem: ["pousada", "pousadas", "hotel", "hotéis", "hospedagem", "hostel", "airbnb"],
-  bebidas: ["bar", "bares", "chopp", "chope", "drinks", "pub", "boteco"],
+  hospedagem: ["pousada","pousadas","hotel","hotéis","hospedagem","hostel","airbnb"],
+  bebidas: ["bar","bares","chopp","chope","drinks","pub","boteco"],
   passeios: [
-    "passeio",
-    "passeios",
-    "barco",
-    "lancha",
-    "escuna",
-    "trilha",
-    "trilhas",
-    "tour",
-    "buggy",
-    "quadriciclo",
-    "city tour",
-    "catamarã",
-    "catamara",
-    "mergulho",
-    "snorkel",
-    "gruta",
-    "ilha",
+    "passeio","passeios","barco","lancha","escuna","trilha","trilhas","tour","buggy",
+    "quadriciclo","city tour","catamarã","catamara","mergulho","snorkel","gruta","ilha"
   ],
-  praias: ["praia", "praias", "faixa de areia", "bandeira azul", "mar calmo", "mar forte"],
+  praias: ["praia","praias","faixa de areia","bandeira azul","mar calmo","mar forte"],
   transporte: [
-    "transfer",
-    "transporte",
-    "alugar carro",
-    "aluguel de carro",
-    "uber",
-    "taxi",
-    "ônibus",
-    "onibus",
-    "rodoviária",
-    "rodoviaria",
+    "transfer","transporte","alugar carro","aluguel de carro","uber","taxi","ônibus","onibus",
+    "rodoviária","rodoviaria"
   ],
 };
-
 function forcarBuscaParceiro(texto) {
   const t = normalizarTexto(texto);
   for (const lista of Object.values(PALAVRAS_CHAVE)) {
@@ -781,81 +662,32 @@ async function extrairEntidadesDaBusca(texto) {
   else if (tNorm.includes("iguaba")) city = "Iguaba Grande";
 
   const DIC_TERMS = [
-    "picanha",
-    "piconha",
-    "carne",
-    "churrasco",
-    "rodizio",
-    "rodízio",
-    "fraldinha",
-    "costela",
-    "barato",
-    "barata",
-    "familia",
-    "família",
-    "romantico",
-    "romântico",
-    "vista",
-    "vista para o mar",
-    "pizza",
-    "peixe",
-    "frutos do mar",
-    "moqueca",
-    "hamburguer",
-    "hambúrguer",
-    "sushi",
-    "japonesa",
-    "bistrô",
-    "bistro",
+    "picanha","piconha","carne","churrasco","rodizio","rodízio","fraldinha","costela","barato","barata",
+    "familia","família","romantico","romântico","vista","vista para o mar","pizza","peixe","frutos do mar",
+    "moqueca","hamburguer","hambúrguer","sushi","japonesa","bistrô","bistro"
   ];
   const terms = [];
   for (const w of DIC_TERMS) if (tNorm.includes(normalizarTexto(w))) terms.push(w);
 
   let category = null;
   if (
-    [
-      "restaurante",
-      "comer",
-      "comida",
-      "picanha",
-      "piconha",
-      "carne",
-      "churrasco",
-      "rodizio",
-      "rodízio",
-      "pizza",
-      "pizzaria",
-      "peixe",
-      "frutos do mar",
-      "hamburguer",
-      "hambúrguer",
-      "bistrô",
-      "bistro",
-      "sushi",
-      "japonesa",
-    ].some((k) => tNorm.includes(k))
+    ["restaurante","comer","comida","picanha","piconha","carne","churrasco","rodizio","rodízio","pizza","pizzaria","peixe","frutos do mar","hamburguer","hambúrguer","bistrô","bistro","sushi","japonesa"].some((k) => tNorm.includes(k))
   ) {
     category = "comida";
   } else if (
-    ["pousada", "hotel", "hostel", "hospedagem", "airbnb", "apart", "flat", "resort"].some((k) =>
-      tNorm.includes(k)
-    )
+    ["pousada","hotel","hostel","hospedagem","airbnb","apart","flat","resort"].some((k) => tNorm.includes(k))
   ) {
     category = "hospedagem";
-  } else if (["bar", "bares", "chopp", "chope", "drinks", "pub", "boteco"].some((k) => tNorm.includes(k))) {
+  } else if (["bar","bares","chopp","chope","drinks","pub","boteco"].some((k) => tNorm.includes(k))) {
     category = "bebidas";
   } else if (
-    ["passeio", "barco", "lancha", "escuna", "trilha", "buggy", "quadriciclo", "mergulho", "snorkel", "tour"].some(
-      (k) => tNorm.includes(k)
-    )
+    ["passeio","barco","lancha","escuna","trilha","buggy","quadriciclo","mergulho","snorkel","tour"].some((k) => tNorm.includes(k))
   ) {
     category = "passeios";
-  } else if (["praia", "praias", "bandeira azul", "orla"].some((k) => tNorm.includes(k))) {
+  } else if (["praia","praias","bandeira azul","orla"].some((k) => tNorm.includes(k))) {
     category = "praias";
   } else if (
-    ["transfer", "transporte", "aluguel de carro", "locadora", "uber", "taxi", "ônibus", "onibus"].some((k) =>
-      tNorm.includes(k)
-    )
+    ["transfer","transporte","aluguel de carro","locadora","uber","taxi","ônibus","onibus"].some((k) => tNorm.includes(k))
   ) {
     category = "transporte";
   }
@@ -879,17 +711,32 @@ async function searchPartnersRAG({ textoDoUsuario, cidadesAtivas, limit = 5 }) {
     cidade_id = alvo?.id || null;
   }
 
-  const results = await hybridSearch({
-    q: textoDoUsuario,
-    cidade_id,
-    categoria,
-    limit,
-    debug: false,
-  });
+  let results = [];
+  try {
+    const rag = await hybridSearch({
+      q: textoDoUsuario,
+      cidade_id,
+      categoria,
+      limit,
+      debug: false,
+    });
+    results = Array.isArray(rag?.items) ? rag.items : Array.isArray(rag) ? rag : [];
+  } catch (e) {
+    console.warn("[RAG] Falhou, caindo para fallback direto no Supabase:", e?.message || e);
+    try {
+      let query = supabase
+        .from("parceiros")
+        .select("id, tipo, nome, categoria, descricao, endereco, contato, beneficio_bepit, faixa_preco, fotos_parceiros, cidade_id")
+        .eq("ativo", true);
+      if (cidade_id) query = query.eq("cidade_id", cidade_id);
+      if (categoria) query = query.ilike("categoria", `%${categoria}%`);
+      if (textoDoUsuario) query = query.or(`nome.ilike.%${textoDoUsuario}%,descricao.ilike.%${textoDoUsuario}%`);
+      const { data: fb } = await query.limit(limit || 5);
+      results = Array.isArray(fb) ? fb : [];
+    } catch {}
+  }
 
-  const items = Array.isArray(results?.items) ? results.items : Array.isArray(results) ? results : [];
-
-  const parceiros = items.map((r) => ({
+  const parceiros = results.map((r) => ({
     id: r.id,
     tipo: r.tipo || null,
     nome: r.nome,
@@ -906,7 +753,7 @@ async function searchPartnersRAG({ textoDoUsuario, cidadesAtivas, limit = 5 }) {
   return { parceiros, entidades };
 }
 
-// ============================== BUSCA PARCEIROS (FERRAMENTA) ================
+// ============================== FERRAMENTA PARCEIROS =========================
 async function ferramentaBuscarParceirosOuDicas({
   cidadesAtivas,
   argumentosDaFerramenta,
@@ -918,12 +765,9 @@ async function ferramentaBuscarParceirosOuDicas({
   const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
 
   const textoN = normalizarTexto(textoOriginal || "");
-  const sinaisCarne = ["picanha", "piconha", "carne", "churrasco", "rodizio", "rodízio"].some((s) =>
-    textoN.includes(s)
-  );
+  const sinaisCarne = ["picanha", "piconha", "carne", "churrasco", "rodizio", "rodízio"].some((s) => textoN.includes(s));
   const sinaisVista = ["vista", "vista para o mar", "beira mar", "orla"].some((s) => textoN.includes(s));
 
-  // Resolve cidadeSlug (entrada humana) -> slug cadastrado
   const cidadesValidas = Array.isArray(cidadesAtivas) ? cidadesAtivas : [];
   let cidadeSlug = "";
   if (cidadeProcurada) {
@@ -936,7 +780,6 @@ async function ferramentaBuscarParceirosOuDicas({
   }
   if (!cidadeSlug && cidadesValidas.length > 0) cidadeSlug = cidadesValidas[0].slug;
 
-  // Slug -> UUID (para filtrar na RAG)
   let cidadeUUID = null;
   if (cidadeSlug) {
     const alvo = (cidadesAtivas || []).find((c) => {
@@ -948,57 +791,17 @@ async function ferramentaBuscarParceirosOuDicas({
   }
 
   const MAPA_CESTA_PARA_CATEGORIAS_DB = {
-    comida: [
-      "churrascaria",
-      "restaurante",
-      "pizzaria",
-      "lanchonete",
-      "frutos do mar",
-      "sushi",
-      "padaria",
-      "cafeteria",
-      "bistrô",
-      "bistro",
-      "hamburgueria",
-      "pizza",
-    ],
-    bebidas: ["bar", "pub", "cervejaria", "wine bar", "balada", "boteco"],
-    passeios: [
-      "passeio",
-      "barco",
-      "lancha",
-      "escuna",
-      "trilha",
-      "buggy",
-      "quadriciclo",
-      "city tour",
-      "catamarã",
-      "catamara",
-      "mergulho",
-      "snorkel",
-      "gruta",
-      "ilha",
-      "tour",
-    ],
-    praias: ["praia", "praias", "bandeira azul", "orla"],
-    hospedagem: ["pousada", "hotel", "hostel", "apart", "flat", "resort", "hospedagem"],
-    transporte: [
-      "transfer",
-      "transporte",
-      "aluguel de carro",
-      "locadora",
-      "taxi",
-      "ônibus",
-      "onibus",
-      "rodoviária",
-      "rodoviaria",
-    ],
+    comida: ["churrascaria","restaurante","pizzaria","lanchonete","frutos do mar","sushi","padaria","cafeteria","bistrô","bistro","hamburgueria","pizza"],
+    bebidas: ["bar","pub","cervejaria","wine bar","balada","boteco"],
+    passeios: ["passeio","barco","lancha","escuna","trilha","buggy","quadriciclo","city tour","catamarã","catamara","mergulho","snorkel","gruta","ilha","tour"],
+    praias: ["praia","praias","bandeira azul","orla"],
+    hospedagem: ["pousada","hotel","hostel","apart","flat","resort","hospedagem"],
+    transporte: ["transfer","transporte","aluguel de carro","locadora","taxi","ônibus","onibus","rodoviária","rodoviaria"],
   };
 
   let categoriasAProcurar = [];
   if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
 
-  // Cesta "comida"
   if (categoriaProcurada === "comida" || (!categoriaProcurada && MAPA_CESTA_PARA_CATEGORIAS_DB.comida)) {
     if (sinaisCarne) {
       categoriasAProcurar = ["churrascaria", "restaurante"];
@@ -1011,35 +814,15 @@ async function ferramentaBuscarParceirosOuDicas({
     }
   }
 
-  // Outras cestas direcionadas
-  if (
-    categoriasAProcurar.length === 0 &&
-    categoriaProcurada &&
-    MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada]
-  ) {
+  if (categoriasAProcurar.length === 0 && categoriaProcurada && MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada]) {
     categoriasAProcurar = MAPA_CESTA_PARA_CATEGORIAS_DB[categoriaProcurada].map(normalizarTexto);
   }
 
-  // Termo de busca (refino opcional)
   let termoDeBusca = null;
   if (sinaisCarne) termoDeBusca = "picanha";
   else if (sinaisVista) termoDeBusca = "vista";
   else {
-    const termosConhecidos = [
-      "pizza",
-      "peixe",
-      "rodizio",
-      "frutos do mar",
-      "moqueca",
-      "hamburguer",
-      "sushi",
-      "bistrô",
-      "bistro",
-      "barato",
-      "família",
-      "romântico",
-      "vista",
-    ];
+    const termosConhecidos = ["pizza","peixe","rodizio","frutos do mar","moqueca","hamburguer","sushi","bistrô","bistro","barato","família","romântico","vista"];
     const achou = termosConhecidos.find((k) => textoN.includes(normalizarTexto(k)));
     if (achou) termoDeBusca = achou;
   }
@@ -1050,12 +833,9 @@ async function ferramentaBuscarParceirosOuDicas({
   const alvoInicialFix = 3;
   const alvoRefinoFix = 5;
 
-  // Helper: query adequada por categoria
   function buildQueryForCategory(cat, termo) {
     if (termo && termo.trim()) return termo.trim();
-
     const map = {
-      // comida
       restaurante: "restaurante comida",
       pizzaria: "pizza pizzaria",
       churrascaria: "churrasco picanha",
@@ -1067,16 +847,12 @@ async function ferramentaBuscarParceirosOuDicas({
       bistrô: "bistrô",
       bistro: "bistrô",
       hamburgueria: "hambúrguer burger",
-
-      // bebidas
       bar: "bar pub drinks",
       pub: "pub bar",
       cervejaria: "cervejaria chopp",
       "wine bar": "vinho wine bar",
       balada: "balada noite",
       boteco: "boteco",
-
-      // passeios
       passeio: "passeio",
       barco: "passeio de barco escuna lancha",
       lancha: "lancha passeio",
@@ -1092,18 +868,12 @@ async function ferramentaBuscarParceirosOuDicas({
       gruta: "gruta",
       ilha: "ilha",
       tour: "tour",
-
-      // praias
       praia: "praia",
       praias: "praia",
-
-      // hospedagem
       pousada: "pousada hospedagem",
       hotel: "hotel hospedagem",
       hostel: "hostel hospedagem",
       resort: "resort hospedagem",
-
-      // transporte
       transfer: "transfer transporte",
       transporte: "transporte",
       "aluguel de carro": "aluguel de carro locadora",
@@ -1114,41 +884,43 @@ async function ferramentaBuscarParceirosOuDicas({
       rodoviária: "rodoviária",
       rodoviaria: "rodoviária",
     };
-
     const chave = cat && typeof cat.toLowerCase === "function" ? cat.toLowerCase() : cat;
     return map[chave] || cat || "parceiro";
   }
 
-  // Loop por categoria → chama RAG e agrega resultados
   for (const cat of categoriasAProcurar) {
     const q = buildQueryForCategory(cat, termoDeBusca);
 
-    const items = await hybridSearch({
-      q,
-      cidade_id: cidadeUUID,
-      categoria: cat,
-      limit: isInitialSearch ? 3 : 5,
-      debug: false,
-    });
+    let items = [];
+    try {
+      const ragItems = await hybridSearch({
+        q,
+        cidade_id: cidadeUUID,
+        categoria: cat,
+        limit: isInitialSearch ? 3 : 5,
+        debug: false,
+      });
+      items = Array.isArray(ragItems) ? ragItems : [];
+    } catch {
+      items = [];
+    }
 
-    if (Array.isArray(items)) {
-      for (const it of items) {
-        if (it && it.id && !vistos.has(it.id)) {
-          vistos.add(it.id);
-          agregados.push({
-            id: it.id,
-            tipo: it.tipo || null,
-            nome: it.nome,
-            categoria: it.categoria || null,
-            descricao: it.descricao || "",
-            endereco: it.endereco || null,
-            contato: it.contato || null,
-            beneficio_bepit: it.beneficio_bepit || null,
-            faixa_preco: it.faixa_preco || null,
-            fotos_parceiros: Array.isArray(it.fotos_parceiros) ? it.fotos_parceiros : [],
-            cidade_id: it.cidade_id || null,
-          });
-        }
+    for (const it of items) {
+      if (it && it.id && !vistos.has(it.id) && !excludeIds.includes(it.id)) {
+        vistos.add(it.id);
+        agregados.push({
+          id: it.id,
+          tipo: it.tipo || null,
+          nome: it.nome,
+          categoria: it.categoria || null,
+          descricao: it.descricao || "",
+          endereco: it.endereco || null,
+          contato: it.contato || null,
+          beneficio_bepit: it.beneficio_bepit || null,
+          faixa_preco: it.faixa_preco || null,
+          fotos_parceiros: Array.isArray(it.fotos_parceiros) ? it.fotos_parceiros : [],
+          cidade_id: it.cidade_id || null,
+        });
       }
     }
 
@@ -1156,7 +928,6 @@ async function ferramentaBuscarParceirosOuDicas({
     if (!isInitialSearch && agregados.length >= alvoRefinoFix) break;
   }
 
-  // Limitar e salvar analytics (não-bloqueante)
   const limiteFinal = isInitialSearch ? alvoInicialFix : alvoRefinoFix;
   const limitados = agregados.slice(0, limiteFinal);
 
@@ -1174,9 +945,7 @@ async function ferramentaBuscarParceirosOuDicas({
         cidadeSlug,
       },
     });
-  } catch {
-    // analytics não-bloqueante
-  }
+  } catch {}
 
   return {
     ok: true,
@@ -1197,84 +966,143 @@ async function ferramentaBuscarParceirosOuDicas({
   };
 }
 
-// ============================= NOVA BUSCA ORQUESTRADA ========================
-async function lidarComNovaBusca({
-  textoDoUsuario,
-  historicoGemini,
-  regiao,
-  cidadesAtivas,
-  idDaConversa,
-  isInitialSearch = true,
-  excludeIds = [],
-}) {
-  const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
-
-  const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
-    cidadesAtivas,
-    argumentosDaFerramenta: entidades,
-    textoOriginal: textoDoUsuario,
-    isInitialSearch,
-    excludeIds,
-  });
-
-  if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
-    const parceirosSugeridos = resultadoBusca.items || [];
-    const respostaModelo = await gerarRespostaDeListaParceiros(
-      textoDoUsuario,
-      historicoGemini,
-      parceirosSugeridos
-    );
-    const respostaFinal = finalizeAssistantResponse({
-      modelResponseText: respostaModelo,
-      foundPartnersList: parceirosSugeridos,
-      mode: "partners",
-    });
-    try {
-      await supabase
-        .from("conversas")
-        .update({
-          parceiros_sugeridos: parceirosSugeridos,
-          parceiro_em_foco: null,
-          topico_atual: entidades?.category || null,
-        })
-        .eq("id", idDaConversa);
-    } catch {
-      // segue
-    }
-    return { respostaFinal, parceirosSugeridos };
-  } else {
-    const respostaModelo = await gerarRespostaGeralPrompteada({
-      pergunta: textoDoUsuario,
-      historicoContents: historicoGemini,
-      regiaoNome: regiao?.nome,
-      dadosClimaOuMaresJSON: "{}",
-      horaLocalSP: getHoraLocalSP(),
-    });
-    const respostaFinal = finalizeAssistantResponse({
-      modelResponseText: respostaModelo,
-      foundPartnersList: [],
-      mode: "general",
-    });
-    return { respostaFinal, parceirosSugeridos: [] };
-  }
-}
-
-// ============================= FORMATADOR FINAL ==============================
+// ============================= FORMATADORES & IA =============================
 function finalizeAssistantResponse({ modelResponseText, foundPartnersList = [], mode = "general" }) {
   const txt = String(modelResponseText || "").trim();
   if (mode === "partners") {
-    return txt || "Aqui estão algumas opções de parceiros.";
+    return txt || "Aqui estão algumas **indicações confiáveis**.";
   }
   return txt || "Posso te ajudar com informações e indicações na Região dos Lagos.";
 }
 
+// Resposta humana para lista de parceiros (corrige ReferenceError)
+async function gerarRespostaDeListaParceiros(userText, historico, parceiros) {
+  if (!Array.isArray(parceiros) || parceiros.length === 0) {
+    return "Não encontrei parceiros adequados para o que você pediu. Quer tentar com outra categoria, cidade ou faixa de preço?";
+  }
+  const linhas = parceiros.slice(0, 8).map((p) => {
+    const desc = p.descricao ? ` · ${p.descricao}` : "";
+    const end = p.endereco ? ` • Endereço: ${p.endereco}` : "";
+    const contato = p.contato ? ` • Contato: ${p.contato}` : "";
+    const preco = p.faixa_preco ? ` • Faixa de preço: ${p.faixa_preco}` : "";
+    return `• **${p.nome}** · ${p.categoria || "parceiro"}${desc}${end}${contato}${preco}`;
+  });
+  return [
+    "Aqui vão algumas **indicações confiáveis**:",
+    ...linhas,
+    "",
+    "Se quiser, eu refino conforme seu estilo (família, casal, vista para o mar, orçamento, etc.). Pode me dizer o **número** ou o **nome** para ver mais detalhes.",
+  ].join("\n");
+}
+
+// Geração de rotas em texto humano (sem links)
+function gerarRotasHumanas(pergunta) {
+  // Heurística simples: detectar origem e destino por padrões comuns do usuário
+  // Exemplos: "saindo de nova iguaçu para cabo frio", "como chegar em búzios de rio de janeiro"
+  const t = normalizarTexto(pergunta);
+  let origem = null;
+  let destino = null;
+
+  // Padrões "saindo de X para Y"
+  const m1 = t.match(/saindo de ([^,]+?) para ([^,\.!?\n]+)/i);
+  if (m1) {
+    origem = m1[1]?.trim();
+    destino = m1[2]?.trim();
+  }
+
+  // Padrões "de X para Y"
+  if (!origem || !destino) {
+    const m2 = t.match(/de ([^,]+?) para ([^,\.!?\n]+)/i);
+    if (m2) {
+      origem = origem || m2[1]?.trim();
+      destino = destino || m2[2]?.trim();
+    }
+  }
+
+  // Padrão "como chegar em Y"
+  if (!destino) {
+    const m3 = t.match(/como chegar (em|para|até) ([^,\.!?\n]+)/i);
+    if (m3) destino = m3[2]?.trim();
+  }
+
+  // Defaults regionais amigáveis se nada claro
+  if (!origem) origem = "Rio de Janeiro";
+  if (!destino) destino = "Cabo Frio";
+
+  // Traçados comuns de referência (heurística, sem mapas)
+  const rotasConhecidas = [
+    {
+      alvo: "cabo frio",
+      texto: `Saindo de ${origem} para Cabo Frio: pegue a Via Dutra (BR-116) sentido Rio, entre na Linha Vermelha e siga para a Av. Brasil. Acesse a Ponte Rio–Niterói e, após cruzá-la, continue pela BR-101 até o acesso à Via Lagos (RJ-124). Siga a RJ-124 até a RJ-106/RJ-140 e entre rumo a Cabo Frio. Ao chegar, use a Av. América Central como referência para os principais bairros e praias.`,
+    },
+    {
+      alvo: "arraial do cabo",
+      texto: `Saindo de ${origem} para Arraial do Cabo: utilize o mesmo eixo Dutra → Linha Vermelha → Av. Brasil → Ponte Rio–Niterói. Continue pela BR-101 e entre na Via Lagos (RJ-124). Siga até a RJ-140, passando por São Pedro da Aldeia, e depois pegue o acesso para Arraial do Cabo. Ao entrar na cidade, a Av. Gov. Leonel de Moura Brizola te leva ao Centro e às praias principais (Praia dos Anjos, Pontal do Atalaia).`,
+    },
+    {
+      alvo: "armação dos búzios",
+      texto: `Saindo de ${origem} para Búzios: siga Dutra → Linha Vermelha → Av. Brasil → Ponte Rio–Niterói → BR-101. Acesse a Via Lagos (RJ-124) e prossiga até a RJ-106 (Amaral Peixoto) sentido Cabo Frio/Búzios. Entre na RJ-102 rumo a Búzios. Ao chegar, use a Av. José Bento Ribeiro Dantas como referência para circular entre os bairros e as praias.`,
+    },
+    {
+      alvo: "são pedro da aldeia",
+      texto: `Saindo de ${origem} para São Pedro da Aldeia: faça Dutra → Linha Vermelha → Av. Brasil → Ponte Rio–Niterói → BR-101. Acesse a Via Lagos (RJ-124) e siga até a RJ-140, entrando em São Pedro da Aldeia. A RJ-106 (Amaral Peixoto) cruza a cidade e conecta com Cabo Frio e Iguaba.`,
+    },
+    {
+      alvo: "iguaba grande",
+      texto: `Saindo de ${origem} para Iguaba Grande: utilize Dutra → Linha Vermelha → Av. Brasil → Ponte Rio–Niterói. Siga pela BR-101 e entre na Via Lagos (RJ-124) até a RJ-106 (Amaral Peixoto). Siga sentido Macaé e entre em Iguaba Grande. A Av. Paulino Pinto Pinheiro e a RJ-106 servem de eixos principais.`,
+    },
+  ];
+
+  const match = rotasConhecidas.find((r) => destino && normalizarTexto(destino).includes(r.alvo));
+  return match ? match.texto : `Rota sugerida saindo de ${origem} para ${destino}: use Dutra/BR-116 até o Rio, acesse Linha Vermelha → Av. Brasil → Ponte Rio–Niterói. Siga BR-101 e, conforme o destino na Região dos Lagos, pegue a Via Lagos (RJ-124) e depois as conexões RJ-106/RJ-140 ou RJ-102. Ao entrar na cidade, use as avenidas principais (como América Central em Cabo Frio ou José Bento Ribeiro Dantas em Búzios) para se orientar.`;
+}
+
+// Resposta geral neutra, humana, sem forçar clima (corrige ReferenceError)
+async function gerarRespostaGeralPrompteada({
+  pergunta,
+  historicoContents,
+  regiaoNome,
+  dadosClimaOuMaresJSON = "{}",
+  horaLocalSP,
+}) {
+  const deveExplicarRotas = isRouteQuestion(pergunta);
+  if (deveExplicarRotas) {
+    // Retorna rotas humanizadas direto (sem IA), garantindo zero alucinação
+    return gerarRotasHumanas(pergunta);
+  }
+
+  const promptNeutro = `
+${PROMPT_MESTRE_V14}
+
+Hora local: ${horaLocalSP}
+Região: ${regiaoNome}
+
+Dados contextuais (internos ou vazios):
+${dadosClimaOuMaresJSON}
+
+Histórico resumido:
+${historicoParaTextoSimplesWrapper(historicoContents)}
+
+Pergunta do usuário: "${pergunta}"
+
+Responda de forma direta, com 1–2 parágrafos no máximo. Se não houver dados internos suficientes, seja honesto. Quando mencionar serviços públicos externos, deixe claro que é "consulta pública". Não forneça links de mapas, explique o caminho em texto humano apenas quando for pedido.
+`.trim();
+
+  try {
+    return await geminiTry(promptNeutro);
+  } catch {
+    // fallback sem IA
+    return "Entendido. Posso te indicar opções e explicar como chegar em texto simples. Diga a cidade/bairro e o tipo de lugar que você procura.";
+  }
+}
+
 // ============================================================================
-// >>>>>>>>>>>>>>>>> ROTA DO CHAT - ORQUESTRADOR v6.0.4 (COM RAIO-X) <<<<<<<<<<
+// >>> ROTA DO CHAT - ORQUESTRADOR v6.2.1 (partners-first, rotas humanas) <<<<<
 // ============================================================================
 app.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
   try {
-    console.log(`[RUN ${runId}] [RAIO-X PONTO 1] Rota /chat iniciada.`);
+    console.log(`[RUN ${runId}] [PONTO 1] /chat iniciado.`);
 
     const { slugDaRegiao } = req.params;
     const userText = (req.body?.message || "").trim();
@@ -1299,54 +1127,78 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
       .eq("regiao_id", regiao.id)
       .eq("ativo", true);
     const cidadesAtivas = cidades || [];
-    console.log(`[RUN ${runId}] [RAIO-X PONTO 2] Contexto de região e cidades carregado.`);
 
     const { conversationId, isFirstTurn } = await ensureConversation(req);
-
-    console.log(
-      `[RUN ${runId}] [RAIO-X PONTO 3] Sessão garantida. ID: ${conversationId}, É o primeiro turno: ${isFirstTurn}`
-    );
 
     // Recupera histórico curto do cache (se houver)
     let sessionData = { history: [], entities: {} };
     try {
       if (hasUpstash() && !isFirstTurn) {
-        console.log(`[RUN ${runId}] [RAIO-X PONTO 4] Tentando ler do cache Upstash (timeout curto)...`);
         const cachedSession = await upstash.get(conversationId, { timeoutMs: 400 });
-        console.log(`[RUN ${runId}] [RAIO-X PONTO 5] Leitura do Upstash concluída.`);
-        if (cachedSession) {
-          sessionData = JSON.parse(cachedSession);
-          console.log(`[RUN ${runId}] [CACHE] Sessão recuperada do cache.`);
-        }
-      } else if (!hasUpstash()) {
-        console.warn(`[RUN ${runId}] [CACHE] Upstash não configurado. Pulando cache.`);
+        if (cachedSession) sessionData = JSON.parse(cachedSession);
       }
     } catch (e) {
-      console.error(`[RUN ${runId}] [CACHE] Falha ao LER sessão (operando sem memória):`, e?.message || e);
+      console.error(`[RUN ${runId}] [CACHE] Falha ao LER sessão:`, e?.message || e);
       sessionData = { history: [], entities: {} };
     }
 
     const historico = sessionData.history || [];
-    console.log(`[RUN ${runId}] [RAIO-X PONTO 6] Histórico de conversa preparado.`);
 
+    // Saudações
     if (isSaudacao(userText)) {
-      console.log(`[RUN ${runId}] [RAIO-X PONTO 7] Intenção de saudação detectada.`);
       const resposta = isFirstTurn
-        ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Minha missão é te conectar com os melhores e mais seguros parceiros da região. Como posso te ajudar a ter uma experiência incrível hoje?`
-        : "Oi! Como posso te ajudar agora?";
-
+        ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Como posso te ajudar a ter uma experiência incrível hoje?`
+        : "Claro, como posso te ajudar agora?";
       return await updateSessionAndRespond({
-        res,
-        runId,
-        conversationId,
-        userText,
-        aiResponseText: resposta,
-        sessionData,
-        regiaoId: regiao.id,
+        res, runId, conversationId, userText, aiResponseText: resposta, sessionData, regiaoId: regiao.id,
       });
     }
 
-    if (isWeatherQuestion(userText)) {
+    // 1) PARCEIROS PRIMEIRO (evita clima engolir intenção)
+    if (forcarBuscaParceiro(userText)) {
+      console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada — chamando hybridSearch...`);
+
+      const { parceiros, entidades } = await searchPartnersRAG({
+        textoDoUsuario: userText,
+        cidadesAtivas,
+        limit: 5,
+      });
+
+      if (parceiros.length > 0) {
+        const respostaModelo = await gerarRespostaDeListaParceiros(userText, historico, parceiros);
+        const respostaFinal = finalizeAssistantResponse({
+          modelResponseText: respostaModelo,
+          foundPartnersList: parceiros,
+          mode: "partners",
+        });
+
+        try {
+          await supabase
+            .from("conversas")
+            .update({
+              parceiros_sugeridos: parceiros,
+              parceiro_em_foco: null,
+              topico_atual: entidades?.category || null,
+            })
+            .eq("id", conversationId);
+        } catch {}
+
+        return await updateSessionAndRespond({
+          res,
+          runId,
+          conversationId,
+          userText,
+          aiResponseText: respostaFinal,
+          sessionData,
+          regiaoId: regiao.id,
+          partners: parceiros,
+        });
+      }
+      // Se não achou parceiros, segue fluxo para os demais módulos
+    }
+
+    // 2) CLIMA (só se NÃO for intenção de parceiros)
+    if (!forcarBuscaParceiro(userText) && isWeatherQuestion(userText)) {
       const when = detectTemporalWindow(userText);
       const tipoDadoAlvo = when === "future" ? "previsao_diaria" : "clima_atual";
       const cidadeAlvo = extractCity(userText, cidadesAtivas);
@@ -1409,11 +1261,23 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
           dados: dadosClimaticos,
         };
         const horaLocal = getHoraLocalSP();
-        const promptFinal = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocal)
-          .replace("[[REGIAO]]", regiao.nome)
-          .replace("[[DADOS_JSON]]", JSON.stringify(payload))}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
-          historico
-        )}\n[Pergunta do Usuário]: "${userText}"`;
+
+        const promptFinal = `
+${PROMPT_MESTRE_V14}
+
+# CONTEXTO CLIMA/MAR
+Hora local: ${horaLocal}
+Região: ${regiao.nome}
+DADOS (tabela interna dados_climaticos):
+${JSON.stringify(payload)}
+
+[Histórico]:
+${historicoParaTextoSimplesWrapper(historico)}
+
+[Pergunta]:
+"${userText}"
+`.trim();
+
         const respostaIA = await geminiTry(promptFinal);
 
         return await updateSessionAndRespond({
@@ -1427,7 +1291,7 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
         });
       } else {
         const fallback =
-          "Ainda não tenho os dados consolidados para esta previsão. Meu robô de coleta de dados trabalha constantemente para me atualizar. Por favor, tente novamente mais tarde.";
+          "Ainda não tenho os dados consolidados para esta previsão. Meu robô interno atualiza a base com frequência — tente novamente mais tarde.";
         return await updateSessionAndRespond({
           res,
           runId,
@@ -1440,97 +1304,37 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
       }
     }
 
-    // ===== NOVO: intenção de parceiros via RAG =====
-    if (forcarBuscaParceiro(userText)) {
-      console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada — chamando hybridSearch...`);
-
-      // 1) Busca via RAG (híbrido)
-      const { parceiros, entidades } = await searchPartnersRAG({
-        textoDoUsuario: userText,
-        cidadesAtivas,
-        limit: 5,
+    // 3) ROTAS HUMANAS (quando pedido explicitamente)
+    if (isRouteQuestion(userText)) {
+      const respostaRotas = gerarRotasHumanas(userText);
+      return await updateSessionAndRespond({
+        res,
+        runId,
+        conversationId,
+        userText,
+        aiResponseText: respostaRotas,
+        sessionData,
+        regiaoId: regiao.id,
       });
-
-      if (parceiros.length > 0) {
-        // 2) Gera lista amigável
-        const respostaModelo = await gerarRespostaDeListaParceiros(
-          userText,
-          historico,
-          parceiros
-        );
-
-        const respostaFinal = finalizeAssistantResponse({
-          modelResponseText: respostaModelo,
-          foundPartnersList: parceiros,
-          mode: "partners",
-        });
-
-        // 3) persiste “estado” da conversa
-        try {
-          await supabase
-            .from("conversas")
-            .update({
-              parceiros_sugeridos: parceiros,
-              parceiro_em_foco: null,
-              topico_atual: entidades?.category || null,
-            })
-            .eq("id", conversationId);
-        } catch {
-          // segue fluxo
-        }
-
-        return await updateSessionAndRespond({
-          res,
-          runId,
-          conversationId,
-          userText,
-          aiResponseText: respostaFinal,
-          sessionData,
-          regiaoId: regiao.id,
-          partners: parceiros,
-        });
-      } else {
-        console.log(`[RUN ${runId}] [RAG] Nenhum parceiro encontrado — caindo para resposta geral.`);
-
-        // fallback: resposta geral (sem parceiros)
-        const respostaModelo = await gerarRespostaGeralPrompteada({
-          pergunta: userText,
-          historicoContents: historico,
-          regiaoNome: regiao?.nome,
-          dadosClimaOuMaresJSON: "{}",
-          horaLocalSP: getHoraLocalSP(),
-        });
-
-        const respostaFinal = finalizeAssistantResponse({
-          modelResponseText: respostaModelo,
-          foundPartnersList: [],
-          mode: "general",
-        });
-
-        return await updateSessionAndRespond({
-          res,
-          runId,
-          conversationId,
-          userText,
-          aiResponseText: respostaFinal,
-          sessionData,
-          regiaoId: regiao.id,
-          partners: [], // <- corrigido (não usa variável inexistente)
-        });
-      }
     }
 
-    console.log(`[RUN ${runId}] [RAIO-X PONTO 8] Roteado para Fallback Geral.`);
+    // 4) FALLBACK GERAL (neutro, humano, com prompt mestre)
     const horaLocalSP = getHoraLocalSP();
-    const promptGeral = `${PROMPT_MESTRE_V13.replace("[[HORA_ATUAL]]", horaLocalSP)
-      .replace("[[REGIAO]]", regiao.nome)
-      .replace("[[DADOS_JSON]]", "{}")}\n\n[Histórico de Conversa]:\n${historicoParaTextoSimplesWrapper(
-      historico
-    )}\n[Pergunta do Usuário]: "${userText}"`;
+    const promptGeral = `
+${PROMPT_MESTRE_V14}
 
-    console.log(`[RUN ${runId}] [RAIO-X PONTO 9] Tentando chamar a IA Gemini...`);
+Hora local: ${horaLocalSP}
+Região: ${regiao.nome}
+Dados internos: {}
+
+[Histórico]:
+${historicoParaTextoSimplesWrapper(historico)}
+
+[Pergunta]:
+"${userText}"
+`.trim();
+
     const respostaGeral = await geminiTry(promptGeral);
-    console.log(`[RUN ${runId}] [RAIO-X PONTO 10] Resposta da IA Gemini recebida.`);
 
     return await updateSessionAndRespond({
       res,
@@ -1544,8 +1348,7 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
   } catch (erro) {
     console.error(`[RUN ${runId}] ERRO FATAL NA ROTA:`, erro);
     return res.status(500).json({
-      reply:
-        "Ops, encontrei um problema temporário. Por favor, tente sua pergunta novamente em um instante.",
+      reply: "Ops, encontrei um problema temporário. Por favor, tente sua pergunta novamente em um instante.",
     });
   }
 });
@@ -1619,10 +1422,66 @@ app
     process.exit(1);
   });
 
-// Encerramento gracioso
 process.on("SIGTERM", () => {
   console.log("[SHUTDOWN] Recebido SIGTERM. Encerrando...");
   process.exit(0);
 });
 
 export default app;
+
+// ============================================================================
+// ====================== TREINO/VALIDAÇÃO — 50 Q&As ==========================
+// Uso: material de referência para afinar respostas. NÃO usado em runtime.
+// ============================================================================
+export const TRAINING_QA = [
+  { q: "Quero 5 restaurantes em Cabo Frio com picanha", a: "Aqui vão algumas indicações confiáveis em Cabo Frio com foco em picanha: (listar parceiros internos). Posso refinar por orçamento ou bairro se preferir." },
+  { q: "Sugere um bar com música ao vivo em Búzios?", a: "Tenho estas indicações confiáveis em Búzios: (listar parceiros internos). Se quiser um clima mais tranquilo, posso sugerir outras opções." },
+  { q: "Onde jantar com vista para o mar em Arraial do Cabo?", a: "Estas são indicações confiáveis com vista: (listar parceiros internos). Quer uma faixa de preço específica?" },
+  { q: "Quero uma pizzaria barata em São Pedro da Aldeia", a: "Indicações confiáveis com boa relação custo-benefício: (listar parceiros internos). Posso filtrar por bairro." },
+  { q: "Passeio de barco em Arraial hoje está bom?", a: "Consultando dados internos de clima e mar. Se o mar estiver calmo e o vento baixo pela manhã, vale o passeio. Caso contrário, recomendo atividades em terra. (Resumo curto usando dados de dados_climaticos)." },
+  { q: "Como está o clima agora em Cabo Frio?", a: "Dados internos mostram as condições atuais. (Condição + temperatura). Posso sugerir atividades adequadas para este horário." },
+  { q: "Vai chover em Búzios amanhã?", a: "Verifico a previsão diária em dados internos. Se a previsão não estiver consolidada, aviso com honestidade." },
+  { q: "Temperatura da água em Arraial está boa para mergulho?", a: "Uso dados internos de temperatura da água. Se estiver acima de ~22°C, digo que está agradável para mergulho." },
+  { q: "Quero hamburgueria em Cabo Frio", a: "Indicações confiáveis: (listar parceiros internos). Posso priorizar opções com ambiente familiar ou delivery." },
+  { q: "Restaurantes para família em Búzios", a: "Sugestões confiáveis para ir com família: (listar parceiros). Quer com área kids?" },
+  { q: "Onde tomar café da manhã em Arraial?", a: "Estas são opções confiáveis: (padarias/cafeterias parceiras). Posso ordenar por proximidade do Centro." },
+  { q: "Melhor churrascaria em São Pedro da Aldeia", a: "Indicações confiáveis: (listar parceiros). Quer rodízio ou a la carte?" },
+  { q: "Onde encontro peixe fresco para almoço em Cabo Frio?", a: "Indicações confiáveis com foco em frutos do mar: (listar parceiros). Posso sugerir pratos assinatura." },
+  { q: "Passeios ao pôr do sol em Búzios", a: "Para o fim de tarde/noite, recomendo atividades em terra e polos gastronômicos. (Jamais sugira barco à noite)." },
+  { q: "Quero bar para ver o jogo", a: "Posso indicar bares parceiros com TVs, sem citar futebol em detalhes. (Listar parceiros)."},
+  { q: "Qual a melhor praia hoje?", a: "Com base nos dados internos de vento/ondas, indico praia mais protegida. Se o mar estiver agitado, sugiro alternativas em terra." },
+  { q: "Como chegar em Cabo Frio saindo de Nova Iguaçu?", a: "Rota humana: Dutra → Linha Vermelha → Av. Brasil → Ponte Rio–Niterói → BR-101 → Via Lagos (RJ-124) → RJ-106/RJ-140 até Cabo Frio." },
+  { q: "Como ir de Búzios para Arraial do Cabo?", a: "Use RJ-102/RJ-106 até Cabo Frio e siga a RJ-140 em direção a Arraial. Ao chegar, use Av. Gov. Leonel Brizola para acessar as praias." },
+  { q: "Tem caixa 24 horas perto do Centro de Cabo Frio?", a: "Posso indicar serviços públicos bancários por consulta pública. (Informar de forma genérica, sem nomes privados específicos)." },
+  { q: "Farmácia 24h em Búzios", a: "Posso orientar serviços públicos de saúde/farmácia por consulta pública. Procure as vias principais (ex.: José Bento Ribeiro Dantas) para encontrar as unidades listadas publicamente." },
+  { q: "Polícia/Guarda Municipal em Arraial", a: "Indico contatos/ofícios públicos por consulta pública (sem nomes privados). Posso orientar esquema de plantão e localizações gerais." },
+  { q: "Capitania dos Portos mais próxima", a: "Indicação pública: Capitania dos Portos (consulta pública). Posso dar orientações gerais de acesso." },
+  { q: "Hospital de referência em Cabo Frio", a: "Serviço público: Hospital municipal/regional (consulta pública). Siga pela Av. América Central e vias sinalizadas." },
+  { q: "Emergência médica em Búzios", a: "Procure UPA/serviço de emergência público (consulta pública). Oriente-se pela via principal." },
+  { q: "Delegacia em Arraial do Cabo", a: "Indicação pública (consulta pública). Posso orientar trajeto humano até lá." },
+  { q: "Onde fica o Shopping Park Lagos?", a: "Referência urbana em Cabo Frio. Posso explicar como chegar com base nas vias principais sem links." },
+  { q: "Quero um bistrô romântico em Búzios", a: "Indicações confiáveis (parceiros). Posso priorizar ambiente intimista e preço médio." },
+  { q: "Pousada pé na areia em Arraial", a: "Posso indicar apenas parceiros internos cadastrados. Se não houver, não indico serviços privados externos." },
+  { q: "Hotel barato em Cabo Frio", a: "Indico somente parceiros internos. Se preferir hostel, posso filtrar." },
+  { q: "Passeio de buggy em Arraial", a: "Indicações confiáveis (parceiros). Posso falar sobre duração média e pontos visitados." },
+  { q: "Tour de lancha em Búzios", a: "Indicações confiáveis (parceiros). Checar condições do mar conforme dados internos." },
+  { q: "Onde comer moqueca em Cabo Frio", a: "Indicações confiáveis (parceiros com foco em frutos do mar). Posso sugerir pratos assinatura." },
+  { q: "Hambúrguer artesanal em São Pedro", a: "Indicações confiáveis. Quer opção com música ao vivo?" },
+  { q: "Churrasco em família domingo", a: "Indicações confiáveis com ambiente familiar. Posso filtrar por estacionamento." },
+  { q: "Café e padaria para manhã cedo", a: "Indicações confiáveis (parceiros padaria/cafeteria). Se quiser, vejo alternativas próximas do seu bairro." },
+  { q: "Lugar com vista para fotos", a: "Indico parceiros e pontos públicos populares (consulta pública), evitando citar serviços privados externos." },
+  { q: "Qual praia está mais protegida do vento hoje?", a: "Com dados internos de vento/ondas, indico praias mais abrigadas. Se o vento estiver alto, sugiro atividades em terra." },
+  { q: "Roteiro rápido em Búzios à noite", a: "Sugestão noturna: caminhada na Rua das Pedras / polo gastronômico (sem praia ou barco). Posso incluir indicações confiáveis de restaurantes." },
+  { q: "Onde alugar carro?", a: "Indico apenas parceiros internos. Se não houver, explico que não recomendo serviços privados externos." },
+  { q: "Transfer do aeroporto para Arraial", a: "Indicações confiáveis de transfer (parceiros). Posso estimar duração do trajeto." },
+  { q: "Onde encontro sushi em Cabo Frio", a: "Indicações confiáveis (parceiros). Quer ambiente mais sofisticado ou simples?" },
+  { q: "Bar com chope gelado em Búzios", a: "Indicações confiáveis. Se quiser música ao vivo, aviso quais dias e horários típicos." },
+  { q: "Lanchonete rápida perto da rodoviária", a: "Indicações confiáveis. Posso orientar rotas simples a pé." },
+  { q: "Passeio para família com crianças", a: "Indicações confiáveis (parceiros family-friendly). Se o tempo estiver ruim, sugiro opções em áreas internas." },
+  { q: "Onde ver o pôr do sol", a: "Indico pontos públicos (consulta pública) e, se houver, parceiros com vista privilegiada." },
+  { q: "Frutos do mar com preço justo", a: "Indicações confiáveis (parceiros). Posso ajustar pelo seu orçamento." },
+  { q: "Pizza para grupo grande", a: "Indicações confiáveis que atendem grupos. Posso sugerir reservas e horários ideais." },
+  { q: "Bar tranquilo sem música alta", a: "Indicações confiáveis conforme perfil. Posso sugerir bairros mais calmos." },
+  { q: "Está ventando muito hoje?", a: "Consulto dados internos atuais. Se vento >5 m/s, menciono esportes a vela; se muito alto, recomendo atividades em terra." },
+  { q: "Como ir de Cabo Frio para Búzios à noite?", a: "Explique trajeto humano: RJ-106 até o acesso da RJ-102 para Búzios; evite praia/banho noturno; foque em polo gastronômico." },
+];
