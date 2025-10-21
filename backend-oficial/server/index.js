@@ -17,7 +17,7 @@ import ragRoutes from "./routes/rag.routes.js";
 import parceiroRoutes from "./routes/parceiro.routes.js";
 
 // Supabase client (ajuste path se necessário)
-import { supabase } from "../lib/supabaseClient.js";
+import { supabase } from "../lib/supabaseAdmin.js";
 
 // Busca tolerante (se usar) e RAG híbrido (ajuste path se necessário)
 import { buscarParceirosTolerante } from "./utils/searchPartners.js";

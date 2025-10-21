@@ -6,7 +6,7 @@
 // - Retorna temperatura atual em °C e sensação térmica quando disponível.
 // ============================================================================
 
-import { supabase } from "../lib/supabaseClient.js";
+import { supabase } from "../lib/supabaseAdmin.js";
 
 const FALLBACK_COORDS = {
   "cabo-frio": { lat: -22.8894, lng: -42.0286 },

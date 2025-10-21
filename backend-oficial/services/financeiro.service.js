@@ -1,5 +1,5 @@
 // /backend-oficial/services/financeiro.service.js
-import { supabase } from "../lib/supabaseClient.js";
+import { supabase } from "../lib/supabaseAdmin.js";
 
 /**
  * Lista status financeiro dos parceiros a partir da view vw_partner_finance_status.

@@ -1,6 +1,6 @@
 // /backend-oficial/services/storage.service.js
 import crypto from "crypto";
-import { supabase } from "../lib/supabaseClient.js"; // services ↔ lib são irmãos
+import { supabase } from "../lib/supabaseAdmin.js"; // services ↔ lib são irmãos
 
 const BUCKET = "fotos-parceiros";
 const MAX_BY_KIND = 5; // limite total por tipo (foto / cardapio)
