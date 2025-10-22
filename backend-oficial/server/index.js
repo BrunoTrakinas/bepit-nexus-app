@@ -2,7 +2,7 @@
 // ============================================================================
 // BEPIT Nexus - Servidor (Express) — Unificado
 // Orquestrador Lógico — "Cache-First + Classificador + Roteamento"
-// v6.2.1 (partners-first, rotas humanas, anti-alucinação, fontes públicas)
+// v6.2.2 (partners-first, rotas humanas, anti-alucinação, fontes públicas)
 // ============================================================================
 
 import "dotenv/config";
@@ -20,8 +20,14 @@ import parceiroRoutes from "./routes/parceiro.routes.js";
 import { supabase } from "../lib/supabaseAdmin.js";
 
 // Busca tolerante (se usar) e RAG híbrido (ajuste path se necessário)
-import { buscarParceirosTolerante } from "./utils/searchPartners.js";
+import { buscarParceirosTolerante } from "./utils/searchPartners.js"; // mantido
 import { hybridSearch } from "../services/rag.service.js";
+
+// ---- Fetch Polyfill (Node.js < 18) --------------------------------------------
+if (typeof fetch !== "function") {
+  globalThis.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
+}
+// -------------------------------------------------------------------------------
 
 // ====================== DEBUG: listar rotas montadas =========================
 function printRoutes(app, label = "APP") {
@@ -60,69 +66,109 @@ const UPSTASH_URL =
   process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_URL || "";
 const UPSTASH_TOKEN =
   process.env.UPSTASH_REDIS_REST_TOKEN || process.env.UPSTASH_REDIS_TOKEN || "";
+const UPSTASH_TIMEOUT_MS = Number(process.env.UPSTASH_TIMEOUT_MS || 1200);
+const UPSTASH_RETRIES = Math.max(0, Number(process.env.UPSTASH_RETRIES || 1));
 
 function hasUpstash() {
   return !!UPSTASH_URL && !!UPSTASH_TOKEN;
 }
 
-function withTimeout(promise, ms, label = "op") {
+async function withTimeoutFetch(url, init, { timeoutMs = UPSTASH_TIMEOUT_MS } = {}) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  return Promise.race([
-    promise(ctrl.signal),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`[CACHE TIMEOUT] ${label} excedeu ${ms}ms`)), ms)
-    ),
-  ]).finally(() => clearTimeout(t));
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...init, signal: ctrl.signal });
+    return resp;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function upstashFetch(url, init, { timeoutMs = UPSTASH_TIMEOUT_MS, label = "op" } = {}) {
+  let attempt = 0;
+  while (true) {
+    try {
+      const resp = await withTimeoutFetch(url, init, { timeoutMs });
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => "");
+        throw new Error(`[UPSTASH] ${label} falhou: ${resp.status} ${resp.statusText} ${txt}`);
+      }
+      return resp;
+    } catch (e) {
+      const isAbort = e?.name === "AbortError";
+      attempt++;
+      if (attempt > UPSTASH_RETRIES || !isAbort) throw e;
+      const backoff = 200 * Math.pow(2, attempt - 1);
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
 }
 
 const upstash = {
-  async get(key, { timeoutMs = 400 } = {}) {
+  async get(key, { timeoutMs = UPSTASH_TIMEOUT_MS } = {}) {
     if (!hasUpstash()) throw new Error("[UPSTASH] Config ausente (URL/TOKEN).");
     const url = `${UPSTASH_URL.replace(/\/+$/, "")}/get/${encodeURIComponent(key)}`;
-    return await withTimeout(async (signal) => {
-      const resp = await fetch(url, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-        signal,
-      });
-      if (!resp.ok) throw new Error(`[UPSTASH] GET falhou: ${resp.status} ${resp.statusText}`);
+    try {
+      const resp = await upstashFetch(
+        url,
+        { method: "GET", headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } },
+        { timeoutMs, label: `GET ${key}` }
+      );
       const json = await resp.json();
       return json?.result ?? null;
-    }, timeoutMs, `GET ${key}`);
+    } catch (e) {
+      console.warn(
+        String(e?.name) === "AbortError"
+          ? `[CACHE] GET ${key} timeout (${timeoutMs}ms)`
+          : `[CACHE] GET ${key} erro: ${e?.message || e}`
+      );
+      return null;
+    }
   },
 
-  async exists(key, { timeoutMs = 400 } = {}) {
+  async exists(key, { timeoutMs = UPSTASH_TIMEOUT_MS } = {}) {
     if (!hasUpstash()) throw new Error("[UPSTASH] Config ausente (URL/TOKEN).");
     const url = `${UPSTASH_URL.replace(/\/+$/, "")}/exists/${encodeURIComponent(key)}`;
-    return await withTimeout(async (signal) => {
-      const resp = await fetch(url, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-        signal,
-      });
-      if (!resp.ok) throw new Error(`[UPSTASH] EXISTS falhou: ${resp.status} ${resp.statusText}`);
+    try {
+      const resp = await upstashFetch(
+        url,
+        { method: "GET", headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } },
+        { timeoutMs, label: `EXISTS ${key}` }
+      );
       const json = await resp.json();
       return Number(json?.result || 0) > 0;
-    }, timeoutMs, `EXISTS ${key}`);
+    } catch (e) {
+      console.warn(
+        String(e?.name) === "AbortError"
+          ? `[CACHE] EXISTS ${key} timeout (${timeoutMs}ms)`
+          : `[CACHE] EXISTS ${key} erro: ${e?.message || e}`
+      );
+      return false;
+    }
   },
 
-  async set(key, value, ttlSeconds, { timeoutMs = 400 } = {}) {
+  async set(key, value, ttlSeconds, { timeoutMs = UPSTASH_TIMEOUT_MS } = {}) {
     if (!hasUpstash()) throw new Error("[UPSTASH] Config ausente (URL/TOKEN).");
-    const base = `${UPSTASH_URL.replace(/\/+$/, "")}/set/${encodeURIComponent(
-      key
-    )}/${encodeURIComponent(value)}`;
+    const base = `${UPSTASH_URL.replace(/\/+$/, "")}/set/${encodeURIComponent(key)}/${encodeURIComponent(
+      value
+    )}`;
     const url = ttlSeconds ? `${base}?EX=${encodeURIComponent(ttlSeconds)}` : base;
-    return await withTimeout(async (signal) => {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-        signal,
-      });
-      if (!resp.ok) throw new Error(`[UPSTASH] SET falhou: ${resp.status} ${resp.statusText}`);
+    try {
+      const resp = await upstashFetch(
+        url,
+        { method: "POST", headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } },
+        { timeoutMs, label: `SET ${key}` }
+      );
       const json = await resp.json();
       return json?.result === "OK";
-    }, timeoutMs, `SET ${key}`);
+    } catch (e) {
+      console.warn(
+        String(e?.name) === "AbortError"
+          ? `[CACHE] SET ${key} timeout (${timeoutMs}ms)`
+          : `[CACHE] SET ${key} erro: ${e?.message || e}`
+      );
+      return false;
+    }
   },
 };
 
@@ -148,10 +194,7 @@ if (process.env.CORS_EXTRA_ORIGINS) {
     .forEach((o) => EXPLICIT_ALLOWED_ORIGINS.add(o));
 }
 
-const ALLOWED_ORIGIN_PATTERNS = [
-  /^https:\/\/.*\.netlify\.app$/,
-  /^http:\/\/localhost:(3000|5173)$/,
-];
+const ALLOWED_ORIGIN_PATTERNS = [/^https:\/\/.*\.netlify\.app$/, /^http:\/\/localhost:(3000|5173)$/];
 
 const CORS_ALLOW_ALL = String(process.env.CORS_ALLOW_ALL || "") === "1";
 
@@ -166,17 +209,12 @@ function isOriginAllowed(origin) {
 app.use((req, res, next) => {
   if (req.method !== "OPTIONS") return next();
   const origin = req.headers.origin || "";
-  if (!isOriginAllowed(origin)) {
-    return res.status(403).send("CORS: origem não permitida.");
-  }
+  if (!isOriginAllowed(origin)) return res.status(403).send("CORS: origem não permitida.");
   res.header("Access-Control-Allow-Origin", origin);
   res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Credentials", "true");
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Content-Type, X-Admin-Key, Authorization, Accept, X-Requested-With"
-  );
+  res.header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key, Authorization, Accept, X-Requested-With");
   res.header("Access-Control-Max-Age", "600");
   return res.sendStatus(204);
 });
@@ -388,7 +426,7 @@ async function updateSessionAndRespond({
     try {
       await upstash.set(conversationId, JSON.stringify(novaSessionData), TTL_SECONDS, { timeoutMs: 400 });
     } catch (e) {
-      console.error(`[RUN ${_run}] [CACHE] Falha ao salvar sessão:`, e?.message || e);
+      console.warn(`[RUN ${_run}] [CACHE] Falha ao salvar sessão (não fatal):`, e?.message || e);
     }
   } else {
     console.warn("[CACHE] Upstash não configurado. Seguindo sem cache.");
@@ -489,12 +527,28 @@ function isSaudacao(texto) {
   return saudacoes.includes(t);
 }
 function isWeatherQuestion(texto) {
-  // Não deixa clima sequestrar quando houver intenção clara de parceiros
   if (forcarBuscaParceiro(texto)) return false;
   const t = normalizar(texto);
   const termos = [
-    "clima","tempo","previsao","previsão","vento","mar","marea","maré","ondas","onda","temperatura",
-    "graus","calor","frio","chovendo","chuva","sol","ensolarado","nublado"
+    "clima",
+    "tempo",
+    "previsao",
+    "previsão",
+    "vento",
+    "mar",
+    "marea",
+    "maré",
+    "ondas",
+    "onda",
+    "temperatura",
+    "graus",
+    "calor",
+    "frio",
+    "chovendo",
+    "chuva",
+    "sol",
+    "ensolarado",
+    "nublado",
   ];
   return termos.some((k) => t.includes(k));
 }
@@ -505,7 +559,19 @@ function isRouteQuestion(texto) {
 }
 function detectTemporalWindow(texto) {
   const t = normalizar(texto);
-  const sinaisFuturo = ["amanha","amanhã","semana que vem","proxima semana","próxima semana","sabado","sábado","domingo","proximos dias","próximos dias","daqui a"];
+  const sinaisFuturo = [
+    "amanha",
+    "amanhã",
+    "semana que vem",
+    "proxima semana",
+    "próxima semana",
+    "sabado",
+    "sábado",
+    "domingo",
+    "proximos dias",
+    "próximos dias",
+    "daqui a",
+  ];
   return sinaisFuturo.some((s) => t.includes(s)) ? "future" : "present";
 }
 function extractCity(texto, cidadesAtivas) {
@@ -537,7 +603,8 @@ function extractCity(texto, cidadesAtivas) {
 }
 function isRegionQuery(texto) {
   const t = normalizar(texto);
-  const mencionaRegiao = t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
+  const mencionaRegiao =
+    t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
   return mencionaRegiao;
 }
 
@@ -627,20 +694,64 @@ function montarResumoClimaSemIA({ dadosIA, regiaoNome, horaLocalSP }) {
 // ============================== PARCEIROS ===================================
 const PALAVRAS_CHAVE = {
   comida: [
-    "restaurante","restaurantes","almoço","almoco","jantar","comer","comida",
-    "picanha","piconha","carne","churrasco","pizza","pizzaria","peixe","frutos do mar",
-    "moqueca","rodizio","rodízio","lanchonete","burger","hamburguer","hambúrguer","bistrô","bistro"
+    "restaurante",
+    "restaurantes",
+    "almoço",
+    "almoco",
+    "jantar",
+    "comer",
+    "comida",
+    "picanha",
+    "piconha",
+    "carne",
+    "churrasco",
+    "pizza",
+    "pizzaria",
+    "peixe",
+    "frutos do mar",
+    "moqueca",
+    "rodizio",
+    "rodízio",
+    "lanchonete",
+    "burger",
+    "hamburguer",
+    "hambúrguer",
+    "bistrô",
+    "bistro",
   ],
-  hospedagem: ["pousada","pousadas","hotel","hotéis","hospedagem","hostel","airbnb"],
-  bebidas: ["bar","bares","chopp","chope","drinks","pub","boteco"],
+  hospedagem: ["pousada", "pousadas", "hotel", "hotéis", "hospedagem", "hostel", "airbnb"],
+  bebidas: ["bar", "bares", "chopp", "chope", "drinks", "pub", "boteco"],
   passeios: [
-    "passeio","passeios","barco","lancha","escuna","trilha","trilhas","tour","buggy",
-    "quadriciclo","city tour","catamarã","catamara","mergulho","snorkel","gruta","ilha"
+    "passeio",
+    "passeios",
+    "barco",
+    "lancha",
+    "escuna",
+    "trilha",
+    "trilhas",
+    "tour",
+    "buggy",
+    "quadriciclo",
+    "city tour",
+    "catamarã",
+    "catamara",
+    "mergulho",
+    "snorkel",
+    "gruta",
+    "ilha",
   ],
-  praias: ["praia","praias","faixa de areia","bandeira azul","mar calmo","mar forte"],
+  praias: ["praia", "praias", "faixa de areia", "bandeira azul", "mar calmo", "mar forte"],
   transporte: [
-    "transfer","transporte","alugar carro","aluguel de carro","uber","taxi","ônibus","onibus",
-    "rodoviária","rodoviaria"
+    "transfer",
+    "transporte",
+    "alugar carro",
+    "aluguel de carro",
+    "uber",
+    "taxi",
+    "ônibus",
+    "onibus",
+    "rodoviária",
+    "rodoviaria",
   ],
 };
 function forcarBuscaParceiro(texto) {
@@ -662,33 +773,73 @@ async function extrairEntidadesDaBusca(texto) {
   else if (tNorm.includes("iguaba")) city = "Iguaba Grande";
 
   const DIC_TERMS = [
-    "picanha","piconha","carne","churrasco","rodizio","rodízio","fraldinha","costela","barato","barata",
-    "familia","família","romantico","romântico","vista","vista para o mar","pizza","peixe","frutos do mar",
-    "moqueca","hamburguer","hambúrguer","sushi","japonesa","bistrô","bistro"
+    "pizzaria",
+    "pizza",
+    "picanha",
+    "piconha",
+    "carne",
+    "churrasco",
+    "rodizio",
+    "rodízio",
+    "fraldinha",
+    "costela",
+    "barato",
+    "barata",
+    "familia",
+    "família",
+    "romantico",
+    "romântico",
+    "vista",
+    "vista para o mar",
+    "peixe",
+    "frutos do mar",
+    "moqueca",
+    "hamburguer",
+    "hambúrguer",
+    "sushi",
+    "japonesa",
+    "bistrô",
+    "bistro",
   ];
   const terms = [];
   for (const w of DIC_TERMS) if (tNorm.includes(normalizarTexto(w))) terms.push(w);
 
   let category = null;
-  if (
-    ["restaurante","comer","comida","picanha","piconha","carne","churrasco","rodizio","rodízio","pizza","pizzaria","peixe","frutos do mar","hamburguer","hambúrguer","bistrô","bistro","sushi","japonesa"].some((k) => tNorm.includes(k))
+
+  if (tNorm.includes("pizzaria") || tNorm.includes("pizza")) {
+    category = "pizzaria";
+  } else if (
+    [
+      "restaurante",
+      "comer",
+      "comida",
+      "picanha",
+      "piconha",
+      "carne",
+      "churrasco",
+      "rodizio",
+      "rodízio",
+      "peixe",
+      "frutos do mar",
+      "moqueca",
+      "hamburguer",
+      "hambúrguer",
+      "bistrô",
+      "bistro",
+      "sushi",
+      "japonesa",
+    ].some((k) => tNorm.includes(k))
   ) {
     category = "comida";
-  } else if (
-    ["pousada","hotel","hostel","hospedagem","airbnb","apart","flat","resort"].some((k) => tNorm.includes(k))
-  ) {
+  } else if (["pousada", "hotel", "hostel", "hospedagem", "airbnb", "apart", "flat", "resort"].some((k) => tNorm.includes(k))) {
     category = "hospedagem";
-  } else if (["bar","bares","chopp","chope","drinks","pub","boteco"].some((k) => tNorm.includes(k))) {
+  } else if (["bar", "bares", "chopp", "chope", "drinks", "pub", "boteco"].some((k) => tNorm.includes(k))) {
     category = "bebidas";
-  } else if (
-    ["passeio","barco","lancha","escuna","trilha","buggy","quadriciclo","mergulho","snorkel","tour"].some((k) => tNorm.includes(k))
-  ) {
+  } else if (["passeio", "barco", "lancha", "escuna", "trilha", "buggy", "quadriciclo", "mergulho", "snorkel", "tour"].some((k) => tNorm.includes(k))) {
     category = "passeios";
-  } else if (["praia","praias","bandeira azul","orla"].some((k) => tNorm.includes(k))) {
+  } else if (["praia", "praias", "bandeira azul", "orla"].some((k) => tNorm.includes(k))) {
     category = "praias";
-  } else if (
-    ["transfer","transporte","aluguel de carro","locadora","uber","taxi","ônibus","onibus"].some((k) => tNorm.includes(k))
-  ) {
+  } else if (["transfer", "transporte", "aluguel de carro", "locadora", "uber", "taxi", "ônibus", "onibus"].some((k) => tNorm.includes(k))) {
     category = "transporte";
   }
 
@@ -704,9 +855,7 @@ async function searchPartnersRAG({ textoDoUsuario, cidadesAtivas, limit = 5 }) {
   let cidade_id = null;
   if (cidadeNome && Array.isArray(cidadesAtivas)) {
     const alvo = cidadesAtivas.find(
-      (c) =>
-        normalizarTexto(c.nome) === normalizarTexto(cidadeNome) ||
-        normalizarTexto(c.slug) === normalizarTexto(cidadeNome)
+      (c) => normalizarTexto(c.nome) === normalizarTexto(cidadeNome) || normalizarTexto(c.slug) === normalizarTexto(cidadeNome)
     );
     cidade_id = alvo?.id || null;
   }
@@ -733,7 +882,9 @@ async function searchPartnersRAG({ textoDoUsuario, cidadesAtivas, limit = 5 }) {
       if (textoDoUsuario) query = query.or(`nome.ilike.%${textoDoUsuario}%,descricao.ilike.%${textoDoUsuario}%`);
       const { data: fb } = await query.limit(limit || 5);
       results = Array.isArray(fb) ? fb : [];
-    } catch {}
+    } catch {
+      // sem resultados
+    }
   }
 
   const parceiros = results.map((r) => ({
@@ -761,8 +912,10 @@ async function ferramentaBuscarParceirosOuDicas({
   isInitialSearch = false,
   excludeIds = [],
 }) {
-  const categoriaProcurada = (argumentosDaFerramenta?.category || "").trim();
-  const cidadeProcurada = (argumentosDaFerramenta?.city || "").trim();
+  const categoriaProcuradaRaw = (argumentosDaFerramenta?.category || "").trim();
+  const categoriaProcurada = normalizarTexto(categoriaProcuradaRaw);
+  const cidadeProcuradaRaw = (argumentosDaFerramenta?.city || "").trim();
+  const cidadeProcurada = normalizarTexto(cidadeProcuradaRaw);
 
   const textoN = normalizarTexto(textoOriginal || "");
   const sinaisCarne = ["picanha", "piconha", "carne", "churrasco", "rodizio", "rodízio"].some((s) => textoN.includes(s));
@@ -772,13 +925,10 @@ async function ferramentaBuscarParceirosOuDicas({
   let cidadeSlug = "";
   if (cidadeProcurada) {
     const alvo = cidadesValidas.find(
-      (c) =>
-        normalizarTexto(c.nome) === normalizarTexto(cidadeProcurada) ||
-        normalizarTexto(c.slug) === normalizarTexto(cidadeProcurada)
+      (c) => normalizarTexto(c.nome) === cidadeProcurada || normalizarTexto(c.slug) === cidadeProcurada
     );
     cidadeSlug = alvo?.slug || "";
   }
-  if (!cidadeSlug && cidadesValidas.length > 0) cidadeSlug = cidadesValidas[0].slug;
 
   let cidadeUUID = null;
   if (cidadeSlug) {
@@ -791,16 +941,45 @@ async function ferramentaBuscarParceirosOuDicas({
   }
 
   const MAPA_CESTA_PARA_CATEGORIAS_DB = {
-    comida: ["churrascaria","restaurante","pizzaria","lanchonete","frutos do mar","sushi","padaria","cafeteria","bistrô","bistro","hamburgueria","pizza"],
-    bebidas: ["bar","pub","cervejaria","wine bar","balada","boteco"],
-    passeios: ["passeio","barco","lancha","escuna","trilha","buggy","quadriciclo","city tour","catamarã","catamara","mergulho","snorkel","gruta","ilha","tour"],
-    praias: ["praia","praias","bandeira azul","orla"],
-    hospedagem: ["pousada","hotel","hostel","apart","flat","resort","hospedagem"],
-    transporte: ["transfer","transporte","aluguel de carro","locadora","taxi","ônibus","onibus","rodoviária","rodoviaria"],
+    comida: [
+      "churrascaria",
+      "restaurante",
+      "pizzaria",
+      "lanchonete",
+      "frutos do mar",
+      "sushi",
+      "padaria",
+      "cafeteria",
+      "bistrô",
+      "bistro",
+      "hamburgueria",
+      "pizza",
+    ],
+    bebidas: ["bar", "pub", "cervejaria", "wine bar", "balada", "boteco"],
+    passeios: [
+      "passeio",
+      "barco",
+      "lancha",
+      "escuna",
+      "trilha",
+      "buggy",
+      "quadriciclo",
+      "city tour",
+      "catamarã",
+      "catamara",
+      "mergulho",
+      "snorkel",
+      "gruta",
+      "ilha",
+      "tour",
+    ],
+    praias: ["praia", "praias", "bandeira azul", "orla"],
+    hospedagem: ["pousada", "hotel", "hostel", "apart", "flat", "resort", "hospedagem"],
+    transporte: ["transfer", "transporte", "aluguel de carro", "locadora", "taxi", "ônibus", "onibus", "rodoviária", "rodoviaria"],
   };
 
   let categoriasAProcurar = [];
-  if (categoriaProcurada) categoriasAProcurar.push(normalizarTexto(categoriaProcurada));
+  if (categoriaProcurada) categoriasAProcurar.push(categoriaProcurada);
 
   if (categoriaProcurada === "comida" || (!categoriaProcurada && MAPA_CESTA_PARA_CATEGORIAS_DB.comida)) {
     if (sinaisCarne) {
@@ -822,11 +1001,30 @@ async function ferramentaBuscarParceirosOuDicas({
   if (sinaisCarne) termoDeBusca = "picanha";
   else if (sinaisVista) termoDeBusca = "vista";
   else {
-    const termosConhecidos = ["pizza","peixe","rodizio","frutos do mar","moqueca","hamburguer","sushi","bistrô","bistro","barato","família","romântico","vista"];
+    const termosConhecidos = [
+      "pizza",
+      "peixe",
+      "rodizio",
+      "frutos do mar",
+      "moqueca",
+      "hamburguer",
+      "sushi",
+      "bistrô",
+      "bistro",
+      "barato",
+      "família",
+      "romântico",
+      "vista",
+    ];
     const achou = termosConhecidos.find((k) => textoN.includes(normalizarTexto(k)));
     if (achou) termoDeBusca = achou;
   }
   if (!termoDeBusca && categoriasAProcurar.length > 0) termoDeBusca = categoriasAProcurar[0];
+
+  if (categoriaProcurada === "pizzaria" || textoN.includes("pizza") || textoN.includes("pizzaria")) {
+    categoriasAProcurar = ["pizzaria"];
+    termoDeBusca = "pizza";
+  }
 
   const agregados = [];
   const vistos = new Set();
@@ -890,7 +1088,6 @@ async function ferramentaBuscarParceirosOuDicas({
 
   for (const cat of categoriasAProcurar) {
     const q = buildQueryForCategory(cat, termoDeBusca);
-
     let items = [];
     try {
       const ragItems = await hybridSearch({
@@ -928,16 +1125,28 @@ async function ferramentaBuscarParceirosOuDicas({
     if (!isInitialSearch && agregados.length >= alvoRefinoFix) break;
   }
 
+  let lista = agregados.slice();
+  const isPizzaIntent = categoriaProcurada === "pizzaria" || textoN.includes("pizza") || textoN.includes("pizzaria");
+  if (isPizzaIntent) {
+    const preferidos = lista.filter((p) => {
+      const cat = normalizarTexto(p.categoria || "");
+      const nome = normalizarTexto(p.nome || "");
+      const desc = normalizarTexto(p.descricao || "");
+      return cat === "pizzaria" || nome.includes("pizza") || desc.includes("pizza");
+    });
+    if (preferidos.length > 0) lista = preferidos;
+  }
+
   const limiteFinal = isInitialSearch ? alvoInicialFix : alvoRefinoFix;
-  const limitados = agregados.slice(0, limiteFinal);
+  const limitados = lista.slice(0, limiteFinal);
 
   try {
     await supabase.from("eventos_analytics").insert({
       tipo_evento: "partner_query",
       payload: {
         termos: argumentosDaFerramenta?.terms || [],
-        categoriaProcurada,
-        cidadeProcurada,
+        categoriaProcurada: categoriaProcuradaRaw,
+        cidadeProcurada: cidadeProcuradaRaw,
         isInitialSearch,
         excludeIds,
         categoriasTentadas: categoriasAProcurar,
@@ -945,7 +1154,9 @@ async function ferramentaBuscarParceirosOuDicas({
         cidadeSlug,
       },
     });
-  } catch {}
+  } catch {
+    // analytics best-effort
+  }
 
   return {
     ok: true,
@@ -997,20 +1208,16 @@ async function gerarRespostaDeListaParceiros(userText, historico, parceiros) {
 
 // Geração de rotas em texto humano (sem links)
 function gerarRotasHumanas(pergunta) {
-  // Heurística simples: detectar origem e destino por padrões comuns do usuário
-  // Exemplos: "saindo de nova iguaçu para cabo frio", "como chegar em búzios de rio de janeiro"
   const t = normalizarTexto(pergunta);
   let origem = null;
   let destino = null;
 
-  // Padrões "saindo de X para Y"
   const m1 = t.match(/saindo de ([^,]+?) para ([^,\.!?\n]+)/i);
   if (m1) {
     origem = m1[1]?.trim();
     destino = m1[2]?.trim();
   }
 
-  // Padrões "de X para Y"
   if (!origem || !destino) {
     const m2 = t.match(/de ([^,]+?) para ([^,\.!?\n]+)/i);
     if (m2) {
@@ -1019,17 +1226,14 @@ function gerarRotasHumanas(pergunta) {
     }
   }
 
-  // Padrão "como chegar em Y"
   if (!destino) {
     const m3 = t.match(/como chegar (em|para|até) ([^,\.!?\n]+)/i);
     if (m3) destino = m3[2]?.trim();
   }
 
-  // Defaults regionais amigáveis se nada claro
   if (!origem) origem = "Rio de Janeiro";
   if (!destino) destino = "Cabo Frio";
 
-  // Traçados comuns de referência (heurística, sem mapas)
   const rotasConhecidas = [
     {
       alvo: "cabo frio",
@@ -1054,20 +1258,15 @@ function gerarRotasHumanas(pergunta) {
   ];
 
   const match = rotasConhecidas.find((r) => destino && normalizarTexto(destino).includes(r.alvo));
-  return match ? match.texto : `Rota sugerida saindo de ${origem} para ${destino}: use Dutra/BR-116 até o Rio, acesse Linha Vermelha → Av. Brasil → Ponte Rio–Niterói. Siga BR-101 e, conforme o destino na Região dos Lagos, pegue a Via Lagos (RJ-124) e depois as conexões RJ-106/RJ-140 ou RJ-102. Ao entrar na cidade, use as avenidas principais (como América Central em Cabo Frio ou José Bento Ribeiro Dantas em Búzios) para se orientar.`;
+  return match
+    ? match.texto
+    : `Rota sugerida saindo de ${origem} para ${destino}: use Dutra/BR-116 até o Rio, acesse Linha Vermelha → Av. Brasil → Ponte Rio–Niterói. Siga BR-101 e, conforme o destino na Região dos Lagos, pegue a Via Lagos (RJ-124) e depois as conexões RJ-106/RJ-140 ou RJ-102. Ao entrar na cidade, use as avenidas principais (como América Central em Cabo Frio ou José Bento Ribeiro Dantas em Búzios) para se orientar.`;
 }
 
-// Resposta geral neutra, humana, sem forçar clima (corrige ReferenceError)
-async function gerarRespostaGeralPrompteada({
-  pergunta,
-  historicoContents,
-  regiaoNome,
-  dadosClimaOuMaresJSON = "{}",
-  horaLocalSP,
-}) {
+// Resposta geral neutra, humana, sem forçar clima
+async function gerarRespostaGeralPrompteada({ pergunta, historicoContents, regiaoNome, dadosClimaOuMaresJSON = "{}", horaLocalSP }) {
   const deveExplicarRotas = isRouteQuestion(pergunta);
   if (deveExplicarRotas) {
-    // Retorna rotas humanizadas direto (sem IA), garantindo zero alucinação
     return gerarRotasHumanas(pergunta);
   }
 
@@ -1091,13 +1290,12 @@ Responda de forma direta, com 1–2 parágrafos no máximo. Se não houver dados
   try {
     return await geminiTry(promptNeutro);
   } catch {
-    // fallback sem IA
     return "Entendido. Posso te indicar opções e explicar como chegar em texto simples. Diga a cidade/bairro e o tipo de lugar que você procura.";
   }
 }
 
 // ============================================================================
-// >>> ROTA DO CHAT - ORQUESTRADOR v6.2.1 (partners-first, rotas humanas) <<<<<
+// >>> ROTA DO CHAT - ORQUESTRADOR v6.2.2 (partners-first, rotas humanas) <<<<<
 // ============================================================================
 app.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
@@ -1108,16 +1306,10 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const userText = (req.body?.message || "").trim();
 
     if (userText.length < 1) {
-      return res
-        .status(400)
-        .json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId });
+      return res.status(400).json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId });
     }
 
-    const { data: regiao } = await supabase
-      .from("regioes")
-      .select("id, nome")
-      .eq("slug", slugDaRegiao)
-      .single();
+    const { data: regiao } = await supabase.from("regioes").select("id, nome").eq("slug", slugDaRegiao).single();
     if (!regiao) return res.status(404).json({ error: "Região não encontrada." });
     req.ctx = { regiao };
 
@@ -1132,6 +1324,24 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     // Recupera histórico curto do cache (se houver)
     let sessionData = { history: [], entities: {} };
+
+    // === Memória simples de cidade na sessão =================================
+    function setLastCityInSession(session, cidade_id) {
+      try {
+        if (!session || typeof session !== "object") return;
+        if (!session.entities) session.entities = {};
+        session.entities.lastCity = cidade_id || null;
+      } catch {}
+    }
+    function getLastCityFromSession(session) {
+      try {
+        return session?.entities?.lastCity || null;
+      } catch {
+        return null;
+      }
+    }
+    // ========================================================================
+
     try {
       if (hasUpstash() && !isFirstTurn) {
         const cachedSession = await upstash.get(conversationId, { timeoutMs: 400 });
@@ -1150,15 +1360,21 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
         ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Como posso te ajudar a ter uma experiência incrível hoje?`
         : "Claro, como posso te ajudar agora?";
       return await updateSessionAndRespond({
-        res, runId, conversationId, userText, aiResponseText: resposta, sessionData, regiaoId: regiao.id,
+        res,
+        runId,
+        conversationId,
+        userText,
+        aiResponseText: resposta,
+        sessionData,
+        regiaoId: regiao.id,
       });
     }
 
-    // 1) PARCEIROS PRIMEIRO (evita clima engolir intenção)
+    // 1) PARCEIROS PRIMEIRO
     if (forcarBuscaParceiro(userText)) {
       console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada — chamando hybridSearch...`);
 
-      const { parceiros, entidades } = await searchPartnersRAG({
+      const { parceiros } = await searchPartnersRAG({
         textoDoUsuario: userText,
         cidadesAtivas,
         limit: 5,
@@ -1178,9 +1394,17 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
             .update({
               parceiros_sugeridos: parceiros,
               parceiro_em_foco: null,
-              topico_atual: entidades?.category || null,
+              topico_atual: "parceiros",
             })
             .eq("id", conversationId);
+        } catch {
+          // best-effort
+        }
+
+        // Aprender cidade do primeiro parceiro, se houver
+        try {
+          const cid = parceiros[0]?.cidade_id || null;
+          if (cid) setLastCityInSession(sessionData, cid);
         } catch {}
 
         return await updateSessionAndRespond({
@@ -1194,10 +1418,10 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
           partners: parceiros,
         });
       }
-      // Se não achou parceiros, segue fluxo para os demais módulos
+      // se não achou parceiros, segue para checagem de clima/rotas/fallback
     }
 
-    // 2) CLIMA (só se NÃO for intenção de parceiros)
+    // 2) CLIMA (apenas quando NÃO for intenção de parceiros)
     if (!forcarBuscaParceiro(userText) && isWeatherQuestion(userText)) {
       const when = detectTemporalWindow(userText);
       const tipoDadoAlvo = when === "future" ? "previsao_diaria" : "clima_atual";
@@ -1209,9 +1433,7 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
         cidadesParaBuscar.push(cidadeAlvo);
       } else if (forRegion) {
         const nomesVip = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"];
-        cidadesParaBuscar = cidadesAtivas.filter((c) =>
-          nomesVip.some((nVip) => normalizarTexto(c.nome) === normalizarTexto(nVip))
-        );
+        cidadesParaBuscar = cidadesAtivas.filter((c) => nomesVip.some((nVip) => normalizarTexto(c.nome) === normalizarTexto(nVip)));
       }
 
       const dadosClimaticos = (
@@ -1227,8 +1449,7 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
               .single();
             if (!data) return null;
 
-            let registro = { cidade: cidade.nome, [tipoDadoAlvo]: data.dados };
-
+            const registro = { cidade: cidade.nome, dados: data.dados, tipo: tipoDadoAlvo };
             if (when === "present" && CIDADES_VIP.includes(normalizarTexto(cidade.nome))) {
               const { data: mare } = await supabase
                 .from("dados_climaticos")
@@ -1256,9 +1477,9 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
       if (dadosClimaticos.length > 0) {
         const payload = {
-          tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica",
-          janelaTempo: when,
-          dados: dadosClimaticos,
+          escopo: forRegion ? "regiao" : "cidade",
+          when,
+          resultados: dadosClimaticos,
         };
         const horaLocal = getHoraLocalSP();
 
@@ -1280,6 +1501,18 @@ ${historicoParaTextoSimplesWrapper(historico)}
 
         const respostaIA = await geminiTry(promptFinal);
 
+        // Memoriza cidade consultada (se houver apenas uma)
+        try {
+          if (!forRegion && dadosClimaticos[0] && cidadesAtivas?.length) {
+            const nomeCidade = normalizarTexto(dadosClimaticos[0].cidade);
+            const c = cidadesAtivas.find((x) => normalizarTexto(x.nome) === nomeCidade);
+            if (c?.id) {
+              if (!sessionData.entities) sessionData.entities = {};
+              sessionData.entities.lastCity = c.id;
+            }
+          }
+        } catch {}
+
         return await updateSessionAndRespond({
           res,
           runId,
@@ -1290,21 +1523,26 @@ ${historicoParaTextoSimplesWrapper(historico)}
           regiaoId: regiao.id,
         });
       } else {
-        const fallback =
-          "Ainda não tenho os dados consolidados para esta previsão. Meu robô interno atualiza a base com frequência — tente novamente mais tarde.";
+        // Fallback honesto e útil para CLIMA (sem depender de entidades de parceiros)
+        const alvoCidadeNome =
+          (cidadeAlvo && cidadeAlvo.nome) ||
+          (cidadesAtivas.find((c) => c.id === (sessionData?.entities?.lastCity || null))?.nome) ||
+          "a cidade";
+        const honest = `Ainda não tenho dados climáticos consolidados para ${alvoCidadeNome} ${when === "future" ? "nos próximos dias" : "agora"}. Posso tentar novamente mais tarde ou te sugerir atividades em locais cobertos.`;
         return await updateSessionAndRespond({
           res,
           runId,
           conversationId,
           userText,
-          aiResponseText: fallback,
+          aiResponseText: honest,
           sessionData,
           regiaoId: regiao.id,
+          partners: [],
         });
       }
     }
 
-    // 3) ROTAS HUMANAS (quando pedido explicitamente)
+    // 3) ROTAS HUMANAS
     if (isRouteQuestion(userText)) {
       const respostaRotas = gerarRotasHumanas(userText);
       return await updateSessionAndRespond({
@@ -1358,11 +1596,7 @@ app.get("/api/avisos/:slugDaRegiao", async (req, res) => {
   try {
     const { slugDaRegiao } = req.params;
 
-    const { data: regiao, error: erroRegiao } = await supabase
-      .from("regioes")
-      .select("id")
-      .eq("slug", slugDaRegiao)
-      .single();
+    const { data: regiao, error: erroRegiao } = await supabase.from("regioes").select("id").eq("slug", slugDaRegiao).single();
 
     if (erroRegiao || !regiao) {
       return res.status(404).json({ error: "Região não encontrada." });
@@ -1448,7 +1682,7 @@ export const TRAINING_QA = [
   { q: "Melhor churrascaria em São Pedro da Aldeia", a: "Indicações confiáveis: (listar parceiros). Quer rodízio ou a la carte?" },
   { q: "Onde encontro peixe fresco para almoço em Cabo Frio?", a: "Indicações confiáveis com foco em frutos do mar: (listar parceiros). Posso sugerir pratos assinatura." },
   { q: "Passeios ao pôr do sol em Búzios", a: "Para o fim de tarde/noite, recomendo atividades em terra e polos gastronômicos. (Jamais sugira barco à noite)." },
-  { q: "Quero bar para ver o jogo", a: "Posso indicar bares parceiros com TVs, sem citar futebol em detalhes. (Listar parceiros)."},
+  { q: "Quero bar para ver o jogo", a: "Posso indicar bares parceiros com TVs, sem citar futebol em detalhes. (Listar parceiros)." },
   { q: "Qual a melhor praia hoje?", a: "Com base nos dados internos de vento/ondas, indico praia mais protegida. Se o mar estiver agitado, sugiro alternativas em terra." },
   { q: "Como chegar em Cabo Frio saindo de Nova Iguaçu?", a: "Rota humana: Dutra → Linha Vermelha → Av. Brasil → Ponte Rio–Niterói → BR-101 → Via Lagos (RJ-124) → RJ-106/RJ-140 até Cabo Frio." },
   { q: "Como ir de Búzios para Arraial do Cabo?", a: "Use RJ-102/RJ-106 até Cabo Frio e siga a RJ-140 em direção a Arraial. Ao chegar, use Av. Gov. Leonel Brizola para acessar as praias." },
@@ -1470,7 +1704,7 @@ export const TRAINING_QA = [
   { q: "Churrasco em família domingo", a: "Indicações confiáveis com ambiente familiar. Posso filtrar por estacionamento." },
   { q: "Café e padaria para manhã cedo", a: "Indicações confiáveis (parceiros padaria/cafeteria). Se quiser, vejo alternativas próximas do seu bairro." },
   { q: "Lugar com vista para fotos", a: "Indico parceiros e pontos públicos populares (consulta pública), evitando citar serviços privados externos." },
-  { q: "Qual praia está mais protegida do vento hoje?", a: "Com dados internos de vento/ondas, indico praias mais abrigadas. Se o vento estiver alto, sugiro atividades em terra." },
+  { q: "Qual praia está mais protegida do vento hoje?", a: "Com dados internos de vento/ondas, indico praias mais abrigadas. Se o vento estiver alto, recomendo atividades em terra." },
   { q: "Roteiro rápido em Búzios à noite", a: "Sugestão noturna: caminhada na Rua das Pedras / polo gastronômico (sem praia ou barco). Posso incluir indicações confiáveis de restaurantes." },
   { q: "Onde alugar carro?", a: "Indico apenas parceiros internos. Se não houver, explico que não recomendo serviços privados externos." },
   { q: "Transfer do aeroporto para Arraial", a: "Indicações confiáveis de transfer (parceiros). Posso estimar duração do trajeto." },
