@@ -232,13 +232,56 @@ app.use(
 // Body parser
 app.use(express.json({ limit: "25mb" }));
 
+// ---------------------------------------------------------------------------
+// Health & Debug endpoints (temporários para diagnóstico)
+// ---------------------------------------------------------------------------
+app.get("/health", async (req, res) => {
+  try {
+    // checagens básicas de ambiente e um ping simples ao Supabase
+    const env = {
+      SUPABASE_URL: !!process.env.SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
+    };
+    // opcional: ping leve em uma tabela conhecida
+    let supabaseStatus = "skip";
+    try {
+      const { data, error } = await supabase.from("parceiros").select("id").limit(1);
+      supabaseStatus = error ? `error: ${error.message}` : "ok";
+    } catch (e) {
+      supabaseStatus = `error: ${e?.message || String(e)}`;
+    }
+    res.json({ ok: true, checks: { uptime_s: Math.floor(process.uptime()), env, supabase: supabaseStatus } });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+app.get("/_debug/rag/search", async (req, res) => {
+  try {
+    const q = String(req.query?.q || "");
+    const categoria = req.query?.categoria ? String(req.query.categoria) : null;
+    const cidade_id = req.query?.cidade_id ? String(req.query.cidade_id) : null;
+    const limit = Math.max(1, Math.min(parseInt(req.query?.limit ?? "10", 10) || 10, 50));
+    const debug = String(req.query?.debug || "1") === "1" || String(req.query?.debug || "").toLowerCase() === "true";
+
+    const out = await hybridSearch({ q, cidade_id, categoria, limit, debug: true });
+    const payload = Array.isArray(out?.items) ? out : { items: out, meta: null };
+    res.json({ ok: true, items: payload.items, meta: payload.meta });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+
 // ------------------------------ ROTAS MODULARES ------------------------------
 app.use("/api/parceiro", parceiroRoutes);
 app.use("/api/rag", ragRoutes);
+app.use("/api/chat", ragRoutes);
 app.use("/api/financeiro", financeiroRoutes);
 app.use("/api/uploads", uploadsRoutes);
 
-// ------------------------------ HEALTHCHECKS --------------------------------
+// ---- HEALTHCHECK ------------------------------------------------------------
 app.get("/", (_req, res) => res.status(200).send("BEPIT backend ativo ✅"));
 app.get("/ping", (_req, res) => res.status(200).json({ pong: true, ts: Date.now() }));
 app.get("/_ping", (_req, res) => res.json({ ok: true, app: "app", now: new Date().toISOString() }));
@@ -1264,7 +1307,8 @@ function gerarRotasHumanas(pergunta) {
 }
 
 // Resposta geral neutra, humana, sem forçar clima
-async function gerarRespostaGeralPrompteada({ pergunta, historicoContents, regiaoNome, dadosClimaOuMaresJSON = "{}", horaLocalSP }) {
+async function gerarRespostaGeralPrompteada({ 
+  pergunta, historicoContents, regiaoNome, dadosClimaOuMaresJSON = "{}", horaLocalSP }) {
   const deveExplicarRotas = isRouteQuestion(pergunta);
   if (deveExplicarRotas) {
     return gerarRotasHumanas(pergunta);
@@ -1372,6 +1416,8 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
     // 1) PARCEIROS PRIMEIRO
     if (forcarBuscaParceiro(userText)) {
+      let cidadeUUIDHerdada = getLastCityFromSession(sessionData);
+
       console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada — chamando hybridSearch...`);
 
       const { parceiros } = await searchPartnersRAG({
@@ -1394,18 +1440,12 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
             .update({
               parceiros_sugeridos: parceiros,
               parceiro_em_foco: null,
-              topico_atual: "parceiros",
+              topico_atual: entidades?.category || null,
             })
             .eq("id", conversationId);
         } catch {
           // best-effort
         }
-
-        // Aprender cidade do primeiro parceiro, se houver
-        try {
-          const cid = parceiros[0]?.cidade_id || null;
-          if (cid) setLastCityInSession(sessionData, cid);
-        } catch {}
 
         return await updateSessionAndRespond({
           res,
@@ -1449,7 +1489,7 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
               .single();
             if (!data) return null;
 
-            const registro = { cidade: cidade.nome, dados: data.dados, tipo: tipoDadoAlvo };
+            let registro = { cidade: cidade.nome, [tipoDadoAlvo]: data.dados };
             if (when === "present" && CIDADES_VIP.includes(normalizarTexto(cidade.nome))) {
               const { data: mare } = await supabase
                 .from("dados_climaticos")
@@ -1477,10 +1517,11 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
 
       if (dadosClimaticos.length > 0) {
         const payload = {
-          escopo: forRegion ? "regiao" : "cidade",
-          when,
-          resultados: dadosClimaticos,
+        tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica",
+          janelaTempo: when,
+          dados: dadosClimaticos,
         };
+      
         const horaLocal = getHoraLocalSP();
 
         const promptFinal = `
@@ -1501,18 +1542,6 @@ ${historicoParaTextoSimplesWrapper(historico)}
 
         const respostaIA = await geminiTry(promptFinal);
 
-        // Memoriza cidade consultada (se houver apenas uma)
-        try {
-          if (!forRegion && dadosClimaticos[0] && cidadesAtivas?.length) {
-            const nomeCidade = normalizarTexto(dadosClimaticos[0].cidade);
-            const c = cidadesAtivas.find((x) => normalizarTexto(x.nome) === nomeCidade);
-            if (c?.id) {
-              if (!sessionData.entities) sessionData.entities = {};
-              sessionData.entities.lastCity = c.id;
-            }
-          }
-        } catch {}
-
         return await updateSessionAndRespond({
           res,
           runId,
@@ -1522,27 +1551,37 @@ ${historicoParaTextoSimplesWrapper(historico)}
           sessionData,
           regiaoId: regiao.id,
         });
+      
+        // Tenta aprender cidade do primeiro parceiro retornado (se houver)
+        try {
+          const _cid = parceiros[0]?.cidade_id || null;
+          if (_cid) setLastCityInSession(sessionData, _cid);
+        } catch {}
       } else {
-        // Fallback honesto e útil para CLIMA (sem depender de entidades de parceiros)
-        const alvoCidadeNome =
-          (cidadeAlvo && cidadeAlvo.nome) ||
-          (cidadesAtivas.find((c) => c.id === (sessionData?.entities?.lastCity || null))?.nome) ||
-          "a cidade";
-        const honest = `Ainda não tenho dados climáticos consolidados para ${alvoCidadeNome} ${when === "future" ? "nos próximos dias" : "agora"}. Posso tentar novamente mais tarde ou te sugerir atividades em locais cobertos.`;
+        const cidadeNome = (cidadesAtivas.find(c => c.id === (getLastCityFromSession(sessionData) || null))?.nome) || "a cidade";
+        const alvo = (entidades?.category || "").toLowerCase();
+        const msgPorCategoria = {
+          pizzaria: `Não encontrei pizzarias confiáveis nos meus dados internos para ${cidadeNome}. Quer tentar italiano, massa ou hamburgueria?`,
+          sushi: `Não encontrei restaurantes japoneses/sushi para ${cidadeNome}. Quer tentar asiático ou peixes/frutos do mar?`,
+          churrascaria: `Não encontrei churrascarias para ${cidadeNome}. Posso procurar restaurantes de carnes ou picanha?`,
+        };
+        const fallback = msgPorCategoria[alvo] || `Não encontrei opções confiáveis para ${cidadeNome} nos meus dados internos. Quer que eu tente outra categoria próxima?`;
+
         return await updateSessionAndRespond({
           res,
           runId,
           conversationId,
           userText,
-          aiResponseText: honest,
+          aiResponseText: fallback,
           sessionData,
           regiaoId: regiao.id,
           partners: [],
         });
+
       }
     }
 
-    // 3) ROTAS HUMANAS
+    // 3) ROTAS HUMANAS (quando pedido explicitamente)
     if (isRouteQuestion(userText)) {
       const respostaRotas = gerarRotasHumanas(userText);
       return await updateSessionAndRespond({
@@ -1660,6 +1699,7 @@ process.on("SIGTERM", () => {
   console.log("[SHUTDOWN] Recebido SIGTERM. Encerrando...");
   process.exit(0);
 });
+// ================================ SERVER ====================================
 
 export default app;
 

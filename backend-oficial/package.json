@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "backend-oficial",
   "version": "1.0.0",
   "private": true,
@@ -11,15 +11,16 @@
     "bulk-index": "node ./scripts/bulk-index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.75.1",
+    "@supabase/supabase-js": "^2.76.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "express": "^4.21.2",
     "ioredis": "^5.8.1",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "node-fetch": "^3.3.2"
   },
   "devDependencies": {
-    "nodemon": "^3.1.7"
+    "nodemon": "^3.1.10"
   },
   "engines": {
     "node": "20.x",

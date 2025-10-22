@@ -6,18 +6,15 @@
 // - RPCs v2 (devem usar embedding_768 + cosine):
 //   parceiros_vector_search_v2(...) e parceiros_text_search_v2(...)
 // Obs: usa SUPABASE_SERVICE_ROLE_KEY (apenas backend).
-// v2.4 — correções de sintaxe, return prematuro, e bônus semânticos
+// v2.5 — fix do ReferenceError (map vs mapById), bônus consistentes e blindagens
 // ============================================================================
 
 import { createClient } from "@supabase/supabase-js";
 
-// ---- Fetch Polyfill (Node.js < 18) --------------------------------------------
-// Garante que 'fetch' exista em runtime sem alterar a lógica do BEPIT.
-// Não muda comportamento em Node >= 18. Em Node < 18 usa 'node-fetch' sob demanda.
+// ---- Fetch Polyfill (Node.js < 18)
 if (typeof fetch !== "function") {
   globalThis.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 }
-// -------------------------------------------------------------------------------
 
 // ---------------------------- Env & Clients ---------------------------------
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -38,9 +35,9 @@ const WEIGHTS = {
   text: 0.15,
   catMatch: 0.35,        // bônus por categoria coincidente (exata)
   termHit: 0.15,         // bônus por termo encontrado (nome/descrição)
-  termHitMaxBonus: 0.45, // teto dos bônus por termos (ex.: 3 hits x 0.15)
+  termHitMaxBonus: 0.45, // teto dos bônus por termos
   cityMatch: 0.10,       // bônus por cidade coincidindo
-  catFilterBonus: 0.10,  // bônus leve extra se filtro de categoria bateu
+  catFilterBonus: 0.10,  // bônus leve se filtro de categoria bateu
 };
 
 // “Gating”: se achar pelo menos 1 item “relevante”, mostra só os relevantes.
@@ -50,189 +47,93 @@ const RELEVANCE_GATE = {
 };
 
 // ---------------------------- ALIASES de categorias -------------------------
-// Normaliza rótulos que os turistas escrevem → categorias do seu banco.
 const CATEGORY_ALIASES = {
-  // bar / noite
   "barzinho": "bar",
   "birosca": "bar",
   "biroska": "bar",
-  // comida
   "picanha": "churrascaria",
   "massas": "italiano",
   "podrão": "lanchonete",
   "podrao": "lanchonete",
   "dogão": "lanchonete",
   "dogao": "lanchonete",
-  "cocada": "quiosque", // normalmente em praia/quiosque
-  "caldirada": "frutos do mar", // normalizado abaixo (caldeirada)
+  "cocada": "quiosque",
+  "caldirada": "frutos do mar",
   "caldeirada": "frutos do mar",
   "anchova": "frutos do mar",
   "corvina": "frutos do mar",
-  "corniva": "frutos do mar", // erro comum
-  // bebida
-  "deposito_bebbida": "deposito_bebidas", // typo frequente → normaliza
+  "corniva": "frutos do mar",
+  "deposito_bebbida": "deposito_bebidas",
   "deposito_bebidas": "deposito_bebidas",
-  // transporte
   "aluguel_de_carro": "locadora_veiculos",
   "motorista": "transporte",
   "taxi barco": "barco",
   "barco taxi": "barco",
   "táxi barco": "barco",
   "táxi-barco": "barco",
-  // esporte aquático
   "jetsky": "esportes aquáticos",
   "jetski": "esportes aquáticos",
-  // hospedagem
-  "hospedagem": "hotel", // guarda-chuva; não filtramos exato (ver UMBRELLA_CATS)
-  // utilidade
+  "hospedagem": "hotel",
   "servico_utilidade": "servico_utilidade",
   "serviço utilidade": "servico_utilidade",
-  // praia/estrutura
   "barraca": "quiosque",
   "praça": "passeios",
   "praca": "passeios",
   "canal": "passeios",
   "canal(local)": "passeios",
-  // imobiliário / temporada
   "imóveis": "casa temporada",
   "imoveis": "casa temporada",
   "veraneio": "casa temporada",
-  // “japonês” ambiguidades
   "japonês (comida)": "sushi",
   "japones (comida)": "sushi",
   "japonês": "sushi",
   "japones": "sushi",
-  "japones(ilha)": "praia",     // Ilha do Japonês (ponto local)
-  "japonês (ilha)": "praia",    // idem
-  // barco
+  "japones(ilha)": "praia",
+  "japonês (ilha)": "praia",
   "barco": "barco",
   "lancha": "barco",
 };
 
 // ---------------------------- Taxonomia EXPANDIDA ---------------------------
-// Sinônimos/vocabulário comum de turista — tudo normalizado antes da comparação.
-// Chaves devem refletir *categorias canônicas* do seu banco quando possível.
 const TAXONOMY = {
-  // ---- COMIDA / GASTRONOMIA ----
-  "pizzaria": [
-    "pizza", "pizzaria", "massa", "forno a lenha", "bordas recheadas", "rodízio de pizza", "rodizio de pizza"
-  ],
-  "restaurante": [
-    "restaurante", "comida", "almoço", "almoco", "jantar", "cardápio", "prato executivo",
-    "self service", "self-service", "quilo", "delivery", "marmita", "à la carte", "a la carte",
-    "comida caseira", "caseira", "menu do dia", "promoção do dia", "massas"
-  ],
-  "italiano": [
-    "italiano", "massas", "massa fresca", "nhoque", "lasanha", "spaghetti", "fetuccine", "risoto"
-  ],
-  "churrascaria": [
-    "churrasco", "picanha", "rodizio", "rodízio", "costela", "carnes", "espeto corrido", "parrilla"
-  ],
-  "frutos do mar": [
-    "peixe", "frutos do mar", "camarão", "lula", "polvo", "moqueca", "caldeirada", "caldirada", "ostra",
-    "anchova", "corvina", "corniva"
-  ],
-  "sushi": [
-    "sushi", "sashimi", "japonês", "japonesa", "temaki", "yakisoba", "uramaki", "hot roll"
-  ],
-  "hamburgueria": [
-    "hambúrguer", "hamburguer", "burger", "smash", "artesanal", "combo", "batata frita", "podrão", "podrao", "dogão", "dogao"
-  ],
-  "lanchonete": [
-    "lanche", "sanduíche", "sanduiche", "x-tudo", "pastel", "misto quente", "dogão", "dogao", "fast food"
-  ],
-  "bistrô": [
-    "bistrô", "bistro", "cozinha autoral", "menu degustação", "vinhos"
-  ],
-  "cafeteria": [
-    "cafeteria", "café", "espresso", "cappuccino", "latte", "mocha", "padaria", "pão na chapa", "pão de queijo", "croissant"
-  ],
-  "padaria": [
-    "padaria", "pães", "bolo", "salgados", "pão francês", "pão doce", "fatia de bolo"
-  ],
-  "sorveteria": [
-    "sorvete", "gelato", "picolé", "milk-shake", "milkshake", "taça"
-  ],
-  "açai": [
-    "açaí", "acai", "tapioca", "crepioca", "creperia"
-  ],
-  "vegano": [
-    "vegano", "vegetariano", "sem carne", "sem glúten", "sem lactose", "gluten free", "lactose free", "saudável", "saudavel"
-  ],
+  "pizzaria": ["pizza","pizzaria","massa","forno a lenha","bordas recheadas","rodízio de pizza","rodizio de pizza"],
+  "restaurante": ["restaurante","comida","almoço","almoco","jantar","cardápio","prato executivo","self service","self-service","quilo","delivery","marmita","à la carte","a la carte","comida caseira","caseira","menu do dia","promoção do dia","massas"],
+  "italiano": ["italiano","massas","massa fresca","nhoque","lasanha","spaghetti","fetuccine","risoto"],
+  "churrascaria": ["churrasco","picanha","rodizio","rodízio","costela","carnes","espeto corrido","parrilla"],
+  "frutos do mar": ["peixe","frutos do mar","camarão","lula","polvo","moqueca","caldeirada","caldirada","ostra","anchova","corvina","corniva"],
+  "sushi": ["sushi","sashimi","japonês","japonesa","temaki","yakisoba","uramaki","hot roll"],
+  "hamburgueria": ["hambúrguer","hamburguer","burger","smash","artesanal","combo","batata frita","podrão","podrao","dogão","dogao"],
+  "lanchonete": ["lanche","sanduíche","sanduiche","x-tudo","pastel","misto quente","dogão","dogao","fast food"],
+  "bistrô": ["bistrô","bistro","cozinha autoral","menu degustação","vinhos"],
+  "cafeteria": ["cafeteria","café","espresso","cappuccino","latte","mocha","padaria","pão na chapa","pão de queijo","croissant"],
+  "padaria": ["padaria","pães","bolo","salgados","pão francês","pão doce","fatia de bolo"],
+  "sorveteria": ["sorvete","gelato","picolé","milk-shake","milkshake","taça"],
+  "açai": ["açaí","acai","tapioca","crepioca","creperia"],
+  "vegano": ["vegano","vegetariano","sem carne","sem glúten","sem lactose","gluten free","lactose free","saudável","saudavel"],
 
-  // ---- BEBIDAS / NOITE ----
-  "bar": [
-    "bar", "bares", "barzinho", "birosca", "biroska", "boteco", "pub", "chope", "chopp", "cervejaria", "choperia",
-    "drinks", "caipirinha", "coquetel", "drink autoral", "balada", "lounge",
-    "wine bar", "adega", "música ao vivo", "musica ao vivo", "happy hour", "pagode", "samba"
-  ],
-  "deposito_bebidas": [
-    "depósito de bebidas", "deposito de bebidas", "bebidas 24h", "bebidas", "gelo", "carvão", "carvao"
-  ],
+  "bar": ["bar","bares","barzinho","birosca","biroska","boteco","pub","chope","chopp","cervejaria","choperia","drinks","caipirinha","coquetel","drink autoral","balada","lounge","wine bar","adega","música ao vivo","musica ao vivo","happy hour","pagode","samba"],
+  "deposito_bebidas": ["depósito de bebidas","deposito de bebidas","bebidas 24h","bebidas","gelo","carvão","carvao"],
 
-  // ---- PASSEIOS / ATIVIDADES ----
-  "barco": [
-    "passeio de barco", "barco", "taxi barco", "barco taxi", "táxi barco", "lancha", "escuna", "catamarã", "catamara",
-    "volta ilha", "ilha", "gruta", "gruta azul", "paradas para banho", "praias", "pôr do sol", "por do sol"
-  ],
-  "trilha": [
-    "trilha", "trilha leve", "mirante", "nascer do sol", "sunrise", "por do sol", "pôr do sol",
-    "quadriciclo", "buggy", "city tour", "tour", "ecoturismo", "praça", "canal", "canal itajuru"
-  ],
-  "mergulho": [
-    "mergulho", "batismo", "snorkel", "snorkeling", "cilindro", "neoprene", "visibilidade"
-  ],
-  "esportes aquáticos": [
-    "stand up paddle", "sup", "caiaque", "kayak", "windsurf", "kitesurf", "kite", "surf", "aula de surf", "wakeboard",
-    "jetski", "jetsky"
-  ],
+  "barco": ["passeio de barco","barco","taxi barco","barco taxi","táxi barco","lancha","escuna","catamarã","catamara","volta ilha","ilha","gruta","gruta azul","paradas para banho","praias","pôr do sol","por do sol"],
+  "trilha": ["trilha","trilha leve","mirante","nascer do sol","sunrise","por do sol","pôr do sol","quadriciclo","buggy","city tour","tour","ecoturismo","praça","canal","canal itajuru"],
+  "mergulho": ["mergulho","batismo","snorkel","snorkeling","cilindro","neoprene","visibilidade"],
+  "esportes aquáticos": ["stand up paddle","sup","caiaque","kayak","windsurf","kitesurf","kite","surf","aula de surf","wakeboard","jetski","jetsky"],
 
-  // ---- PRAIA / ESTRUTURA ----
-  "praia": [
-    "praia", "praias", "orla", "bandeira azul", "faixa de areia", "mar calmo", "mar forte",
-    "quiosque", "quiosques", "aluguel de cadeira", "aluguel de guarda-sol", "guarda sol", "sombrinha",
-    "praia para criança", "praia família", "pet friendly", "ilha do japonês", "japones ilha", "ilha japones"
-  ],
-  "quiosque": [
-    "quiosque", "barraca", "cocada", "porção", "porcoes", "caipirinha", "cerveja", "tira-gosto", "tira gosto"
-  ],
+  "praia": ["praia","praias","orla","bandeira azul","faixa de areia","mar calmo","mar forte","quiosque","quiosques","aluguel de cadeira","aluguel de guarda-sol","guarda sol","sombrinha","praia para criança","praia família","pet friendly","ilha do japonês","japones ilha","ilha japones"],
+  "quiosque": ["quiosque","barraca","cocada","porção","porcoes","caipirinha","cerveja","tira-gosto","tira gosto"],
 
-  // ---- HOSPEDAGEM ----
-  "pousada": [
-    "pousada", "café da manhã", "cafe da manha", "piscina", "quartos", "suite", "suíte", "estacionamento", "pet friendly"
-  ],
-  "hotel": [
-    "hotel", "resort", "hospedagem", "hostel", "albergue", "flat", "apart hotel", "apart-hotel",
-    "beira mar", "beira-mar", "pé na areia", "pe na areia", "vista para o mar", "hidromassagem", "spa"
-  ],
-  "casa temporada": [
-    "casa temporada", "temporada", "aluguel por temporada", "kitnet", "apartamento temporada", "imóveis", "imoveis", "veraneio"
-  ],
+  "pousada": ["pousada","café da manhã","cafe da manha","piscina","quartos","suite","suíte","estacionamento","pet friendly"],
+  "hotel": ["hotel","resort","hospedagem","hostel","albergue","flat","apart hotel","apart-hotel","beira mar","beira-mar","pé na areia","pe na areia","vista para o mar","hidromassagem","spa"],
+  "casa temporada": ["casa temporada","temporada","aluguel por temporada","kitnet","apartamento temporada","imóveis","imoveis","veraneio"],
 
-  // ---- TRANSPORTE ----
-  "transporte": [
-    "transporte", "transfer", "van", "uber", "táxi", "taxi", "motorista particular", "carona", "ônibus", "onibus",
-    "rodoviária", "rodoviaria", "bicicleta", "bike", "patinete"
-  ],
-  "locadora_veiculos": [
-    "aluguel de carro", "locadora", "rent a car", "carro", "diária", "diaria", "franquia", "seguro"
-  ],
+  "transporte": ["transporte","transfer","van","uber","táxi","taxi","motorista particular","carona","ônibus","onibus","rodoviária","rodoviaria","bicicleta","bike","patinete"],
+  "locadora_veiculos": ["aluguel de carro","locadora","rent a car","carro","diária","diaria","franquia","seguro"],
 
-  // ---- SERVIÇOS PÚBLICOS / EMERGÊNCIA ----
-  "servico_utilidade": [
-    "serviço público", "servicos publicos", "banco", "caixa eletrônico", "caixa 24 horas", "24h",
-    "farmácia", "farmacia", "hospital", "upa", "emergência", "emergencia",
-    "delegacia", "polícia", "policia", "guarda municipal", "capitania dos portos", "bombeiros", "samu",
-    "lavanderia", "loja de conveniência", "conveniencia", "mercado", "supermercado",
-    "hortifruti", "açougue", "acougue", "shopping", "feira", "artesanato", "souvenir", "lembrancinha", "lavanderia"
-  ],
+  "servico_utilidade": ["serviço público","servicos publicos","banco","caixa eletrônico","caixa 24 horas","24h","farmácia","farmacia","hospital","upa","emergência","emergencia","delegacia","polícia","policia","guarda municipal","capitania dos portos","bombeiros","samu","lavanderia","loja de conveniência","conveniencia","mercado","supermercado","hortifruti","açougue","acougue","shopping","feira","artesanato","souvenir","lembrancinha","lavanderia"],
 };
 
-// Categorias guarda-chuva → não filtrar exato no SQL, deixar o ranking decidir.
-const UMBRELLA_CATS = new Set([
-  "comida", "bebidas", "passeios", "praias", "hospedagem", "transporte", "serviço público", "servico publico",
-  "utilidade", "servico_utilidade"
-]);
+// Categorias guarda-chuva → não filtrar exato no SQL
+const UMBRELLA_CATS = new Set(["comida","bebidas","passeios","praias","hospedagem","transporte","serviço público","servico publico","utilidade","servico_utilidade"]);
 
 // ---------------------------- Utils -----------------------------------------
 function normalize(s) {
@@ -242,13 +143,11 @@ function normalize(s) {
     .toLowerCase()
     .trim();
 }
-
 function mapAliasCategory(cat) {
   if (!cat) return null;
   const n = normalize(cat || "");
   return CATEGORY_ALIASES[n] ? CATEGORY_ALIASES[n] : n;
 }
-
 function safeJoinTexts(chunks = [], maxLen = 8000) {
   const parts = [];
   for (const c of chunks) {
@@ -259,7 +158,6 @@ function safeJoinTexts(chunks = [], maxLen = 8000) {
   if (!raw) return null;
   return raw.slice(0, maxLen);
 }
-
 function ensureArrayFloat(x) {
   if (!Array.isArray(x)) return [];
   return x.map((v) => (typeof v === "number" ? v : Number(v))).filter((n) => Number.isFinite(n));
@@ -267,37 +165,26 @@ function ensureArrayFloat(x) {
 
 // ------------------------- Embedding (forçar 768) ---------------------------
 async function embedText768(text) {
-  if (!GEMINI_API_KEY) {
-    throw new Error("[Embeddings] GEMINI_API_KEY não definido.");
-  }
-  const url =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent" +
-    `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-
+  if (!GEMINI_API_KEY) throw new Error("[Embeddings] GEMINI_API_KEY não definido.");
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent" +
+              `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
   const body = {
     model: "models/gemini-embedding-001",
     content: { parts: [{ text: String(text || "") }] },
     taskType: "RETRIEVAL_DOCUMENT",
     outputDimensionality: 768,
   };
-
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify(body),
   });
-
   if (!resp.ok) {
     const txt = await resp.text().catch(() => "");
     throw new Error(`[Gemini Embeddings] HTTP ${resp.status} ${resp.statusText}: ${txt}`);
   }
-
   const data = await resp.json();
-  const vec =
-    data?.embedding?.values ||
-    data?.embedding?.value ||
-    (Array.isArray(data?.embedding) ? data.embedding : null);
-
+  const vec = data?.embedding?.values || data?.embedding?.value || (Array.isArray(data?.embedding) ? data.embedding : null);
   const arr = ensureArrayFloat(vec);
   if (arr.length !== 768) throw new Error(`Embedding dimension mismatch: got ${arr.length}, expected 768`);
   return arr;
@@ -306,8 +193,6 @@ async function embedText768(text) {
 // ------------------------- INDEXAÇÃO (salvar 768) ---------------------------
 export async function indexPartnerText(partnerId, chunks = []) {
   if (!partnerId) throw new Error("partnerId é obrigatório.");
-
-  // 1) base de texto
   let baseText = safeJoinTexts(chunks);
   if (!baseText) {
     const { data: p, error: perr } = await supabase
@@ -322,17 +207,9 @@ export async function indexPartnerText(partnerId, chunks = []) {
     baseText = (nome + desc).trim();
     if (!baseText) throw new Error("Sem conteúdo para indexar.");
   }
-
-  // 2) embedding 768
   const embedding = await embedText768(baseText);
-
-  // 3) grava
-  const { error: uerr } = await supabase
-    .from("parceiros")
-    .update({ embedding_768: embedding })
-    .eq("id", partnerId);
+  const { error: uerr } = await supabase.from("parceiros").update({ embedding_768: embedding }).eq("id", partnerId);
   if (uerr) throw uerr;
-
   return { ok: true, partnerId, savedColumn: "embedding_768", dims: embedding.length, usedChunks: chunks.length || 0 };
 }
 
@@ -342,25 +219,14 @@ function extractSignals(q, hintedCategory = null) {
   const terms = new Set();
   const wantedCategories = new Set();
 
-  // 0) normalizar “categoria sugerida” via aliases (se veio do caller)
   let hinted = mapAliasCategory(hintedCategory);
+  if (hinted && !UMBRELLA_CATS.has(hinted)) wantedCategories.add(hinted);
 
-  // 1) se não for guarda-chuva, adicionar
-  if (hinted && !UMBRELLA_CATS.has(hinted)) {
-    wantedCategories.add(hinted);
-  }
-
-  // 2) varre TAXONOMY e também ALIASES a partir do texto da query
   for (const [cat, syns] of Object.entries(TAXONOMY)) {
     const catN = normalize(cat);
     const list = Array.isArray(syns) ? syns : [];
     const hit = list.some((kw) => qn.includes(normalize(kw))) || qn.includes(catN);
-
-    // Também verifica termos que mapeariam para esse cat via alias
-    const aliasHit = Object.entries(CATEGORY_ALIASES).some(([alias, canonical]) => {
-      return canonical === catN && qn.includes(normalize(alias));
-    });
-
+    const aliasHit = Object.entries(CATEGORY_ALIASES).some(([alias, canonical]) => canonical === catN && qn.includes(normalize(alias)));
     if (hit || aliasHit) {
       wantedCategories.add(catN);
       for (const kw of list) terms.add(normalize(kw));
@@ -368,19 +234,15 @@ function extractSignals(q, hintedCategory = null) {
     }
   }
 
-  // 3) fallback leve: palavras “maiores” para ajudar
   const rawWords = qn.split(/[^a-z0-9]+/).filter(Boolean);
-  for (const w of rawWords) {
-    if (w.length >= 4) terms.add(w);
-  }
+  for (const w of rawWords) if (w.length >= 4) terms.add(w);
 
-  // 4) reforços diretos por termos específicos da sua lista
   const directReinforce = [
-    "barzinho", "birosca", "biroska", "picanha", "caldirada", "caldeirada", "anchova", "corvina", "corniva",
-    "barraca", "motorista", "aluguel_de_carro", "jetski", "jetsky", "lancha", "massas",
-    "podrão", "podrao", "dogão", "dogao", "cocada", "praça", "tailandesa", "canal", "pousada",
-    "imóveis", "imoveis", "veraneio", "quiosque", "deposito_bebbida", "deposito_bebidas", "lavanderia",
-    "servico_utilidade", "hospedagem", "taxi barco", "barco taxi", "japones(ilha)"
+    "barzinho","birosca","biroska","picanha","caldirada","caldeirada","anchova","corvina","corniva",
+    "barraca","motorista","aluguel_de_carro","jetski","jetsky","lancha","massas",
+    "podrão","podrao","dogão","dogao","cocada","praça","tailandesa","canal","pousada",
+    "imóveis","imoveis","veraneio","quiosque","deposito_bebbida","deposito_bebidas","lavanderia",
+    "servico_utilidade","hospedagem","taxi barco","barco taxi","japones(ilha)"
   ];
   for (const t of directReinforce) {
     if (qn.includes(normalize(t))) {
@@ -389,34 +251,23 @@ function extractSignals(q, hintedCategory = null) {
       if (mapped && !UMBRELLA_CATS.has(mapped)) wantedCategories.add(mapped);
     }
   }
-
-  return {
-    terms: Array.from(terms),
-    wantedCategories: Array.from(wantedCategories),
-  };
+  return { terms: Array.from(terms), wantedCategories: Array.from(wantedCategories) };
 }
 
 function computeAffinity(item, signals) {
   const cat = normalize(item.categoria || item.category || "");
   const nome = normalize(item.nome || item.name || "");
   const desc = normalize(item.descricao || item.description || "");
-
   let bonus = 0;
   let hits = 0;
-
-  if (signals.wantedCategories.length > 0 && signals.wantedCategories.includes(cat)) {
-    bonus += WEIGHTS.catMatch;
-  }
-
+  if (signals.wantedCategories.length > 0 && signals.wantedCategories.includes(cat)) bonus += WEIGHTS.catMatch;
   if (signals.terms.length > 0) {
     for (const t of signals.terms) {
       if (!t) continue;
       if (nome.includes(t) || desc.includes(t)) hits++;
     }
-    const termBonus = Math.min(hits * WEIGHTS.termHit, WEIGHTS.termHitMaxBonus);
-    bonus += termBonus;
+    bonus += Math.min(hits * WEIGHTS.termHit, WEIGHTS.termHitMaxBonus);
   }
-
   return { bonus, hits };
 }
 
@@ -426,12 +277,8 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   const filtroCidadeOriginal = cidade_id || null;
   let filtroCidade = filtroCidadeOriginal;
 
-  // normaliza categoria entrada via alias
   let filtroCategoria = mapAliasCategory((categoria || "").trim() || null);
-  if (filtroCategoria && UMBRELLA_CATS.has(filtroCategoria)) {
-    // categorias guarda-chuva: não filtre exato no SQL
-    filtroCategoria = null;
-  }
+  if (filtroCategoria && UMBRELLA_CATS.has(filtroCategoria)) filtroCategoria = null;
 
   const signals = extractSignals(q, filtroCategoria);
 
@@ -549,7 +396,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
       if (terr2) throw terr2;
       textRows = (Array.isArray(trows2) ? trows2 : []).map((r) => ({
         ...r,
-        text_score: typeof r.text_score === "number" ? r.text_score : 0.5,
+        text_score: Number.isFinite(r.text_score) ? r.text_score : 0.5,
       }));
       meta.steps.text_rpc_fallback.count = textRows.length;
     } catch (e) {
@@ -593,7 +440,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
     }
   }
 
-  const qNorm = (q || "").toLowerCase();
+  const qNorm = String(q || "").toLowerCase();
 
   // Intenções comuns
   const mentionsPizza = /\b(pizza|pizzaria)\b/.test(qNorm);
@@ -610,71 +457,62 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
     carneWord: 0.15,
   };
 
+  const W_VECTOR = WEIGHTS.vector;
+  const W_TEXT   = WEIGHTS.text;
+
   const merged = Array.from(mapById.values()).map((r) => {
-    let score_final = WEIGHTS.vector * (r.score_vector || 0) + WEIGHTS.text * (r.score_text || 0);
+    let score_final = W_VECTOR * (r.score_vector || 0) + W_TEXT * (r.score_text || 0);
 
     // Bônus por filtros “duros” aplicados
     if (filtroCidade && (r.cidade_id === filtroCidade || r.cidade === filtroCidade)) score_final += WEIGHTS.cityMatch;
-    const catFilter = (r.categoria || r.category || "").toLowerCase();
-    if (filtroCategoria && catFilter === filtroCategoria) score_final += WEIGHTS.catFilterBonus;
+    if (filtroCategoria && (r.categoria === filtroCategoria || r.category === filtroCategoria)) score_final += WEIGHTS.catFilterBonus;
 
-    const cat = (r.categoria || r.category || "").toLowerCase();
-    const nome = (r.nome || r.name || "").toLowerCase();
-    const desc = (r.descricao || r.description || "").toLowerCase();
+    const cat  = String(r.categoria || r.category || "").toLowerCase();
+    const nome = String(r.nome || r.name || "").toLowerCase();
+    const desc = String(r.descricao || r.description || "").toLowerCase();
 
-    // Pizza
     if (mentionsPizza) {
       if (cat === "pizzaria") score_final += BONUS.pizzaCatExact;
       if (nome.includes("pizza") || desc.includes("pizza")) score_final += BONUS.pizzaWord;
     }
-    // Sushi / Japonês
     if (mentionsSushi) {
-      if (["sushi", "japonesa", "japones", "japonês"].includes(cat)) score_final += BONUS.sushiCatExact;
-      if (nome.includes("sushi") || nome.includes("japon") || desc.includes("sushi") || desc.includes("japon")) {
-        score_final += BONUS.sushiWord;
-      }
+      if (["sushi","japonesa","japones","japonês"].includes(cat)) score_final += BONUS.sushiCatExact;
+      if (nome.includes("sushi") || nome.includes("japon") || desc.includes("sushi") || desc.includes("japon")) score_final += BONUS.sushiWord;
     }
-    // Carne / Churrasco
     if (mentionsCarne) {
-      if (["churrascaria", "carne"].includes(cat)) score_final += BONUS.carneCatExact;
-      if (nome.includes("picanha") || nome.includes("churras") || desc.includes("picanha") || desc.includes("churras")) {
-        score_final += BONUS.carneWord;
-      }
+      if (["churrascaria","carne"].includes(cat)) score_final += BONUS.carneCatExact;
+      if (nome.includes("picanha") || nome.includes("churras") || desc.includes("picanha") || desc.includes("churras")) score_final += BONUS.carneWord;
     }
-
-    // Afinidade genérica com sinais (categoria/termos)
-    const aff = computeAffinity(r, signals);
-    score_final += aff.bonus;
-
     return { ...r, score_final };
   });
 
+  // Ordenação principal
   const rankedAll =
     merged.length === 0
       ? (textRows || []).sort((a, b) => {
           const at = typeof a.text_score === "number" ? a.text_score : 0;
           const bt = typeof b.text_score === "number" ? b.text_score : 0;
           if (bt !== at) return bt - at;
-          return (a.nome || a.name || "").localeCompare(b.nome || b.name || "");
+          return (String(a.nome || a.name || "")).localeCompare(String(b.nome || b.name || ""));
         })
       : merged.sort((a, b) => b.score_final - a.score_final);
 
-  // Preferência: se a intenção for pizza e existirem itens coerentes, mostre só eles
-  let preferred = rankedAll;
+  // Foco: pizza → só pizza se houver
+  let preferredOnly = rankedAll;
   if (mentionsPizza) {
     const keep = rankedAll.filter((r) => {
-      const cat = (r.categoria || r.category || "").toLowerCase();
-      const nome = (r.nome || r.name || "").toLowerCase();
-      const desc = (r.descricao || r.description || "").toLowerCase();
+      const cat  = String(r.categoria || r.category || "").toLowerCase();
+      const nome = String(r.nome || r.name || "").toLowerCase();
+      const desc = String(r.descricao || r.description || "").toLowerCase();
       return cat === "pizzaria" || nome.includes("pizza") || desc.includes("pizza");
     });
-    if (keep.length > 0) preferred = keep;
+    if (keep.length > 0) preferredOnly = keep;
   }
 
   // ----------------------- Gating genérico ----------------------------------
-  let finalList = preferred;
+  let finalList = preferredOnly;
   if (RELEVANCE_GATE.requireAny) {
-    const relevant = preferred.filter((r) => {
+    const relevant = preferredOnly.filter((r) => {
       const aff = computeAffinity(r, signals);
       return aff.bonus >= RELEVANCE_GATE.minScore;
     });
@@ -750,8 +588,7 @@ export async function bulkIndexPartners({ cidade_id = null, categoria = null, on
   if (error) throw error;
 
   const ids = (rows || []).map((r) => r.id);
-  let ok = 0,
-    fail = 0;
+  let ok = 0, fail = 0;
   const errors = [];
 
   for (const pid of ids) {
