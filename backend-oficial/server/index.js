@@ -1420,52 +1420,133 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
       });
     }
 
-    // 1) PARCEIROS PRIMEIRO
+    // =========================================================================
+    // ETAPA 1: LÓGICA DO VENDEDOR NATO (PARCEIROS PRIMEIRO)
+    // =========================================================================
     if (forcarBuscaParceiro(userText)) {
-      let cidadeUUIDHerdada = getLastCityFromSession(sessionData);
+      console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada. Iniciando Lógica Vendedor Nato.`);
 
-      console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada — chamando hybridSearch...`);
+      // --- Extrair Entidades ---
+      // (Esta lógica está em searchPartnersRAG[cite: 269], mas vamos trazê-la para cá para controlar o fluxo)
+      const entidades = await extrairEntidadesDaBusca(userText); // [cite: 269]
+      const categoriaAlvo = entidades?.category || null;
+      const cidadeNomeAlvo = entidades?.city || null;
+      let cidadeIdAlvo = null;
+      if (cidadeNomeAlvo) {
+        const cidadeObj = cidadesAtivas.find(
+          (c) => normalizarTexto(c.nome) === normalizarTexto(cidadeNomeAlvo)
+        );
+        cidadeIdAlvo = cidadeObj?.id || null;
+      }
+      
+      // Se não houver cidade na pergunta, tenta herdar da sessão
+      if (!cidadeIdAlvo) {
+         cidadeIdAlvo = getLastCityFromSession(sessionData); // [cite: 362-364]
+         console.log(`[RUN ${runId}] [RAG] Usando cidade herdada da sessão: ${cidadeIdAlvo}`);
+      }
 
-      const { parceiros } = await searchPartnersRAG({
+      // --- TRY 1: Busca Exata (O que o usuário pediu) ---
+      console.log(`[RUN ${runId}] [RAG-Try 1] Buscando: ${categoriaAlvo} EM ${cidadeIdAlvo || 'Qualquer Cidade'}`);
+      const { parceiros: parceirosTry1 } = await searchPartnersRAG({
         textoDoUsuario: userText,
         cidadesAtivas,
         limit: 5,
-      });
+      }); // 
 
-      if (parceiros.length > 0) {
-        const respostaModelo = await gerarRespostaDeListaParceiros(userText, historico, parceiros);
+      // --- SUCESSO: Se a Busca 1 funcionar, responde e termina ---
+      if (parceirosTry1.length > 0) {
+        console.log(`[RUN ${runId}] [RAG-Try 1] SUCESSO. Encontrados ${parceirosTry1.length} parceiros.`);
+        const respostaModelo = await gerarRespostaDeListaParceiros(userText, historico, parceirosTry1); // [cite: 322]
         const respostaFinal = finalizeAssistantResponse({
           modelResponseText: respostaModelo,
-          foundPartnersList: parceiros,
+          foundPartnersList: parceirosTry1,
           mode: "partners",
-        });
+        }); // [cite: 319-321]
 
-        try {
-          await supabase
-            .from("conversas")
-            .update({
-              parceiros_sugeridos: parceiros,
-              parceiro_em_foco: null,
-              topico_atual: entidades?.category || null,
-            })
-            .eq("id", conversationId);
-        } catch {
-          // best-effort
-        }
+        // Salva a cidade da busca bem-sucedida na sessão
+        if (cidadeIdAlvo) setLastCityInSession(sessionData, cidadeIdAlvo); // [cite: 360-361]
 
         return await updateSessionAndRespond({
-          res,
-          runId,
-          conversationId,
-          userText,
+          res, runId, conversationId, userText,
           aiResponseText: respostaFinal,
-          sessionData,
-          regiaoId: regiao.id,
-          partners: parceiros,
-        });
+          sessionData, regiaoId: regiao.id, partners: parceirosTry1,
+        }); // [cite: 184-195]
       }
-      // se não achou parceiros, segue para checagem de clima/rotas/fallback
+
+      // --- FALHA (Try 1 falhou): Ativar "Cérebro Vendedor Nato" ---
+      console.log(`[RUN ${runId}] [RAG-Try 1] FALHA. Ativando Cérebro Vendedor Nato...`);
+
+      // --- TRY 2: Relaxar Localização (Manter Categoria, buscar em *todas* as cidades) ---
+      console.log(`[RUN ${runId}] [RAG-Try 2] Relaxando localização. Buscando: ${categoriaAlvo} EM (Todas as Cidades)`);
+      const { parceiros: parceirosTry2 } = await searchPartnersRAG({
+        textoDoUsuario: categoriaAlvo || userText, // Foca só na categoria
+        cidadesAtivas: cidadesAtivas, // Passa todas as cidades
+        limit: 2, // Pegamos só os 2 melhores
+      });
+
+      // --- TRY 3: Relaxar Categoria (Manter Localização, buscar categoria-irmã) ---
+      // (Lógica simples para encontrar categoria-irmã)
+      let categoriaIrma = null;
+      if (categoriaAlvo === 'pizzaria' || categoriaAlvo === 'hamburgueria' || categoriaAlvo === 'sushi') {
+         categoriaIrma = 'restaurante';
+      } else if (categoriaAlvo === 'comida') {
+         categoriaIrma = 'bar'; // Exemplo
+      }
+      
+      let parceirosTry3 = [];
+      if (categoriaIrma && cidadeIdAlvo) {
+          console.log(`[RUN ${runId}] [RAG-Try 3] Relaxando categoria. Buscando: ${categoriaIrma} EM ${cidadeIdAlvo}`);
+          const { parceiros } = await searchPartnersRAG({
+            textoDoUsuario: categoriaIrma, // Foca na categoria-irmã
+            cidadesAtivas: cidadesAtivas.filter(c => c.id === cidadeIdAlvo), // Só na cidade original
+            limit: 2,
+          });
+          parceirosTry3 = parceiros;
+      }
+
+      // --- Montar o PROMPT VENDEDOR NATO para a IA ---
+      const promptVendedor = `
+${PROMPT_MESTRE_V14}
+
+# CONTEXTO DE VENDA
+O usuário pediu "${userText}" (intenção: ${categoriaAlvo || 'desconhecida'}, local: ${cidadeNomeAlvo || 'qualquer'}).
+A busca exata (Try 1) falhou (0 resultados).
+
+# DADOS DO ESTOQUE (Resultados das buscas de fallback)
+
+## Opção 1: Manter a INTENÇÃO (Ex: Pizzaria) em OUTRO LOCAL
+${JSON.stringify(parceirosTry2)}
+
+## Opção 2: Manter o LOCAL (Ex: Cabo Frio) com OUTRA CATEGORIA (Ex: Restaurante)
+${JSON.stringify(parceirosTry3)}
+
+# INSTRUÇÃO
+Aja como um "vendedor nato", não como um robô.
+1. Peça desculpas gentilmente por não ter a opção exata (Ex: Pizzaria em Cabo Frio).
+2. Se a Opção 1 (Try 2) tiver resultados, ofereça a intenção no local alternativo (Ex: "Olha, não tenho pizzaria em Cabo Frio, mas tenho uma excelente em Arraial: [Nome do Parceiro Try 2]...").
+3. Se a Opção 2 (Try 3) tiver resultados, ofereça a categoria alternativa no local original (Ex: "...Mas se achar longe, tenho ótimos [Restaurantes] aqui mesmo em Cabo Frio: [Nome do Parceiro Try 3].").
+4. Combine as duas se ambas existirem.
+5. Se Opção 1 e 2 falharem, dê a resposta de fallback (linhas 397-402).
+
+[Pergunta]:
+"${userText}"
+
+Responda.
+`.trim();
+
+      const respostaIA = await geminiTry(promptVendedor); // [cite: 394]
+
+      return await updateSessionAndRespond({
+        res, runId, conversationId, userText,
+        aiResponseText: respostaIA,
+        sessionData, regiaoId: regiao.id,
+        // Retornamos os parceiros do Try 2 e 3 juntos para o front-end exibir
+        partners: [...parceirosTry2, ...parceirosTry3],
+      });
     }
+    // =========================================================================
+    // FIM DA LÓGICA DO VENDEDOR NATO
+    // =========================================================================
 
     // 2) CLIMA (apenas quando NÃO for intenção de parceiros)
     if (!forcarBuscaParceiro(userText) && isWeatherQuestion(userText)) {
