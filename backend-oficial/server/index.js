@@ -22,6 +22,9 @@ import { supabase } from "../lib/supabaseAdmin.js";
 // Busca tolerante (se usar) e RAG híbrido (ajuste path se necessário)
 import { buscarParceirosTolerante } from "./utils/searchPartners.js"; // mantido
 import { hybridSearch } from "../services/rag.service.js";
+import climaRoutes from "./routes/clima.routes.js";
+import marRoutes from "./routes/mar.routes.js"; // opcional
+
 
 // ---- Fetch Polyfill (Node.js < 18) --------------------------------------------
 if (typeof fetch !== "function") {
@@ -280,6 +283,9 @@ app.use("/api/rag", ragRoutes);
 app.use("/api/chat", ragRoutes);
 app.use("/api/financeiro", financeiroRoutes);
 app.use("/api/uploads", uploadsRoutes);
+app.use("/api/clima", climaRoutes);
+app.use("/api/mar", marRoutes); // opcional
+
 
 // ---- HEALTHCHECK ------------------------------------------------------------
 app.get("/", (_req, res) => res.status(200).send("BEPIT backend ativo ✅"));

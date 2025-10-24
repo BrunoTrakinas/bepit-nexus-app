@@ -278,7 +278,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   let filtroCidade = filtroCidadeOriginal;
 
   let filtroCategoria = mapAliasCategory((categoria || "").trim() || null);
-  if (filtroCategoria && UMBRELLA_CATS.has(filtroCategoria)) filtroCategoria = null;
+//if (filtroCategoria && UMBRELLA_CATS.has(filtroCategoria)) filtroCategoria = null;
 
   const signals = extractSignals(q, filtroCategoria);
 
