@@ -405,8 +405,8 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   }
 
   if ((!textRows || textRows.length === 0) && q) {
-    // Bloco Novo (Corrigido)
-try {
+ // Bloco Novo (CORRIGIDO)
+  try {
   meta.steps.table_fallback.tried = true;
 
   let query = supabase
@@ -424,15 +424,14 @@ try {
   }
 
   const { data: rowsTbl } = await query.limit(safeLimit * 3);
-  
-      const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
-      textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
-      meta.steps.table_fallback.count = textRows.length;
-    } catch (e) {
-      meta.steps.table_fallback.error = String(e?.message || e);
-    }
-  }
 
+  const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
+  textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
+  meta.steps.table_fallback.count = textRows.length;
+  } catch (e) {
+  meta.steps.table_fallback.error = String(e?.message || e);
+  }
+  }
   // ----------------------- Merge + re-rank com sinais genéricos -------------
   const mapById = new Map();
 
