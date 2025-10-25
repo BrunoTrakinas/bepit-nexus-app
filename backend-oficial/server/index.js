@@ -850,9 +850,10 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
       if (parceirosTry1.length > 0) {
         console.log(`[RUN ${runId}] [RAG-Try 1] SUCESSO. Encontrados ${parceirosTry1.length} parceiros.`);
         
-        // CORREÇÃO 2: Passa a 'categoriaAlvo' para a função de gerar resposta
-        const respostaModelo = await gerarRespostaDeListaParceiros(userText, historico, parceirosTry1, categoriaAlvo);
-        
+        // CORREÇÃO 4: Passa a categoria REAL do parceiro encontrado
+         const categoriaRealEncontrada = parceirosTry1[0]?.categoria || categoriaAlvo; 
+         const respostaModelo = await gerarRespostaDeListaParceiros(userText, historico, parceirosTry1, categoriaRealEncontrada);
+
         const respostaFinal = finalizeAssistantResponse({
           modelResponseText: respostaModelo,
           foundPartnersList: parceirosTry1,
