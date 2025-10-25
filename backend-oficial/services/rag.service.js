@@ -340,8 +340,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   // ==========================================================
   // CORREÇÃO 2: Forçar o filtro de categoria no table_fallback
   // (Isso cura o "Pizzaria -> Localiza")
-  // ==========================================================
-  /*
+  //* ==========================================================
   if ((!textRows || textRows.length === 0) && q) {
     // Bloco table_fallback REVISADO (v2.7.2 - Usando .and())
 try {
@@ -374,7 +373,6 @@ try {
       console.log(`[RAG v2.7.2] Fallback Filters Applied: ${filters.join(',')}`); // Log dos filtros
   }
   // === FIM DA NOVA LÓGICA ===
-  */
 
   const { data: rowsTbl, error: errTbl } = await query.limit(safeLimit * 3);
 
@@ -398,7 +396,7 @@ try {
   // Log do erro geral do fallback
   console.error(`[RAG v2.7.2] Erro GERAL no table_fallback: ${e?.message || e}`); 
 }
-
+  }
 // Fim do Bloco table_fallback REVISADO
   // ==========================================================
   // FIM DA CORREÇÃO 2
