@@ -302,10 +302,10 @@ async function geminiTry(texto, { retries = 2, baseDelay = 500 } = {}) {
 }
 // ============================================================================
 // ==========================================================
-// CORREÇÃO: Restaurar a função extrairEntidadesDaBusca
+// CORREÇÃO v2: Restaurar extrairEntidadesDaBusca (SEM CITAÇÕES)
 // ==========================================================
 async function extrairEntidadesDaBusca(texto) {
-  const tNorm = normalizarTexto(texto || ""); // Usa a função normalizarTexto que já existe abaixo
+  const tNorm = normalizarTexto(texto || ""); // Usa a função normalizarTexto
 
   let city = null;
   if (tNorm.includes("cabo frio")) city = "Cabo Frio";
@@ -324,7 +324,7 @@ async function extrairEntidadesDaBusca(texto) {
   for (const w of DIC_TERMS) if (tNorm.includes(normalizarTexto(w))) terms.push(w);
 
   let category = null;
-  [cite_start]// Lógica de detecção de categoria (baseada no original [cite: 161-169])
+  // Lógica de detecção de categoria
   if (tNorm.includes("pizzaria") || tNorm.includes("pizza")) { category = "pizzaria"; }
   else if (["restaurante", "comer", "comida", "picanha", "carne", "churrasco", "rodizio", "peixe", "frutos do mar", "moqueca", "hamburguer", "bistrô", "sushi", "japonesa"].some(k => tNorm.includes(k))) { category = "comida"; }
   else if (["pousada", "hotel", "hostel", "hospedagem", "airbnb", "apart", "flat", "resort"].some(k => tNorm.includes(k))) { category = "hospedagem"; }
@@ -335,8 +335,11 @@ async function extrairEntidadesDaBusca(texto) {
 
   return { category, city, terms };
 }
-// ============================== HELPERS =====================================
-// (Baseado no [cite: 174-192] - Helpers mantidos)
+// ==========================================================
+// FIM DA CORREÇÃO v2
+// ==========================================================
+
+// (A função normalizarTexto continua abaixo)
 function normalizarTexto(texto) {
   return String(texto || "")
     .normalize("NFD")
