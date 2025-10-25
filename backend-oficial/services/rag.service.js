@@ -498,28 +498,55 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
     return { ...r, score_final };
   });
 
-  // Ordenação principal
-  const rankedAll =
-    merged.length === 0
-      ? (textRows || []).sort((a, b) => {
-          const at = typeof a.text_score === "number" ? a.text_score : 0;
-          const bt = typeof b.text_score === "number" ? b.text_score : 0;
-          if (bt !== at) return bt - at;
-          return (String(a.nome || a.name || "")).localeCompare(String(b.nome || b.name || ""));
-        })
-      : merged.sort((a, b) => b.score_final - a.score_final);
+ // Bloco NOVO (para você COLAR)
 
-  // Foco: pizza → só pizza se houver
-  let preferredOnly = rankedAll;
-  if (mentionsPizza) {
-    const keep = rankedAll.filter((r) => {
-      const cat  = String(r.categoria || r.category || "").toLowerCase();
-      const nome = String(r.nome || r.name || "").toLowerCase();
-      const desc = String(r.descricao || r.description || "").toLowerCase();
-      return cat === "pizzaria" || nome.includes("pizza") || desc.includes("pizza");
-    });
-    if (keep.length > 0) preferredOnly = keep;
+// Ordenação principal
+const rankedAll =
+  merged.length === 0
+    ? (textRows || []).sort((a, b) => {
+        const at = typeof a.text_score === "number" ? a.text_score : 0;
+        const bt = typeof b.text_score === "number" ? b.text_score : 0;
+        if (bt !== at) return bt - at;
+        return (String(a.nome || a.name || "")).localeCompare(String(b.nome || b.name || ""));
+      })
+    : merged.sort((a, b) => b.score_final - a.score_final);
+
+// ==========================================================
+// NOVA CORREÇÃO: Gating de Nome Exato (Corrige "Barco Pérola Negra")
+// ==========================================================
+let exactNameMatchList = rankedAll; // Começa com a lista completa
+if (q && q.length > 5) { 
+  const qNorm = normalize(q || ""); 
+
+  const exactMatches = rankedAll.filter(r => {
+    const nomeNorm = normalize(r.nome || r.name || ""); 
+    // Verifica se a query DO USUÁRIO contém o nome EXATO do parceiro
+    // OU se o nome EXATO do parceiro contém a query DO USUÁRIO
+    return qNorm.includes(nomeNorm) || nomeNorm.includes(qNorm);
+  });
+
+  // Se achamos um (ou mais) parceiros cujo nome bate exatamente
+  // com a busca, descartamos todos os outros (como "Bar do Pôr do Sol")
+  if (exactMatches.length > 0) {
+    console.log(`[RAG] Gating de Nome Exato ativado. Query "${qNorm}" filtrou ${exactMatches.length} itens.`);
+    exactNameMatchList = exactMatches; // Lista é substituída
   }
+}
+// ==========================================================
+// FIM DA NOVA CORREÇÃO
+// ==========================================================
+
+// Foco: pizza → só pizza se houver
+let preferredOnly = exactNameMatchList; // <-- CORRIGIDO (usa a nova lista)
+if (mentionsPizza) {
+  const keep = exactNameMatchList.filter((r) => { // <-- CORRIGIDO (usa a nova lista)
+    const cat  = String(r.categoria || r.category || "").toLowerCase();
+    const nome = String(r.nome || r.name || "").toLowerCase();
+    const desc = String(r.descricao || r.description || "").toLowerCase();
+    return cat === "pizzaria" || nome.includes("pizza") || desc.includes("pizza");
+  });
+  if (keep.length > 0) preferredOnly = keep;
+}
 
   // ----------------------- Gating genérico ----------------------------------
   let finalList = preferredOnly;
