@@ -1,5 +1,6 @@
 // /backend-oficial/services/rag.service.js
-// v2.6 — CORRIGIDO (Fallback + Gating de Nome + Umbrella)
+// v2.7 — Cache Buster (Força o deploy no Render)
+// Contém TODAS as 3 correções: Fallback, Gating de Nome, e Umbrella.
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -9,6 +10,8 @@ if (typeof fetch !== "function") {
 }
 
 // ---------------------------- Env & Clients ---------------------------------
+console.log("[RAG] Carregando rag.service.js v2.7 (Cache Buster)..."); // NOVO
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -22,71 +25,30 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 
 // ---------------------------- Parâmetros de ranking -------------------------
 const WEIGHTS = {
-  vector: 0.85,
-  text: 0.15,
-  catMatch: 0.35,        // bônus por categoria coincidente (exata)
-  termHit: 0.15,         // bônus por termo encontrado (nome/descrição)
-  termHitMaxBonus: 0.45, // teto dos bônus por termos
-  cityMatch: 0.10,       // bônus por cidade coincidindo
-  catFilterBonus: 0.10,  // bônus leve se filtro de categoria bateu
-}; // [cite: 7]
-
-// “Gating”: se achar pelo menos 1 item “relevante”, mostra só os relevantes.
-const RELEVANCE_GATE = {
-  minScore: 0.18,
-  requireAny: true,
-}; // [cite: 9]
+  vector: 0.85, text: 0.15, catMatch: 0.35, termHit: 0.15, 
+  termHitMaxBonus: 0.45, cityMatch: 0.10, catFilterBonus: 0.10,
+};
+const RELEVANCE_GATE = { minScore: 0.18, requireAny: true };
 
 // ---------------------------- ALIASES de categorias -------------------------
+// (Baseado no [cite: 10-11] - Aliases mantidos)
 const CATEGORY_ALIASES = {
-  "barzinho": "bar",
-  "birosca": "bar",
-  "biroska": "bar",
-  "picanha": "churrascaria",
-  "massas": "italiano",
-  "podrão": "lanchonete",
-  "podrao": "lanchonete",
-  "dogão": "lanchonete",
-  "dogao": "lanchonete",
-  "cocada": "quiosque",
-  "caldirada": "frutos do mar",
-  "caldeirada": "frutos do mar",
-  "anchova": "frutos do mar",
-  "corvina": "frutos do mar",
-  "corniva": "frutos do mar",
-  "deposito_bebbida": "deposito_bebidas",
-  "deposito_bebidas": "deposito_bebidas",
-  "aluguel_de_carro": "locadora_veiculos",
-  "motorista": "transporte",
-  "taxi barco": "barco",
-  "barco taxi": "barco",
-  "táxi barco": "barco",
-  "táxi-barco": "barco",
-  "jetsky": "esportes aquáticos",
-  "jetski": "esportes aquáticos",
-  "hospedagem": "hotel",
-  "servico_utilidade": "servico_utilidade",
-  "serviço utilidade": "servico_utilidade",
-  "barraca": "quiosque",
-  "praça": "passeios",
-  "praca": "passeios",
-  "canal": "passeios",
-  "canal(local)": "passeios",
-  "imóveis": "casa temporada",
-  "imoveis": "casa temporada",
-  "veraneio": "casa temporada",
-  "japonês (comida)": "sushi",
-  "japones (comida)": "sushi",
-  "japonês": "sushi",
-  "japones": "sushi",
-  "japones(ilha)": "praia",
-  "japonês (ilha)": "praia",
-  "barco": "barco",
-  "lancha": "barco",
-}; // [cite: 10-11]
+  "barzinho": "bar", "birosca": "bar", "biroska": "bar", "picanha": "churrascaria", "massas": "italiano",
+  "podrão": "lanchonete", "podrao": "lanchonete", "dogão": "lanchonete", "dogao": "lanchonete",
+  "cocada": "quiosque", "caldirada": "frutos do mar", "caldeirada": "frutos do mar", "anchova": "frutos do mar",
+  "corvina": "frutos do mar", "corniva": "frutos do mar", "deposito_bebbida": "deposito_bebidas",
+  "deposito_bebidas": "deposito_bebidas", "aluguel_de_carro": "locadora_veiculos", "motorista": "transporte",
+  "taxi barco": "barco", "barco taxi": "barco", "táxi barco": "barco", "táxi-barco": "barco",
+  "jetsky": "esportes aquáticos", "jetski": "esportes aquáticos", "hospedagem": "hotel",
+  "servico_utilidade": "servico_utilidade", "serviço utilidade": "servico_utilidade", "barraca": "quiosque",
+  "praça": "passeios", "praca": "passeios", "canal": "passeios", "canal(local)": "passeios",
+  "imóveis": "casa temporada", "imoveis": "casa temporada", "veraneio": "casa temporada",
+  "japonês (comida)": "sushi", "japones (comida)": "sushi", "japonês": "sushi", "japones": "sushi",
+  "japones(ilha)": "praia", "japonês (ilha)": "praia", "barco": "barco", "lancha": "barco",
+};
 
 // ---------------------------- Taxonomia EXPANDIDA ---------------------------
-// (Baseado no [cite: 12-14] - o conteúdo completo está no seu arquivo original)
+// (Baseado no [cite: 12-14] - Taxonomia mantida)
 const TAXONOMY = {
   "pizzaria": ["pizza","pizzaria","massa","forno a lenha","bordas recheadas","rodízio de pizza","rodizio de pizza"],
   "restaurante": ["restaurante","comida","almoço","almoco","jantar","cardápio","prato executivo","self service","self-service","quilo","delivery","marmita","à la carte","a la carte","comida caseira","caseira","menu do dia","promoção do dia","massas"],
@@ -118,23 +80,19 @@ const TAXONOMY = {
   "servico_utilidade": ["serviço público","servicos publicos","banco","caixa eletrônico","caixa 24 horas","24h","farmácia","farmacia","hospital","upa","emergência","emergencia","delegacia","polícia","policia","guarda municipal","capitania dos portos","bombeiros","samu","lavanderia","loja de conveniência","conveniencia","mercado","supermercado","hortifruti","açougue","acougue","shopping","feira","artesanato","souvenir","lembrancinha","lavanderia"],
 };
 
-// Categorias guarda-chuva → não filtrar exato no SQL
-const UMBRELLA_CATS = new Set(["comida","bebidas","passeios","hospedagem","transporte","serviço público","servico publico","utilidade","servico_utilidade"]); // [cite: 15]
+// Categorias guarda-chuva
+const UMBRELLA_CATS = new Set(["comida","bebidas","passeios","hospedagem","transporte","serviço público","servico publico","utilidade","servico_utilidade"]);
 
 // ---------------------------- Utils -----------------------------------------
-function normalize(s) { // [cite: 26-27]
-  return String(s || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim();
+function normalize(s) {
+  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 }
-function mapAliasCategory(cat) { // [cite: 28]
+function mapAliasCategory(cat) {
   if (!cat) return null;
   const n = normalize(cat || "");
   return CATEGORY_ALIASES[n] ? CATEGORY_ALIASES[n] : n;
 }
-function safeJoinTexts(chunks = [], maxLen = 8000) { // [cite: 29-31]
+function safeJoinTexts(chunks = [], maxLen = 8000) {
   const parts = [];
   for (const c of chunks) {
     const t = (c?.text ?? "").toString();
@@ -144,13 +102,14 @@ function safeJoinTexts(chunks = [], maxLen = 8000) { // [cite: 29-31]
   if (!raw) return null;
   return raw.slice(0, maxLen);
 }
-function ensureArrayFloat(x) { // [cite: 32]
+function ensureArrayFloat(x) {
   if (!Array.isArray(x)) return [];
   return x.map((v) => (typeof v === "number" ? v : Number(v))).filter((n) => Number.isFinite(n));
 }
 
 // ------------------------- Embedding (forçar 768) ---------------------------
-async function embedText768(text) { // [cite: 33-39]
+// (Baseado no [cite: 33-39] - embedText768 mantido)
+async function embedText768(text) {
   if (!GEMINI_API_KEY) throw new Error("[Embeddings] GEMINI_API_KEY não definido.");
   const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent" +
               `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
@@ -170,23 +129,19 @@ async function embedText768(text) { // [cite: 33-39]
     throw new Error(`[Gemini Embeddings] HTTP ${resp.status} ${resp.statusText}: ${txt}`);
   }
   const data = await resp.json();
-  const vec = data?.embedding?.values ||
-  data?.embedding?.value || (Array.isArray(data?.embedding) ? data.embedding : null);
+  const vec = data?.embedding?.values || data?.embedding?.value || (Array.isArray(data?.embedding) ? data.embedding : null);
   const arr = ensureArrayFloat(vec);
   if (arr.length !== 768) throw new Error(`Embedding dimension mismatch: got ${arr.length}, expected 768`);
   return arr;
 }
 
 // ------------------------- INDEXAÇÃO (salvar 768) ---------------------------
-export async function indexPartnerText(partnerId, chunks = []) { // [cite: 40-45]
+// (Baseado no [cite: 40-45] - indexPartnerText mantido)
+export async function indexPartnerText(partnerId, chunks = []) {
   if (!partnerId) throw new Error("partnerId é obrigatório.");
   let baseText = safeJoinTexts(chunks);
   if (!baseText) {
-    const { data: p, error: perr } = await supabase
-      .from("parceiros")
-      .select("id, nome, descricao")
-      .eq("id", partnerId)
-      .maybeSingle();
+    const { data: p, error: perr } = await supabase.from("parceiros").select("id, nome, descricao").eq("id", partnerId).maybeSingle();
     if (perr) throw perr;
     if (!p) throw new Error("Parceiro não encontrado.");
     const nome = p?.nome ? `Nome: ${p.nome}` : "";
@@ -201,11 +156,11 @@ export async function indexPartnerText(partnerId, chunks = []) { // [cite: 40-45
 }
 
 // --------------------------- Sinais genéricos --------------------------------
-function extractSignals(q, hintedCategory = null) { // [cite: 46-56]
+// (Baseado no [cite: 46-62] - extractSignals e computeAffinity mantidos)
+function extractSignals(q, hintedCategory = null) {
   const qn = normalize(q || "");
   const terms = new Set();
   const wantedCategories = new Set();
-
   let hinted = mapAliasCategory(hintedCategory);
   if (hinted && !UMBRELLA_CATS.has(hinted)) wantedCategories.add(hinted);
   for (const [cat, syns] of Object.entries(TAXONOMY)) {
@@ -219,7 +174,6 @@ function extractSignals(q, hintedCategory = null) { // [cite: 46-56]
       terms.add(catN);
     }
   }
-
   const rawWords = qn.split(/[^a-z0-9]+/).filter(Boolean);
   for (const w of rawWords) if (w.length >= 4) terms.add(w);
   const directReinforce = [
@@ -238,8 +192,7 @@ function extractSignals(q, hintedCategory = null) { // [cite: 46-56]
   }
   return { terms: Array.from(terms), wantedCategories: Array.from(wantedCategories) };
 }
-
-function computeAffinity(item, signals) { // [cite: 57-62]
+function computeAffinity(item, signals) {
   const cat = normalize(item.categoria || item.category || "");
   const nome = normalize(item.nome || item.name || "");
   const desc = normalize(item.descricao || item.description || "");
@@ -256,8 +209,8 @@ function computeAffinity(item, signals) { // [cite: 57-62]
   return { bonus, hits };
 }
 
-// --------------------------- BUSCA HÍBRIDA ----------------------------------
-export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug = false }) { // [cite: 63]
+// --------------------------- BUSCA HÍBRIDA (v2.7) ----------------------------------
+export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug = false }) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 30));
   const filtroCidadeOriginal = cidade_id || null;
   let filtroCidade = filtroCidadeOriginal;
@@ -267,7 +220,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   // ==========================================================
   // CORREÇÃO 1: Desativar a lógica do UMBRELLA_CATS que apaga o filtro
   // ==========================================================
-  // if (filtroCategoria && UMBRELLA_CATS.has(filtroCategoria)) filtroCategoria = null; //  (BUG DESATIVADO)
+  // if (filtroCategoria && UMBRELLA_CATS.has(filtroCategoria)) filtroCategoria = null; // (BUG DESATIVADO)
   // ==========================================================
 
   const signals = extractSignals(q, filtroCategoria);
@@ -283,7 +236,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
     },
     signals,
   };
-  async function runVector(qVec, { filtroCidade, filtroCategoria, label = "vector_v2" }) { // [cite: 427-429]
+  async function runVector(qVec, { filtroCidade, filtroCategoria, label = "vector_v2" }) {
     meta.steps[label].tried = true;
     const { data: vrows, error } = await supabase.rpc("parceiros_vector_search_v2", {
       query_embedding: qVec,
@@ -297,7 +250,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
     return rows;
   }
 
-  async function runText({ filtroCidade, filtroCategoria, label = "text_v2" }) { // [cite: 430-432]
+  async function runText({ filtroCidade, filtroCategoria, label = "text_v2" }) {
     meta.steps[label].tried = true;
     const { data: trows, error } = await supabase.rpc("parceiros_text_search_v2", {
       q_ilike: q ? `%${q}%` : "%",
@@ -313,7 +266,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
 
   let vectorRows = [];
   let textRows = [];
-  try { // [cite: 433-448] (Lógica de busca original)
+  try { // (Lógica de busca original [cite: 433-448])
     if (q && GEMINI_API_KEY) {
       const qVec = await embedText768(q);
       try {
@@ -323,15 +276,12 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
         vectorRows = [];
       }
     }
-
     try {
       textRows = await runText({ filtroCidade, filtroCategoria, label: "text_v2" });
     } catch (e) {
       meta.steps.text_v2.error = String(e?.message || e);
       textRows = [];
     }
-
-    // backoff: sem categoria
     if (vectorRows.length === 0 && textRows.length === 0 && filtroCategoria) {
       meta.steps.backoff_no_cat.tried = true;
       const noCat = null;
@@ -348,8 +298,6 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
       } catch {}
       meta.steps.backoff_no_cat.count = (vectorRows?.length || 0) + (textRows?.length || 0);
     }
-
-    // backoff: sem cidade
     if (vectorRows.length === 0 && textRows.length === 0 && filtroCidade) {
       meta.steps.backoff_no_city.tried = true;
       filtroCidade = null;
@@ -366,15 +314,13 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
       } catch {}
       meta.steps.backoff_no_city.count = (vectorRows?.length || 0) + (textRows?.length || 0);
     }
-  } catch {
-    // segue para fallbacks legados
-  }
+  } catch { /* segue para fallbacks legados */ }
 
   // fallbacks legados
   if ((!textRows || textRows.length === 0) && q) {
     try {
       meta.steps.text_rpc_fallback.tried = true;
-      const { data: trows2, error: terr2 } = await supabase.rpc("search_parceiros", { // [cite: 449-450]
+      const { data: trows2, error: terr2 } = await supabase.rpc("search_parceiros", {
         p_cidade_id: filtroCidade,
         p_categoria_norm: filtroCategoria || null,
         p_term_norm: (q || "").toLowerCase().trim() || null,
@@ -428,14 +374,15 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
 
 
   // ----------------------- Merge + re-rank com sinais genéricos -------------
+  // (Baseado no [cite: 457-470] - Lógica de Merge/Bônus mantida)
   const mapById = new Map();
-  for (const r of vectorRows) { // [cite: 457-459]
+  for (const r of vectorRows) {
     const id = r.id ?? r.parceiro_id ?? r.partner_id;
     if (!id) continue;
     const vScore = typeof r.similarity === "number" ? r.similarity : typeof r.score === "number" ? r.score : 0;
     mapById.set(id, { ...r, score_vector: vScore, score_text: 0 });
   }
-  for (const r of textRows) { // [cite: 459-463]
+  for (const r of textRows) {
     const id = r.id ?? r.parceiro_id ?? r.partner_id;
     if (!id) continue;
     const tScore = typeof r.text_score === "number" ? r.text_score : typeof r.score === "number" ? r.score : 0;
@@ -445,32 +392,23 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
       mapById.set(id, { ...prev, score_text: Math.max(prev.score_text || 0, tScore) });
     }
   }
-
   const qNorm = String(q || "").toLowerCase();
   const mentionsPizza = /\b(pizza|pizzaria)\b/.test(qNorm);
   const mentionsSushi = /\b(sushi|japon[eê]s)\b/.test(qNorm);
   const mentionsCarne = /\b(picanha|churrasco|carne)\b/.test(qNorm);
-
-  const BONUS = { // [cite: 464]
-    pizzaCatExact: 0.25,
-    pizzaWord: 0.20,
-    sushiCatExact: 0.25,
-    sushiWord: 0.20,
-    carneCatExact: 0.20,
-    carneWord: 0.15,
+  const BONUS = {
+    pizzaCatExact: 0.25, pizzaWord: 0.20, sushiCatExact: 0.25,
+    sushiWord: 0.20, carneCatExact: 0.20, carneWord: 0.15,
   };
   const W_VECTOR = WEIGHTS.vector;
   const W_TEXT   = WEIGHTS.text;
-  const merged = Array.from(mapById.values()).map((r) => { // [cite: 466-470]
+  const merged = Array.from(mapById.values()).map((r) => {
     let score_final = W_VECTOR * (r.score_vector || 0) + W_TEXT * (r.score_text || 0);
-
     if (filtroCidade && (r.cidade_id === filtroCidade || r.cidade === filtroCidade)) score_final += WEIGHTS.cityMatch;
     if (filtroCategoria && (r.categoria === filtroCategoria || r.category === filtroCategoria)) score_final += WEIGHTS.catFilterBonus;
-
     const cat  = String(r.categoria || r.category || "").toLowerCase();
     const nome = String(r.nome || r.name || "").toLowerCase();
     const desc = String(r.descricao || r.description || "").toLowerCase();
-
     if (mentionsPizza) {
       if (cat === "pizzaria") score_final += BONUS.pizzaCatExact;
       if (nome.includes("pizza") || desc.includes("pizza")) score_final += BONUS.pizzaWord;
@@ -535,7 +473,8 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   }
 
   // ----------------------- Gating genérico ----------------------------------
-  let finalList = preferredOnly; // [cite: 474-476]
+  // (Baseado no [cite: 474-476] - Gating genérico mantido)
+  let finalList = preferredOnly; 
   if (RELEVANCE_GATE.requireAny) {
     const relevant = preferredOnly.filter((r) => {
       const aff = computeAffinity(r, signals);
@@ -550,21 +489,14 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
 }
 
 // -------------------------- Stubs e utilidades ------------------------------
-export async function searchSimilar(query, { partnerId, k }) { // [cite: 477-478]
+// (Baseado no [cite: 477-495] - Funções de indexação mantidas)
+export async function searchSimilar(query, { partnerId, k }) {
   console.log(`[RAG] searchSimilar (stub compat): q="${query}", partnerId=${partnerId}, k=${k}`);
   return { results: [] };
 }
-
-// (Des)indexação e batch -----------------------------------------------------
-// (Restante do arquivo original) [cite: 479-495]
 export async function indexPartnerById(partnerId, { reactivate = false } = {}) {
-  const { data: parceiro, error: errLoad } = await supabase
-    .from("parceiros")
-    .select("id, nome, descricao, categoria, ativo")
-    .eq("id", partnerId)
-    .single();
+  const { data: parceiro, error: errLoad } = await supabase.from("parceiros").select("id, nome, descricao, categoria, ativo").eq("id", partnerId).single();
   if (errLoad || !parceiro) throw new Error("Parceiro não encontrado para indexação.");
-
   const baseText = [parceiro.nome || "", parceiro.categoria ? `Categoria: ${parceiro.categoria}` : "", parceiro.descricao || ""].filter(Boolean).join("\n");
   const vec = await embedText768(baseText);
   const patch = { embedding_768: vec };
@@ -573,7 +505,6 @@ export async function indexPartnerById(partnerId, { reactivate = false } = {}) {
   if (errUp) throw errUp;
   return { ok: true, partnerId, dims: vec.length };
 }
-
 export async function pausePartnerIndex(partnerId, { motivo } = {}) {
   const { error } = await supabase
     .from("parceiros")
@@ -582,19 +513,16 @@ export async function pausePartnerIndex(partnerId, { motivo } = {}) {
   if (error) throw error;
   return { ok: true, partnerId };
 }
-
 export async function reactivatePartnerIndex(partnerId) {
   const r = await indexPartnerById(partnerId, { reactivate: true });
   await supabase.from("parceiros").update({ bloqueado: false, bloqueado_motivo: null }).eq("id", partnerId);
   return r;
 }
-
 export async function forgetPartnerForever(partnerId) {
   const { error } = await supabase.from("parceiros").delete().eq("id", partnerId);
   if (error) throw error;
   return { ok: true, partnerId };
 }
-
 export async function bulkIndexPartners({ cidade_id = null, categoria = null, onlyMissing = true, limit = 500 }) {
   let qb = supabase
     .from("parceiros")
@@ -604,7 +532,6 @@ export async function bulkIndexPartners({ cidade_id = null, categoria = null, on
   if (cidade_id) qb = qb.eq("cidade_id", cidade_id);
   if (categoria) qb = qb.eq("categoria", mapAliasCategory(categoria));
   if (onlyMissing) qb = qb.is("embedding_768", null);
-
   const { data: rows, error, count } = await qb;
   if (error) throw error;
   const ids = (rows || []).map((r) => r.id);
@@ -619,6 +546,5 @@ export async function bulkIndexPartners({ cidade_id = null, categoria = null, on
       errors.push({ id: pid, error: String(e?.message || e) });
     }
   }
-
   return { total_candidates: count ?? ids.length, processed: ids.length, ok, fail, errors };
 }
