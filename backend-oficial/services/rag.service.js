@@ -343,6 +343,7 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   // ==========================================================
   if ((!textRows || textRows.length === 0) && q) {
     try {
+      console.log("[RAG v2.7] EXECUTANDO TABLE_FALLBACK CORRIGIDO!");
       meta.steps.table_fallback.tried = true;
       
       let query = supabase
