@@ -342,33 +342,62 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   // (Isso cura o "Pizzaria -> Localiza")
   // ==========================================================
   if ((!textRows || textRows.length === 0) && q) {
-    try {
-      console.log("[RAG v2.7] EXECUTANDO TABLE_FALLBACK CORRIGIDO!");
-      meta.steps.table_fallback.tried = true;
-      
-      let query = supabase
-        .from("parceiros")
-        .select("id, nome, descricao, cidade_id, categoria")
-        .or(`nome.ilike.%${q}%,descricao.ilike.%${q}%`); // Busca pelo texto
-        
-      // CORREÇÃO: Força o filtro de categoria se ele existir
-      if (filtroCategoria) {
-        query = query.eq('categoria', filtroCategoria);
-      }
-      // CORREÇÃO: Força o filtro de cidade se ele existir (e não foi removido pelo backoff)
-      if (filtroCidade) {
-        query = query.eq('cidade_id', filtroCidade);
-      }
+    // Bloco table_fallback REVISADO (v2.7.2 - Usando .and())
+try {
+  console.log("[RAG v2.7.2] EXECUTANDO TABLE_FALLBACK REVISADO!"); // Log atualizado
+  meta.steps.table_fallback.tried = true;
 
-      const { data: rowsTbl } = await query.limit(safeLimit * 3);
-      
-      const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
-      textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
-      meta.steps.table_fallback.count = textRows.length;
-    } catch (e) {
-      meta.steps.table_fallback.error = String(e?.message || e);
-    }
+  let query = supabase
+    .from("parceiros")
+    .select("id, nome, descricao, cidade_id, categoria");
+
+  // === NOVA LÓGICA DE FILTRO ===
+  // Constrói os filtros como strings separadas
+  const filters = [];
+  if (q) {
+     // Busca texto no nome OU descrição
+     filters.push(`or(nome.ilike.%${q}%,descricao.ilike.%${q}%)`); 
   }
+  if (filtroCategoria) {
+     // Adiciona filtro EXATO de categoria
+     filters.push(`categoria.eq.${filtroCategoria}`); 
+  }
+  if (filtroCidade) {
+     // Adiciona filtro EXATO de cidade
+     filters.push(`cidade_id.eq.${filtroCidade}`); 
+  }
+
+  // Aplica todos os filtros combinados com AND (vírgula significa AND no .and())
+  if (filters.length > 0) {
+      query = query.and(filters.join(',')); 
+      console.log(`[RAG v2.7.2] Fallback Filters Applied: ${filters.join(',')}`); // Log dos filtros
+  }
+  // === FIM DA NOVA LÓGICA ===
+
+  const { data: rowsTbl, error: errTbl } = await query.limit(safeLimit * 3);
+
+  // Se a query falhar, loga o erro
+  if (errTbl) {
+    console.error(`[RAG v2.7.2] Erro na query do table_fallback: ${errTbl.message}`);
+    throw errTbl; 
+  }
+
+  const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
+  // Se NENHUM item for encontrado, loga isso
+  if (asArray.length === 0) {
+      console.log(`[RAG v2.7.2] Table fallback NÃO encontrou resultados com os filtros.`);
+  }
+
+  textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
+  meta.steps.table_fallback.count = textRows.length;
+
+} catch (e) {
+  meta.steps.table_fallback.error = String(e?.message || e);
+  // Log do erro geral do fallback
+  console.error(`[RAG v2.7.2] Erro GERAL no table_fallback: ${e?.message || e}`); 
+}
+  }
+// Fim do Bloco table_fallback REVISADO
   // ==========================================================
   // FIM DA CORREÇÃO 2
   // ==========================================================
