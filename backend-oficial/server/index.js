@@ -637,6 +637,26 @@ async function searchPartnersRAG(textoDoUsuario, { cidadesAtivas, cidadeIdForcad
 
   return { parceiros, categoriaDetectada: categoria, cidadeIdDetectada: cidade_id };
 }
+// ==========================================================
+// CORREÇÃO v3: Restaurar finalizeAssistantResponse
+// ==========================================================
+function finalizeAssistantResponse({ modelResponseText, foundPartnersList = [], mode = "general" }) {
+  const txt = String(modelResponseText || "").trim();
+  // Se estamos no modo de parceiros e a IA deu uma resposta vazia,
+  // usamos uma frase padrão.
+  if (mode === "partners" && !txt) {
+    return "Aqui estão algumas **indicações confiáveis**.";
+  }
+  // Se a IA deu uma resposta vazia no modo geral, usamos outra frase padrão.
+  if (!txt) {
+     return "Posso te ajudar com informações e indicações na Região dos Lagos.";
+  }
+  // Caso contrário, retorna a resposta da IA.
+  return txt;
+}
+// ==========================================================
+// FIM DA CORREÇÃO v3
+// ==========================================================
 
 // ============================= FORMATADORES & IA =============================
 
