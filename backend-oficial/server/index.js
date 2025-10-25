@@ -301,8 +301,40 @@ async function geminiTry(texto, { retries = 2, baseDelay = 500 } = {}) {
   }
 }
 // ============================================================================
+// ==========================================================
+// CORREÇÃO: Restaurar a função extrairEntidadesDaBusca
+// ==========================================================
+async function extrairEntidadesDaBusca(texto) {
+  const tNorm = normalizarTexto(texto || ""); // Usa a função normalizarTexto que já existe abaixo
 
+  let city = null;
+  if (tNorm.includes("cabo frio")) city = "Cabo Frio";
+  else if (tNorm.includes("buzios") || tNorm.includes("búzios")) city = "Armação dos Búzios";
+  else if (tNorm.includes("arraial")) city = "Arraial do Cabo";
+  else if (tNorm.includes("sao pedro") || tNorm.includes("são pedro")) city = "São Pedro da Aldeia";
+  else if (tNorm.includes("iguaba")) city = "Iguaba Grande";
 
+  const DIC_TERMS = [
+    "pizzaria", "pizza", "picanha", "piconha", "carne", "churrasco", "rodizio", "rodízio",
+    "fraldinha", "costela", "barato", "barata", "familia", "família", "romantico", "romântico",
+    "vista", "vista para o mar", "peixe", "frutos do mar", "moqueca", "hamburguer", "hambúrguer",
+    "sushi", "japonesa", "bistrô", "bistro",
+  ];
+  const terms = [];
+  for (const w of DIC_TERMS) if (tNorm.includes(normalizarTexto(w))) terms.push(w);
+
+  let category = null;
+  [cite_start]// Lógica de detecção de categoria (baseada no original [cite: 161-169])
+  if (tNorm.includes("pizzaria") || tNorm.includes("pizza")) { category = "pizzaria"; }
+  else if (["restaurante", "comer", "comida", "picanha", "carne", "churrasco", "rodizio", "peixe", "frutos do mar", "moqueca", "hamburguer", "bistrô", "sushi", "japonesa"].some(k => tNorm.includes(k))) { category = "comida"; }
+  else if (["pousada", "hotel", "hostel", "hospedagem", "airbnb", "apart", "flat", "resort"].some(k => tNorm.includes(k))) { category = "hospedagem"; }
+  else if (["bar", "bares", "chopp", "chope", "drinks", "pub", "boteco"].some(k => tNorm.includes(k))) { category = "bebidas"; }
+  else if (["passeio", "barco", "lancha", "escuna", "trilha", "buggy", "quadriciclo", "mergulho", "snorkel", "tour"].some(k => tNorm.includes(k))) { category = "passeios"; }
+  else if (["praia", "praias", "bandeira azul", "orla"].some(k => tNorm.includes(k))) { category = "praias"; }
+  else if (["transfer", "transporte", "aluguel de carro", "locadora", "uber", "taxi", "ônibus", "onibus"].some(k => tNorm.includes(k))) { category = "transporte"; }
+
+  return { category, city, terms };
+}
 // ============================== HELPERS =====================================
 // (Baseado no [cite: 174-192] - Helpers mantidos)
 function normalizarTexto(texto) {
