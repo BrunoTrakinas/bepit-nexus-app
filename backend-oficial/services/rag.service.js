@@ -405,13 +405,26 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   }
 
   if ((!textRows || textRows.length === 0) && q) {
-    try {
-      meta.steps.table_fallback.tried = true;
-      const { data: rowsTbl } = await supabase
-        .from("parceiros")
-        .select("id, nome, descricao, cidade_id, categoria")
-        .or(`nome.ilike.%${q}%,descricao.ilike.%${q}%`)
-        .limit(safeLimit * 3);
+    // Bloco Novo (Corrigido)
+try {
+  meta.steps.table_fallback.tried = true;
+
+  let query = supabase
+    .from("parceiros")
+    .select("id, nome, descricao, cidade_id, categoria")
+    .or(`nome.ilike.%${q}%,descricao.ilike.%${q}%`); // Busca pelo texto
+
+  // CORREÇÃO: Força o filtro de categoria se ele existir
+  if (filtroCategoria) {
+    query = query.eq('categoria', filtroCategoria);
+  }
+  // CORREÇÃO: Força o filtro de cidade se ele existir (e não foi removido pelo backoff)
+  if (filtroCidade) {
+    query = query.eq('cidade_id', filtroCidade);
+  }
+
+  const { data: rowsTbl } = await query.limit(safeLimit * 3);
+  
       const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
       textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
       meta.steps.table_fallback.count = textRows.length;
