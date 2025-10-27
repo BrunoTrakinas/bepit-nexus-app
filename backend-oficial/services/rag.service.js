@@ -1,6 +1,7 @@
 // /backend-oficial/services/rag.service.js
-// v2.7 — Cache Buster (Força o deploy no Render)
-// Contém TODAS as 3 correções: Fallback, Gating de Nome, e Umbrella.
+// v2.8.1 — Fallback DESATIVADO (Comentário Corrigido)
+// Contém Correção 1 (Umbrella DESATIVADA) e Correção 3 (Gating de Nome ATIVO).
+// O bloco 'if' inteiro do table_fallback está COMPLETAMENTE DESATIVADO via comentário '/* ... */'.
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -9,8 +10,8 @@ if (typeof fetch !== "function") {
   globalThis.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 }
 
-// ---------------------------- Env & Clients ---------------------------------
-console.log("[RAG] Carregando rag.service.js v2.7 (Cache Buster)..."); // NOVO
+// ---- Env & Clients ----
+console.log("[RAG] Carregando rag.service.js v2.8.1 (Fallback DESATIVADO)..."); // Log da versão
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -23,15 +24,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
-// ---------------------------- Parâmetros de ranking -------------------------
+// ---- Parâmetros de ranking ----
 const WEIGHTS = {
-  vector: 0.85, text: 0.15, catMatch: 0.35, termHit: 0.15, 
+  vector: 0.85, text: 0.15, catMatch: 0.35, termHit: 0.15,
   termHitMaxBonus: 0.45, cityMatch: 0.10, catFilterBonus: 0.10,
 };
 const RELEVANCE_GATE = { minScore: 0.18, requireAny: true };
 
-// ---------------------------- ALIASES de categorias -------------------------
-// (Baseado no [cite: 10-11] - Aliases mantidos)
+// ---- ALIASES de categorias ----
 const CATEGORY_ALIASES = {
   "barzinho": "bar", "birosca": "bar", "biroska": "bar", "picanha": "churrascaria", "massas": "italiano",
   "podrão": "lanchonete", "podrao": "lanchonete", "dogão": "lanchonete", "dogao": "lanchonete",
@@ -47,8 +47,7 @@ const CATEGORY_ALIASES = {
   "japones(ilha)": "praia", "japonês (ilha)": "praia", "barco": "barco", "lancha": "barco",
 };
 
-// ---------------------------- Taxonomia EXPANDIDA ---------------------------
-// (Baseado no [cite: 12-14] - Taxonomia mantida)
+// ---- Taxonomia EXPANDIDA ----
 const TAXONOMY = {
   "pizzaria": ["pizza","pizzaria","massa","forno a lenha","bordas recheadas","rodízio de pizza","rodizio de pizza"],
   "restaurante": ["restaurante","comida","almoço","almoco","jantar","cardápio","prato executivo","self service","self-service","quilo","delivery","marmita","à la carte","a la carte","comida caseira","caseira","menu do dia","promoção do dia","massas"],
@@ -80,54 +79,22 @@ const TAXONOMY = {
   "servico_utilidade": ["serviço público","servicos publicos","banco","caixa eletrônico","caixa 24 horas","24h","farmácia","farmacia","hospital","upa","emergência","emergencia","delegacia","polícia","policia","guarda municipal","capitania dos portos","bombeiros","samu","lavanderia","loja de conveniência","conveniencia","mercado","supermercado","hortifruti","açougue","acougue","shopping","feira","artesanato","souvenir","lembrancinha","lavanderia"],
 };
 
-// Categorias guarda-chuva
-const UMBRELLA_CATS = new Set(["comida","bebidas","passeios","hospedagem","transporte","serviço público","servico publico","utilidade","servico_utilidade"]);
+// ---- Categorias guarda-chuva ----
+// const UMBRELLA_CATS = new Set(["comida","bebidas","passeios","praias","hospedagem","transporte","serviço público","servico publico","utilidade","servico_utilidade"]); // -> LÓGICA DESATIVADA ABAIXO
 
-// ---------------------------- Utils -----------------------------------------
-function normalize(s) {
-  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-}
-function mapAliasCategory(cat) {
-  if (!cat) return null;
-  const n = normalize(cat || "");
-  return CATEGORY_ALIASES[n] ? CATEGORY_ALIASES[n] : n;
-}
-function safeJoinTexts(chunks = [], maxLen = 8000) {
-  const parts = [];
-  for (const c of chunks) {
-    const t = (c?.text ?? "").toString();
-    if (t) parts.push(t);
-  }
-  const raw = parts.join("\n\n").trim();
-  if (!raw) return null;
-  return raw.slice(0, maxLen);
-}
-function ensureArrayFloat(x) {
-  if (!Array.isArray(x)) return [];
-  return x.map((v) => (typeof v === "number" ? v : Number(v))).filter((n) => Number.isFinite(n));
-}
+// ---- Utils ----
+function normalize(s) { return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim(); }
+function mapAliasCategory(cat) { if (!cat) return null; const n = normalize(cat || ""); return CATEGORY_ALIASES[n] ? CATEGORY_ALIASES[n] : n; }
+function safeJoinTexts(chunks = [], maxLen = 8000) { const parts = []; for (const c of chunks) { const t = (c?.text ?? "").toString(); if (t) parts.push(t); } const raw = parts.join("\n\n").trim(); if (!raw) return null; return raw.slice(0, maxLen); }
+function ensureArrayFloat(x) { if (!Array.isArray(x)) return []; return x.map((v) => (typeof v === "number" ? v : Number(v))).filter((n) => Number.isFinite(n)); }
 
-// ------------------------- Embedding (forçar 768) ---------------------------
-// (Baseado no [cite: 33-39] - embedText768 mantido)
+// ---- Embedding ----
 async function embedText768(text) {
   if (!GEMINI_API_KEY) throw new Error("[Embeddings] GEMINI_API_KEY não definido.");
-  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent" +
-              `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-  const body = {
-    model: "models/gemini-embedding-001",
-    content: { parts: [{ text: String(text || "") }] },
-    taskType: "RETRIEVAL_DOCUMENT",
-    outputDimensionality: 768,
-  };
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`[Gemini Embeddings] HTTP ${resp.status} ${resp.statusText}: ${txt}`);
-  }
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent" + `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const body = { model: "models/gemini-embedding-001", content: { parts: [{ text: String(text || "") }] }, taskType: "RETRIEVAL_DOCUMENT", outputDimensionality: 768 };
+  const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+  if (!resp.ok) { const txt = await resp.text().catch(() => ""); throw new Error(`[Gemini Embeddings] HTTP ${resp.status} ${resp.statusText}: ${txt}`); }
   const data = await resp.json();
   const vec = data?.embedding?.values || data?.embedding?.value || (Array.isArray(data?.embedding) ? data.embedding : null);
   const arr = ensureArrayFloat(vec);
@@ -135,8 +102,7 @@ async function embedText768(text) {
   return arr;
 }
 
-// ------------------------- INDEXAÇÃO (salvar 768) ---------------------------
-// (Baseado no [cite: 40-45] - indexPartnerText mantido)
+// ---- Indexação ----
 export async function indexPartnerText(partnerId, chunks = []) {
   if (!partnerId) throw new Error("partnerId é obrigatório.");
   let baseText = safeJoinTexts(chunks);
@@ -155,14 +121,15 @@ export async function indexPartnerText(partnerId, chunks = []) {
   return { ok: true, partnerId, savedColumn: "embedding_768", dims: embedding.length, usedChunks: chunks.length || 0 };
 }
 
-// --------------------------- Sinais genéricos --------------------------------
-// (Baseado no [cite: 46-62] - extractSignals e computeAffinity mantidos)
+// ---- Sinais genéricos ----
 function extractSignals(q, hintedCategory = null) {
   const qn = normalize(q || "");
   const terms = new Set();
   const wantedCategories = new Set();
   let hinted = mapAliasCategory(hintedCategory);
-  if (hinted && !UMBRELLA_CATS.has(hinted)) wantedCategories.add(hinted);
+  // Removido: A lógica UMBRELLA_CATS está desativada na busca principal
+  // if (hinted && !UMBRELLA_CATS.has(hinted)) wantedCategories.add(hinted);
+  if (hinted) wantedCategories.add(hinted); // Adiciona a categoria mapeada diretamente
   for (const [cat, syns] of Object.entries(TAXONOMY)) {
     const catN = normalize(cat);
     const list = Array.isArray(syns) ? syns : [];
@@ -176,18 +143,14 @@ function extractSignals(q, hintedCategory = null) {
   }
   const rawWords = qn.split(/[^a-z0-9]+/).filter(Boolean);
   for (const w of rawWords) if (w.length >= 4) terms.add(w);
-  const directReinforce = [
-    "barzinho","birosca","biroska","picanha","caldirada","caldeirada","anchova","corvina","corniva",
-    "barraca","motorista","aluguel_de_carro","jetski","jetsky","lancha","massas",
-    "podrão","podrao","dogão","dogao","cocada","praça","tailandesa","canal","pousada",
-    "imóveis","imoveis","veraneio","quiosque","deposito_bebbida","deposito_bebidas","lavanderia",
-    "servico_utilidade","hospedagem","taxi barco","barco taxi","japones(ilha)"
-  ];
+  const directReinforce = ["barzinho", "birosca", "biroska", "picanha", "caldirada", "caldeirada", "anchova", "corvina", "corniva", "barraca", "motorista", "aluguel_de_carro", "jetski", "jetsky", "lancha", "massas", "podrão", "podrao", "dogão", "dogao", "cocada", "praça", "tailandesa", "canal", "pousada", "imóveis", "imoveis", "veraneio", "quiosque", "deposito_bebbida", "deposito_bebidas", "lavanderia", "servico_utilidade", "hospedagem", "taxi barco", "barco taxi", "japones(ilha)"];
   for (const t of directReinforce) {
     if (qn.includes(normalize(t))) {
       terms.add(normalize(t));
       const mapped = mapAliasCategory(t);
-      if (mapped && !UMBRELLA_CATS.has(mapped)) wantedCategories.add(mapped);
+      // Removido: A lógica UMBRELLA_CATS está desativada
+      // if (mapped && !UMBRELLA_CATS.has(mapped)) wantedCategories.add(mapped);
+      if (mapped) wantedCategories.add(mapped); // Adiciona diretamente
     }
   }
   return { terms: Array.from(terms), wantedCategories: Array.from(wantedCategories) };
@@ -209,19 +172,16 @@ function computeAffinity(item, signals) {
   return { bonus, hits };
 }
 
-// --------------------------- BUSCA HÍBRIDA (v2.7) ----------------------------------
+// --------------------------- BUSCA HÍBRIDA (v2.8.1) ----------------------------------
 export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug = false }) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 30));
   const filtroCidadeOriginal = cidade_id || null;
   let filtroCidade = filtroCidadeOriginal;
 
   let filtroCategoria = mapAliasCategory((categoria || "").trim() || null);
-  
-  // ==========================================================
-  // CORREÇÃO 1: Desativar a lógica do UMBRELLA_CATS que apaga o filtro
-  // ==========================================================
+
+  // CORREÇÃO 1: Desativar a lógica do UMBRELLA_CATS (Mantida)
   // if (filtroCategoria && UMBRELLA_CATS.has(filtroCategoria)) filtroCategoria = null; // (BUG DESATIVADO)
-  // ==========================================================
 
   const signals = extractSignals(q, filtroCategoria);
   const meta = {
@@ -232,105 +192,59 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
       backoff_no_cat: { tried: false, count: 0, error: null },
       backoff_no_city: { tried: false, count: 0, error: null },
       text_rpc_fallback: { tried: false, count: 0, error: null },
-      table_fallback: { tried: false, count: 0, error: null },
+      table_fallback: { tried: false, count: 0, error: null }, // Step ainda existe, mas será desativado
     },
     signals,
   };
   async function runVector(qVec, { filtroCidade, filtroCategoria, label = "vector_v2" }) {
     meta.steps[label].tried = true;
     const { data: vrows, error } = await supabase.rpc("parceiros_vector_search_v2", {
-      query_embedding: qVec,
-      match_count: safeLimit * 3,
-      filtro_cidade_id: filtroCidade,
-      filtro_categoria: filtroCategoria,
+      query_embedding: qVec, match_count: safeLimit * 3, filtro_cidade_id: filtroCidade, filtro_categoria: filtroCategoria,
     });
-    if (error) throw error;
-    const rows = Array.isArray(vrows) ? vrows : [];
-    meta.steps[label].count = rows.length;
-    return rows;
+    if (error) throw error; const rows = Array.isArray(vrows) ? vrows : []; meta.steps[label].count = rows.length; return rows;
   }
-
   async function runText({ filtroCidade, filtroCategoria, label = "text_v2" }) {
     meta.steps[label].tried = true;
     const { data: trows, error } = await supabase.rpc("parceiros_text_search_v2", {
-      q_ilike: q ? `%${q}%` : "%",
-      filtro_cidade_id: filtroCidade,
-      filtro_categoria: filtroCategoria,
-      fetch_count: safeLimit * 3,
+      q_ilike: q ? `%${q}%` : "%", filtro_cidade_id: filtroCidade, filtro_categoria: filtroCategoria, fetch_count: safeLimit * 3,
     });
-    if (error) throw error;
-    const rows = Array.isArray(trows) ? trows : [];
-    meta.steps[label].count = rows.length;
-    return rows;
+    if (error) throw error; const rows = Array.isArray(trows) ? trows : []; meta.steps[label].count = rows.length; return rows;
   }
 
   let vectorRows = [];
   let textRows = [];
-  try { // (Lógica de busca original [cite: 433-448])
+  try { // Lógica de busca principal + backoffs
     if (q && GEMINI_API_KEY) {
       const qVec = await embedText768(q);
-      try {
-        vectorRows = await runVector(qVec, { filtroCidade, filtroCategoria, label: "vector_v2" });
-      } catch (e) {
-        meta.steps.vector_v2.error = String(e?.message || e);
-        vectorRows = [];
-      }
+      try { vectorRows = await runVector(qVec, { filtroCidade, filtroCategoria, label: "vector_v2" }); }
+      catch (e) { meta.steps.vector_v2.error = String(e?.message || e); vectorRows = []; }
     }
-    try {
-      textRows = await runText({ filtroCidade, filtroCategoria, label: "text_v2" });
-    } catch (e) {
-      meta.steps.text_v2.error = String(e?.message || e);
-      textRows = [];
-    }
+    try { textRows = await runText({ filtroCidade, filtroCategoria, label: "text_v2" }); }
+    catch (e) { meta.steps.text_v2.error = String(e?.message || e); textRows = []; }
+
     if (vectorRows.length === 0 && textRows.length === 0 && filtroCategoria) {
-      meta.steps.backoff_no_cat.tried = true;
-      const noCat = null;
-      if (q && GEMINI_API_KEY) {
-        try {
-          const qVec = await embedText768(q);
-          const rows = await runVector(qVec, { filtroCidade, filtroCategoria: noCat, label: "vector_v2" });
-          vectorRows = rows;
-        } catch {}
-      }
-      try {
-        const rows = await runText({ filtroCidade, filtroCategoria: noCat, label: "text_v2" });
-        textRows = rows;
-      } catch {}
+      meta.steps.backoff_no_cat.tried = true; const noCat = null;
+      if (q && GEMINI_API_KEY) { try { const qVec = await embedText768(q); vectorRows = await runVector(qVec, { filtroCidade, filtroCategoria: noCat, label: "vector_v2" }); } catch {} }
+      try { textRows = await runText({ filtroCidade, filtroCategoria: noCat, label: "text_v2" }); } catch {}
       meta.steps.backoff_no_cat.count = (vectorRows?.length || 0) + (textRows?.length || 0);
     }
     if (vectorRows.length === 0 && textRows.length === 0 && filtroCidade) {
-      meta.steps.backoff_no_city.tried = true;
-      filtroCidade = null;
-      if (q && GEMINI_API_KEY) {
-        try {
-          const qVec = await embedText768(q);
-          const rows = await runVector(qVec, { filtroCidade: null, filtroCategoria, label: "vector_v2" });
-          vectorRows = rows;
-        } catch {}
-      }
-      try {
-        const rows = await runText({ filtroCidade: null, filtroCategoria, label: "text_v2" });
-        textRows = rows;
-      } catch {}
+      meta.steps.backoff_no_city.tried = true; filtroCidade = null;
+      if (q && GEMINI_API_KEY) { try { const qVec = await embedText768(q); vectorRows = await runVector(qVec, { filtroCidade: null, filtroCategoria, label: "vector_v2" }); } catch {} }
+      try { textRows = await runText({ filtroCidade: null, filtroCategoria, label: "text_v2" }); } catch {}
       meta.steps.backoff_no_city.count = (vectorRows?.length || 0) + (textRows?.length || 0);
     }
-  } catch { /* segue para fallbacks legados */ }
+  } catch { /* segue */ }
 
-  // fallbacks legados
+  // fallback legado (RPC search_parceiros)
   if ((!textRows || textRows.length === 0) && q) {
     try {
       meta.steps.text_rpc_fallback.tried = true;
       const { data: trows2, error: terr2 } = await supabase.rpc("search_parceiros", {
-        p_cidade_id: filtroCidade,
-        p_categoria_norm: filtroCategoria || null,
-        p_term_norm: (q || "").toLowerCase().trim() || null,
-        p_limit: safeLimit * 3,
+        p_cidade_id: filtroCidade, p_categoria_norm: filtroCategoria || null, p_term_norm: (q || "").toLowerCase().trim() || null, p_limit: safeLimit * 3,
       });
       if (terr2) throw terr2;
-      textRows = (Array.isArray(trows2) ? trows2 : []).map((r) => ({
-        ...r,
-        text_score: Number.isFinite(r.text_score) ? r.text_score : 0.5,
-      }));
+      textRows = (Array.isArray(trows2) ? trows2 : []).map((r) => ({ ...r, text_score: Number.isFinite(r.text_score) ? r.text_score : 0.5 }));
       meta.steps.text_rpc_fallback.count = textRows.length;
     } catch (e) {
       meta.steps.text_rpc_fallback.error = String(e?.message || e);
@@ -338,243 +252,127 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   }
 
   // ==========================================================
-  // CORREÇÃO 2: Forçar o filtro de categoria no table_fallback
-  // (Isso cura o "Pizzaria -> Localiza")
-  //* ==========================================================
+  // TENTATIVA RADICAL: Desativar COMPLETAMENTE o table_fallback
+  // O bloco 'if' inteiro abaixo está comentado.
+  // ==========================================================
+  /* <-- COMENTÁRIO COMEÇA AQUI (ANTES DO IF)
+
   if ((!textRows || textRows.length === 0) && q) {
-    // Bloco table_fallback REVISADO (v2.7.2 - Usando .and())
-try {
-  console.log("[RAG v2.7.2] EXECUTANDO TABLE_FALLBACK REVISADO!"); // Log atualizado
-  meta.steps.table_fallback.tried = true;
+    // Bloco table_fallback (v2.7.2) está agora COMENTADO
+    try {
+      console.log("[RAG v2.7.2] EXECUTANDO TABLE_FALLBACK REVISADO! (COMENTADO)");
+      meta.steps.table_fallback.tried = true;
 
-  let query = supabase
-    .from("parceiros")
-    .select("id, nome, descricao, cidade_id, categoria");
+      let query = supabase
+        .from("parceiros")
+        .select("id, nome, descricao, cidade_id, categoria");
 
-  // === NOVA LÓGICA DE FILTRO ===
-  // Constrói os filtros como strings separadas
-  const filters = [];
-  if (q) {
-     // Busca texto no nome OU descrição
-     filters.push(`or(nome.ilike.%${q}%,descricao.ilike.%${q}%)`); 
-  }
-  if (filtroCategoria) {
-     // Adiciona filtro EXATO de categoria
-     filters.push(`categoria.eq.${filtroCategoria}`); 
-  }
-  if (filtroCidade) {
-     // Adiciona filtro EXATO de cidade
-     filters.push(`cidade_id.eq.${filtroCidade}`); 
-  }
+      // === NOVA LÓGICA DE FILTRO ===
+      const filters = [];
+      if (q) {
+         filters.push(`or(nome.ilike.%${q}%,descricao.ilike.%${q}%)`);
+      }
+      if (filtroCategoria) {
+         filters.push(`categoria.eq.${filtroCategoria}`);
+      }
+      if (filtroCidade) {
+         filters.push(`cidade_id.eq.${filtroCidade}`);
+      }
 
-  // Aplica todos os filtros combinados com AND (vírgula significa AND no .and())
-  if (filters.length > 0) {
-      query = query.and(filters.join(',')); 
-      console.log(`[RAG v2.7.2] Fallback Filters Applied: ${filters.join(',')}`); // Log dos filtros
-  }
-  // === FIM DA NOVA LÓGICA ===
+      if (filters.length > 0) {
+          query = query.and(filters.join(','));
+          console.log(`[RAG v2.7.2] Fallback Filters Applied: ${filters.join(',')}`);
+      }
+      // === FIM DA NOVA LÓGICA ===
 
-  const { data: rowsTbl, error: errTbl } = await query.limit(safeLimit * 3);
+      const { data: rowsTbl, error: errTbl } = await query.limit(safeLimit * 3);
 
-  // Se a query falhar, loga o erro
-  if (errTbl) {
-    console.error(`[RAG v2.7.2] Erro na query do table_fallback: ${errTbl.message}`);
-    throw errTbl; 
-  }
+      if (errTbl) {
+        console.error(`[RAG v2.7.2] Erro na query do table_fallback: ${errTbl.message}`);
+        throw errTbl;
+      }
 
-  const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
-  // Se NENHUM item for encontrado, loga isso
-  if (asArray.length === 0) {
-      console.log(`[RAG v2.7.2] Table fallback NÃO encontrou resultados com os filtros.`);
-  }
+      const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
+      if (asArray.length === 0) {
+          console.log(`[RAG v2.7.2] Table fallback NÃO encontrou resultados com os filtros.`);
+      }
 
-  textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
-  meta.steps.table_fallback.count = textRows.length;
+      textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
+      meta.steps.table_fallback.count = textRows.length;
 
-} catch (e) {
-  meta.steps.table_fallback.error = String(e?.message || e);
-  // Log do erro geral do fallback
-  console.error(`[RAG v2.7.2] Erro GERAL no table_fallback: ${e?.message || e}`); 
-}
-  }
-// Fim do Bloco table_fallback REVISADO
-  // ==========================================================
-  // FIM DA CORREÇÃO 2
-  // ==========================================================
-
-
-  // ----------------------- Merge + re-rank com sinais genéricos -------------
-  // (Baseado no [cite: 457-470] - Lógica de Merge/Bônus mantida)
-  const mapById = new Map();
-  for (const r of vectorRows) {
-    const id = r.id ?? r.parceiro_id ?? r.partner_id;
-    if (!id) continue;
-    const vScore = typeof r.similarity === "number" ? r.similarity : typeof r.score === "number" ? r.score : 0;
-    mapById.set(id, { ...r, score_vector: vScore, score_text: 0 });
-  }
-  for (const r of textRows) {
-    const id = r.id ?? r.parceiro_id ?? r.partner_id;
-    if (!id) continue;
-    const tScore = typeof r.text_score === "number" ? r.text_score : typeof r.score === "number" ? r.score : 0;
-    if (!mapById.has(id)) mapById.set(id, { ...r, score_vector: 0, score_text: tScore });
-    else {
-      const prev = mapById.get(id);
-      mapById.set(id, { ...prev, score_text: Math.max(prev.score_text || 0, tScore) });
+    } catch (e) {
+      meta.steps.table_fallback.error = String(e?.message || e);
+      console.error(`[RAG v2.7.2] Erro GERAL no table_fallback: ${e?.message || e}`);
     }
+    // Fim do Bloco table_fallback REVISADO
   }
+
+  */ // <-- COMENTÁRIO TERMINA AQUI (DEPOIS DO '}')
+  // ==========================================================
+  // FIM DA TENTATIVA RADICAL
+  // ==========================================================
+
+
+  // ---- Merge + re-rank ----
+  const mapById = new Map();
+  for (const r of vectorRows) { const id = r.id ?? r.parceiro_id ?? r.partner_id; if (!id) continue; const vScore = typeof r.similarity === "number" ? r.similarity : typeof r.score === "number" ? r.score : 0; mapById.set(id, { ...r, score_vector: vScore, score_text: 0 }); }
+  for (const r of textRows) { const id = r.id ?? r.parceiro_id ?? r.partner_id; if (!id) continue; const tScore = typeof r.text_score === "number" ? r.text_score : typeof r.score === "number" ? r.score : 0; if (!mapById.has(id)) mapById.set(id, { ...r, score_vector: 0, score_text: tScore }); else { const prev = mapById.get(id); mapById.set(id, { ...prev, score_text: Math.max(prev.score_text || 0, tScore) }); } }
   const qNorm = String(q || "").toLowerCase();
   const mentionsPizza = /\b(pizza|pizzaria)\b/.test(qNorm);
   const mentionsSushi = /\b(sushi|japon[eê]s)\b/.test(qNorm);
   const mentionsCarne = /\b(picanha|churrasco|carne)\b/.test(qNorm);
-  const BONUS = {
-    pizzaCatExact: 0.25, pizzaWord: 0.20, sushiCatExact: 0.25,
-    sushiWord: 0.20, carneCatExact: 0.20, carneWord: 0.15,
-  };
-  const W_VECTOR = WEIGHTS.vector;
-  const W_TEXT   = WEIGHTS.text;
+  const BONUS = { pizzaCatExact: 0.25, pizzaWord: 0.20, sushiCatExact: 0.25, sushiWord: 0.20, carneCatExact: 0.20, carneWord: 0.15 };
+  const W_VECTOR = WEIGHTS.vector; const W_TEXT = WEIGHTS.text;
   const merged = Array.from(mapById.values()).map((r) => {
     let score_final = W_VECTOR * (r.score_vector || 0) + W_TEXT * (r.score_text || 0);
     if (filtroCidade && (r.cidade_id === filtroCidade || r.cidade === filtroCidade)) score_final += WEIGHTS.cityMatch;
     if (filtroCategoria && (r.categoria === filtroCategoria || r.category === filtroCategoria)) score_final += WEIGHTS.catFilterBonus;
-    const cat  = String(r.categoria || r.category || "").toLowerCase();
-    const nome = String(r.nome || r.name || "").toLowerCase();
-    const desc = String(r.descricao || r.description || "").toLowerCase();
-    if (mentionsPizza) {
-      if (cat === "pizzaria") score_final += BONUS.pizzaCatExact;
-      if (nome.includes("pizza") || desc.includes("pizza")) score_final += BONUS.pizzaWord;
-    }
-    if (mentionsSushi) {
-      if (["sushi","japonesa","japones","japonês"].includes(cat)) score_final += BONUS.sushiCatExact;
-      if (nome.includes("sushi") || nome.includes("japon") || desc.includes("sushi") || desc.includes("japon")) score_final += BONUS.sushiWord;
-    }
-    if (mentionsCarne) {
-      if (["churrascaria","carne"].includes(cat)) score_final += BONUS.carneCatExact;
-      if (nome.includes("picanha") || nome.includes("churras") || desc.includes("picanha") || desc.includes("churras")) score_final += BONUS.carneWord;
-    }
+    const cat  = String(r.categoria || r.category || "").toLowerCase(); const nome = String(r.nome || r.name || "").toLowerCase(); const desc = String(r.descricao || r.description || "").toLowerCase();
+    if (mentionsPizza) { if (cat === "pizzaria") score_final += BONUS.pizzaCatExact; if (nome.includes("pizza") || desc.includes("pizza")) score_final += BONUS.pizzaWord; }
+    if (mentionsSushi) { if (["sushi","japonesa","japones","japonês"].includes(cat)) score_final += BONUS.sushiCatExact; if (nome.includes("sushi") || nome.includes("japon") || desc.includes("sushi") || desc.includes("japon")) score_final += BONUS.sushiWord; }
+    if (mentionsCarne) { if (["churrascaria","carne"].includes(cat)) score_final += BONUS.carneCatExact; if (nome.includes("picanha") || nome.includes("churras") || desc.includes("picanha") || desc.includes("churras")) score_final += BONUS.carneWord; }
     return { ...r, score_final };
   });
 
-  // ==========================================================
   // CORREÇÃO 3: Bloco de Gating de Nome Exato
-  // (Cura o "Barco Pérola Negra -> Bar do Pôr do Sol")
-  // ==========================================================
-  
-  // Ordenação principal
-  const rankedAll =
-    merged.length === 0
-      ? (textRows || []).sort((a, b) => {
+  const rankedAll = merged.length === 0
+      ? (textRows || []).sort((a,b) => { // Corrigido para ordenar textRows se merged vazio
           const at = typeof a.text_score === "number" ? a.text_score : 0;
           const bt = typeof b.text_score === "number" ? b.text_score : 0;
           if (bt !== at) return bt - at;
           return (String(a.nome || a.name || "")).localeCompare(String(b.nome || b.name || ""));
-        })
+      })
       : merged.sort((a, b) => b.score_final - a.score_final);
-
-  // Gating de Nome Exato (Corrige "Barco Pérola Negra")
   let exactNameMatchList = rankedAll; // Começa com a lista completa
-  if (q && q.length > 5) { 
-    const qNorm = normalize(q || ""); 
-    
-    const exactMatches = rankedAll.filter(r => {
-      const nomeNorm = normalize(r.nome || r.name || ""); 
-      return qNorm.includes(nomeNorm) || nomeNorm.includes(qNorm);
-    });
-
-    if (exactMatches.length > 0) {
-      console.log(`[RAG] Gating de Nome Exato ativado. Query "${qNorm}" filtrou ${exactMatches.length} itens.`);
-      exactNameMatchList = exactMatches; // Lista é substituída
-    }
+  if (q && q.length > 5) {
+    const qNorm = normalize(q || "");
+    const exactMatches = rankedAll.filter(r => { const nomeNorm = normalize(r.nome || r.name || ""); return qNorm.includes(nomeNorm) || nomeNorm.includes(qNorm); });
+    if (exactMatches.length > 0) { console.log(`[RAG] Gating de Nome Exato ativado. Query "${qNorm}" filtrou ${exactMatches.length} itens.`); exactNameMatchList = exactMatches; } // Lista é substituída
   }
-  // ==========================================================
   // FIM DA CORREÇÃO 3
-  // ==========================================================
 
-
-  // Foco: pizza → só pizza se houver
+  // Foco: pizza
   let preferredOnly = exactNameMatchList; // <-- CORRIGIDO (usa a nova lista)
   if (mentionsPizza) {
-    const keep = exactNameMatchList.filter((r) => { // <-- CORRIGIDO (usa a nova lista)
-      const cat  = String(r.categoria || r.category || "").toLowerCase();
-      const nome = String(r.nome || r.name || "").toLowerCase();
-      const desc = String(r.descricao || r.description || "").toLowerCase();
-      return cat === "pizzaria" || nome.includes("pizza") || desc.includes("pizza");
-    });
+    const keep = exactNameMatchList.filter((r) => { const cat = String(r.categoria || "").toLowerCase(); const nome = String(r.nome || "").toLowerCase(); const desc = String(r.descricao || "").toLowerCase(); return cat === "pizzaria" || nome.includes("pizza") || desc.includes("pizza"); });
     if (keep.length > 0) preferredOnly = keep;
   }
 
-  // ----------------------- Gating genérico ----------------------------------
-  // (Baseado no [cite: 474-476] - Gating genérico mantido)
-  let finalList = preferredOnly; 
+  // Gating genérico
+  let finalList = preferredOnly;
   if (RELEVANCE_GATE.requireAny) {
-    const relevant = preferredOnly.filter((r) => {
-      const aff = computeAffinity(r, signals);
-      return aff.bonus >= RELEVANCE_GATE.minScore;
-    });
+    const relevant = preferredOnly.filter((r) => { const aff = computeAffinity(r, signals); return aff.bonus >= RELEVANCE_GATE.minScore; });
     if (relevant.length > 0) finalList = relevant;
   }
 
   const items = finalList.slice(0, safeLimit);
-  return debug ?
-  { items, meta } : items;
+  return debug ? { items, meta } : items;
 }
 
-// -------------------------- Stubs e utilidades ------------------------------
-// (Baseado no [cite: 477-495] - Funções de indexação mantidas)
-export async function searchSimilar(query, { partnerId, k }) {
-  console.log(`[RAG] searchSimilar (stub compat): q="${query}", partnerId=${partnerId}, k=${k}`);
-  return { results: [] };
-}
-export async function indexPartnerById(partnerId, { reactivate = false } = {}) {
-  const { data: parceiro, error: errLoad } = await supabase.from("parceiros").select("id, nome, descricao, categoria, ativo").eq("id", partnerId).single();
-  if (errLoad || !parceiro) throw new Error("Parceiro não encontrado para indexação.");
-  const baseText = [parceiro.nome || "", parceiro.categoria ? `Categoria: ${parceiro.categoria}` : "", parceiro.descricao || ""].filter(Boolean).join("\n");
-  const vec = await embedText768(baseText);
-  const patch = { embedding_768: vec };
-  if (reactivate) patch.ativo = true;
-  const { error: errUp } = await supabase.from("parceiros").update(patch).eq("id", partnerId);
-  if (errUp) throw errUp;
-  return { ok: true, partnerId, dims: vec.length };
-}
-export async function pausePartnerIndex(partnerId, { motivo } = {}) {
-  const { error } = await supabase
-    .from("parceiros")
-    .update({ ativo: false, embedding_768: null, bloqueado: true, bloqueado_motivo: motivo || "bloqueado pelo admin" })
-    .eq("id", partnerId);
-  if (error) throw error;
-  return { ok: true, partnerId };
-}
-export async function reactivatePartnerIndex(partnerId) {
-  const r = await indexPartnerById(partnerId, { reactivate: true });
-  await supabase.from("parceiros").update({ bloqueado: false, bloqueado_motivo: null }).eq("id", partnerId);
-  return r;
-}
-export async function forgetPartnerForever(partnerId) {
-  const { error } = await supabase.from("parceiros").delete().eq("id", partnerId);
-  if (error) throw error;
-  return { ok: true, partnerId };
-}
-export async function bulkIndexPartners({ cidade_id = null, categoria = null, onlyMissing = true, limit = 500 }) {
-  let qb = supabase
-    .from("parceiros")
-    .select("id, nome, descricao, categoria, ativo, bloqueado, embedding_768", { count: "exact" })
-    .limit(Math.max(1, Math.min(limit, 2000)));
-  qb = qb.eq("ativo", true).or("bloqueado.is.null,bloqueado.is.false");
-  if (cidade_id) qb = qb.eq("cidade_id", cidade_id);
-  if (categoria) qb = qb.eq("categoria", mapAliasCategory(categoria));
-  if (onlyMissing) qb = qb.is("embedding_768", null);
-  const { data: rows, error, count } = await qb;
-  if (error) throw error;
-  const ids = (rows || []).map((r) => r.id);
-  let ok = 0, fail = 0;
-  const errors = [];
-  for (const pid of ids) {
-    try {
-      await indexPartnerText(pid, []);
-      ok++;
-    } catch (e) {
-      fail++;
-      errors.push({ id: pid, error: String(e?.message || e) });
-    }
-  }
-  return { total_candidates: count ?? ids.length, processed: ids.length, ok, fail, errors };
-}
+// ---- Funções de indexação ----
+export async function searchSimilar(query, { partnerId, k }) { console.log(`[RAG] searchSimilar (stub compat): q="${query}", partnerId=${partnerId}, k=${k}`); return { results: [] }; }
+export async function indexPartnerById(partnerId, { reactivate = false } = {}) { const { data: p, error: errL } = await supabase.from("parceiros").select("id, nome, descricao, categoria, ativo").eq("id", partnerId).single(); if (errL || !p) throw new Error("Parceiro não encontrado."); const txt = [p.nome || "", p.categoria ? `Categoria: ${p.categoria}` : "", p.descricao || ""].filter(Boolean).join("\n"); const vec = await embedText768(txt); const patch = { embedding_768: vec }; if (reactivate) patch.ativo = true; const { error: errU } = await supabase.from("parceiros").update(patch).eq("id", partnerId); if (errU) throw errU; return { ok: true, partnerId, dims: vec.length }; }
+export async function pausePartnerIndex(partnerId, { motivo } = {}) { const { error } = await supabase.from("parceiros").update({ ativo: false, embedding_768: null, bloqueado: true, bloqueado_motivo: motivo || "bloqueado pelo admin" }).eq("id", partnerId); if (error) throw error; return { ok: true, partnerId }; }
+export async function reactivatePartnerIndex(partnerId) { const r = await indexPartnerById(partnerId, { reactivate: true }); await supabase.from("parceiros").update({ bloqueado: false, bloqueado_motivo: null }).eq("id", partnerId); return r; }
+export async function forgetPartnerForever(partnerId) { const { error } = await supabase.from("parceiros").delete().eq("id", partnerId); if (error) throw error; return { ok: true, partnerId }; }
+export async function bulkIndexPartners({ cidade_id = null, categoria = null, onlyMissing = true, limit = 500 }) { let qb = supabase.from("parceiros").select("id, nome, descricao, categoria, ativo, bloqueado, embedding_768", { count: "exact" }).limit(Math.min(limit, 2000)); qb = qb.eq("ativo", true).or("bloqueado.is.null,bloqueado.is.false"); if (cidade_id) qb = qb.eq("cidade_id", cidade_id); if (categoria) qb = qb.eq("categoria", mapAliasCategory(categoria)); if (onlyMissing) qb = qb.is("embedding_768", null); const { data: rows, error, count } = await qb; if (error) throw error; const ids = (rows || []).map(r => r.id); let ok = 0, fail = 0; const errors = []; for (const pid of ids) { try { await indexPartnerText(pid, []); ok++; } catch (e) { fail++; errors.push({ id: pid, error: String(e?.message || e) }); } } return { total_candidates: count ?? ids.length, processed: ids.length, ok, fail, errors }; }
