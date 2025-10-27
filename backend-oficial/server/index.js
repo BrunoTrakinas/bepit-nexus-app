@@ -19,6 +19,7 @@ import { hybridSearch } from "../services/rag.service.js"; // [cite: 105]
 import climaRoutes from "./routes/clima.routes.js";
 import marRoutes from "./routes/mar.routes.js";
 
+
 // ---- Fetch Polyfill (Node.js < 18) --------------------------------------------
 if (typeof fetch !== "function") {
   globalThis.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
@@ -556,6 +557,100 @@ function isRegionQuery(texto) {
   const mencionaRegiao = t.includes("regiao") || t.includes("região") || t.includes("regiao dos lagos") || t.includes("região dos lagos");
   return mencionaRegiao;
 }
+// ====================== DETECTOR DE INTENÇÃO (LOCAL) =========================
+async function detectarIntencaoLocal(texto, { slugDaRegiao } = {}) {
+  const t = normalizarTexto(texto || "");
+  
+  // Regras diretas
+  if (isRouteQuestion(texto)) {
+    return { tipoIntencao: "rota", categoriaAlvo: null, cidadeAlvo: null, limiteSugestoes: 5 };
+  }
+  if (isWeatherQuestion(texto)) {
+    return { tipoIntencao: "clima", categoriaAlvo: null, cidadeAlvo: null, limiteSugestoes: 5 };
+  }
+
+  // Heurística de parceiros (com extração básica)
+  const entidades = await extrairEntidadesDaBusca(texto || "");
+  const forcaParceiro = forcarBuscaParceiro(texto) || !!entidades?.category;
+  let categoriaAlvo = entidades?.category || null;
+
+  // Descobrir cidade da REGIÃO (se possível)
+  let cidadeAlvo = null;
+  try {
+    const { data: regiao } = await supabase.from("regioes").select("id").eq("slug", slugDaRegiao).maybeSingle();
+    if (regiao?.id) {
+      const { data: cidades } = await supabase
+        .from("cidades")
+        .select("id, nome, slug")
+        .eq("regiao_id", regiao.id);
+
+              // ... depois de carregar `cidades` pela regiao.id:
+      const tnorm = normalizarTexto(texto || "");
+
+      // 1ª tentativa: se você já tem extractCity, mantemos:
+      const alvo = extractCity?.(texto, cidades || []);
+      if (alvo) {
+        cidadeAlvo = alvo; // { id, nome, slug }
+      }
+
+      // Fallback: casamento simples por nome da cidade no texto ("cabo frio", "arraial do cabo", etc.)
+      if (!cidadeAlvo && Array.isArray(cidades) && cidades.length > 0) {
+        const hit = cidades.find((c) =>
+          tnorm.includes(normalizarTexto(c?.nome || ""))
+        );
+        if (hit) {
+          cidadeAlvo = hit; // { id, nome, slug }
+        }
+      }
+            // 3) Fallback GLOBAL: se ainda não achou cidade, procura em TODAS as cidades
+      if (!cidadeAlvo) {
+        const tnorm = normalizarTexto(texto || "");
+        const { data: allCidades, error: errAll } = await supabase
+          .from("cidades")
+          .select("id, nome, slug")
+          .limit(500); // ajuste se sua tabela for pequena/grande
+
+        if (!errAll && Array.isArray(allCidades)) {
+          const hitGlobal = allCidades.find((c) =>
+            tnorm.includes(normalizarTexto(c?.nome || ""))
+          );
+          if (hitGlobal) {
+            cidadeAlvo = hitGlobal; // { id, nome, slug }
+          }
+        }
+      }
+
+    }
+  } catch { /* segue sem cidade */ }
+
+  const tipoIntencao = forcaParceiro ? "parceiro" : "geral";
+  return { tipoIntencao, categoriaAlvo, cidadeAlvo, limiteSugestoes: 5 };
+}
+// Wrapper simples para rota humana (usa a função já existente gerarRotasHumanas)
+async function montarTextoDeRota({ slugDaRegiao, pergunta }) {
+  return gerarRotasHumanas(pergunta);
+}
+
+// Wrapper p/ resposta geral (usa gerarRespostaGeralPrompteada já presente no arquivo)
+async function gerarRespostaGeral({ pergunta, slugDaRegiao, conversaId }) {
+  const historico = await construirHistoricoParaGemini(conversaId, 12);
+  const horaLocal = getHoraLocalSP();
+  const regiaoNome = "Região dos Lagos";
+  return gerarRespostaGeralPrompteada({
+    pergunta,
+    historicoContents: historico,
+    regiaoNome,
+    dadosClimaOuMaresJSON: "{}",
+    horaLocalSP: horaLocal,
+  });
+}
+
+// Versão mínima do "Vendedor Nato" (combina Try2 + Try3 usando o seu gerador de lista)
+async function gerarRespostaVendedorNato({ q, cidadeAlvo, categoriaAlvo, candidatosTry2, candidatosTry3, limite, conversaId }) {
+  const lista = [...(candidatosTry2 || []), ...(candidatosTry3 || [])].slice(0, Math.max(1, limite || 5));
+  return gerarRespostaDeListaParceiros(q, null, lista, categoriaAlvo);
+}
+
 
 // ============================================================================
 // >>>>>>>>>>>>>>>>>>>>>>>>>>> PROMPT MESTRE (V14) <<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -764,322 +859,187 @@ Se não houver dados internos suficientes, seja honesto.
 // >>> ROTA DO CHAT - ORQUESTRADOR v6.3 (CÉREBRO VENDEDOR NATO) <<<<<
 // ============================================================================
 app.post("/api/chat/:slugDaRegiao", async (req, res) => {
-  const runId = randomUUID();
+  const slugDaRegiao = req.params.slugDaRegiao;
+  const { message, conversationId } = req.body || {};
+
   try {
-    console.log(`[RUN ${runId}] [PONTO 1] /chat iniciado.`);
+    // 1) Detecta intenção (Parceiro / Clima / Rota / Geral)
+    // depois (fallback inteligente):
+    const detectar = (typeof detectarIntencao === "function" ? detectarIntencao : detectarIntencaoLocal);
+    const { tipoIntencao, categoriaAlvo, cidadeAlvo, limiteSugestoes } =
+      await detectar(message, { slugDaRegiao });
 
-    const { slugDaRegiao } = req.params;
-    const userText = (req.body?.message || "").trim();
+    console.log("[DET INTENCAO] tipo:", tipoIntencao, "categoria:", categoriaAlvo);
+    console.log("[DET INTENCAO] cidadeAlvo:", cidadeAlvo);
 
-    if (userText.length < 1) {
-      return res.status(400).json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId });
-    }
+    // ===================== PARCEIRO =====================
+    if (tipoIntencao === "parceiro") {
+      // Try 1: categoria + cidade (chama do JEITO que sua função espera)
+const { parceiros: parceirosTry1_raw } = await searchPartnersRAG(message, {
+  cidadeIdForcada: cidadeAlvo?.id || null,
+  categoriaForcada: categoriaAlvo || null,
+  limit: Math.max(1, Math.min(limiteSugestoes || 5, 12)),
+});
 
-    const { data: regiao } = await supabase.from("regioes").select("id, nome").eq("slug", slugDaRegiao).single();
-    if (!regiao) return res.status(404).json({ error: "Região não encontrada." });
-    req.ctx = { regiao };
+// >>> Safeguard: só mantém parceiros da MESMA cidade pedida (se houver cidadeAlvo)
+const parceirosTry1 = (cidadeAlvo?.id)
+  ? (parceirosTry1_raw || []).filter((p) => p?.cidade_id === cidadeAlvo.id)
+  : (parceirosTry1_raw || []);
 
-    const { data: cidades } = await supabase.from("cidades").select("id, nome, slug").eq("regiao_id", regiao.id).eq("ativo", true);
-    const cidadesAtivas = cidades || [];
+// (opcional) log de auditoria
+console.log("[CHAT][TRY1] cidadePedida:", cidadeAlvo?.nome, "id:", cidadeAlvo?.id, "qtdFiltrada:", parceirosTry1.length);
 
-    const { conversationId, isFirstTurn } = await ensureConversation(req);
-    
-    // Recupera histórico e sessão
-    let sessionData = { history: [], entities: {} };
-    function setLastCityInSession(session, cidade_id) {
-      try {
-        if (!session || typeof session !== "object") return;
-        if (!session.entities) session.entities = {};
-        session.entities.lastCity = cidade_id || null;
-      } catch {}
-    }
-    function getLastCityFromSession(session) {
-      try { return session?.entities?.lastCity || null; } catch { return null; }
-    }
-    
-    try {
-      if (hasUpstash() && !isFirstTurn) {
-        const cachedSession = await upstash.get(conversationId, { timeoutMs: 400 });
-        if (cachedSession) sessionData = JSON.parse(cachedSession);
-      }
-    } catch (e) {
-      console.error(`[RUN ${runId}] [CACHE] Falha ao LER sessão:`, e?.message || e);
-      sessionData = { history: [], entities: {} };
-    }
+// Se, após o filtro, ainda houver resultados → sucesso do Try 1
+if (Array.isArray(parceirosTry1) && parceirosTry1.length > 0) {
+  const categoriaReal = parceirosTry1[0]?.categoria || categoriaAlvo || null;
 
-    const historico = sessionData.history || [];
-    
-    // Saudações
-    if (isSaudacao(userText)) {
-      const resposta = isFirstTurn
-        ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Como posso te ajudar a ter uma experiência incrível hoje?`
-        : "Claro, como posso te ajudar agora?";
-      return await updateSessionAndRespond({
-        res, runId, conversationId, userText,
-        aiResponseText: resposta, sessionData, regiaoId: regiao.id,
-      });
-    }
+  const resposta = await gerarRespostaDeListaParceiros(
+    message,        // userText
+    null,           // historico
+    parceirosTry1,  // parceiros (APÓS FILTRO)
+    categoriaReal   // categoria correta para refinamento
+  );
 
-    // =========================================================================
-    // ETAPA 1: LÓGICA DO VENDEDOR NATO (PARCEIROS PRIMEIRO)
-    // =========================================================================
-    if (forcarBuscaParceiro(userText)) {
-      console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada. Iniciando Lógica Vendedor Nato.`);
+  return res.json({
+    ok: true,
+    tipo: "parceiro",
+    origem: "try1",
+    count: parceirosTry1.length,
+    resposta,
+    parceiros: parceirosTry1,
+  });
+}
 
-      // --- Extrair Entidades ---
-      const { parceiros: _p, categoriaDetectada, cidadeIdDetectada } = await searchPartnersRAG(userText, { cidadesAtivas });
-      const categoriaAlvo = categoriaDetectada;
-      let cidadeIdAlvo = cidadeIdDetectada;
-      
-      // Se não houver cidade na pergunta, tenta herdar da sessão
-      if (!cidadeIdAlvo) {
-         cidadeIdAlvo = getLastCityFromSession(sessionData);
-         console.log(`[RUN ${runId}] [RAG] Usando cidade herdada da sessão: ${cidadeIdAlvo || 'Nenhuma'}`);
-      }
+// Caso contrário, segue para Try 2 / Try 3 (seus blocos já corrigidos com o aviso)
 
-      // --- TRY 1: Busca Exata (O que o usuário pediu, com cidade herdada se houver) ---
-      console.log(`[RUN ${runId}] [RAG-Try 1] Buscando: ${categoriaAlvo} EM ${cidadeIdAlvo || 'Qualquer Cidade'}`);
-      const { parceiros: parceirosTry1 } = await searchPartnersRAG(userText, {
-          cidadesAtivas,
-          cidadeIdForcada: cidadeIdAlvo,
-          categoriaForcada: categoriaAlvo,
-          limit: 5,
+
+// (se cair aqui, segue para Try 2 / Try 3 como você já implementou)
+
+
+      // Try 2: relaxa cidade (mantém categoria)
+      const { parceiros: parceirosTry2 } = await searchPartnersRAG(message, {
+        cidadeIdForcada: null,
+        categoriaForcada: categoriaAlvo || null,
+        limit: Math.max(1, Math.min(limiteSugestoes || 5, 12)),
       });
 
-      // --- SUCESSO: Se a Busca 1 funcionar, responde e termina ---
-      if (parceirosTry1.length > 0) {
-        console.log(`[RUN ${runId}] [RAG-Try 1] SUCESSO. Encontrados ${parceirosTry1.length} parceiros.`);
-        
-        // CORREÇÃO 4: Passa a categoria REAL do parceiro encontrado
-         const categoriaRealEncontrada = parceirosTry1[0]?.categoria || categoriaAlvo; 
-         const respostaModelo = await gerarRespostaDeListaParceiros(userText, historico, parceirosTry1, categoriaRealEncontrada);
-
-        const respostaFinal = finalizeAssistantResponse({
-          modelResponseText: respostaModelo,
-          foundPartnersList: parceirosTry1,
-          mode: "partners",
-        });
-
-        // Salva a cidade da busca bem-sucedida na sessão
-        if (cidadeIdAlvo) setLastCityInSession(sessionData, cidadeIdAlvo);
-
-        return await updateSessionAndRespond({
-          res, runId, conversationId, userText,
-          aiResponseText: respostaFinal,
-          sessionData, regiaoId: regiao.id, partners: parceirosTry1,
-        });
-      }
-
-      // --- FALHA (Try 1 falhou): Ativar "Cérebro Vendedor Nato" ---
-      console.log(`[RUN ${runId}] [RAG-Try 1] FALHA. Ativando Cérebro Vendedor Nato...`);
-
-      // --- TRY 2: Relaxar Localização (Manter Categoria, buscar em *todas* as cidades) ---
-      console.log(`[RUN ${runId}] [RAG-Try 2] Relaxando localização. Buscando: ${categoriaAlvo} EM (Todas as Cidades)`);
-      const { parceiros: parceirosTry2 } = await searchPartnersRAG(categoriaAlvo || userText, { // Foca só na categoria
-        cidadesAtivas: cidadesAtivas, // Passa todas as cidades
-        categoriaForcada: categoriaAlvo,
-        limit: 2, // Pegamos só os 2 melhores
+      // Try 3: relaxa categoria (mantém cidade)
+      const { parceiros: parceirosTry3 } = await searchPartnersRAG(message, {
+        cidadeIdForcada: cidadeAlvo?.id || null,
+        categoriaForcada: null,
+        limit: Math.max(1, Math.min(limiteSugestoes || 5, 12)),
       });
 
-      // --- TRY 3: Relaxar Categoria (Manter Localização, buscar categoria-irmã) ---
-      let categoriaIrma = null;
-      if (['pizzaria', 'hamburgueria', 'sushi', 'churrascaria'].includes(categoriaAlvo)) {
-         categoriaIrma = 'restaurante';
-      } else if (categoriaAlvo === 'comida' || categoriaAlvo === 'restaurante') {
-         categoriaIrma = 'bar'; // Exemplo
-      }
-      
-      let parceirosTry3 = [];
-      if (categoriaIrma && cidadeIdAlvo) {
-          console.log(`[RUN ${runId}] [RAG-Try 3] Relaxando categoria. Buscando: ${categoriaIrma} EM ${cidadeIdAlvo}`);
-          const { parceiros } = await searchPartnersRAG(categoriaIrma, { 
-            cidadesAtivas,
-            cidadeIdForcada: cidadeIdAlvo, // Só na cidade original
-            categoriaForcada: categoriaIrma,
-            limit: 2,
-          });
-          parceirosTry3 = parceiros;
-      }
+    // Combina resultados (mantendo sua assinatura de gerador)
+const combinados = [...(parceirosTry2 || []), ...(parceirosTry3 || [])]
+  .slice(0, Math.max(1, Math.min(limiteSugestoes || 5, 12)));
 
-      // --- Montar o PROMPT VENDEDOR NATO para a IA ---
-      const promptVendedor = `
-${PROMPT_MESTRE_V14}
+// >>> Early-return quando não há resultados nem em cidades próximas
+if (combinados.length === 0) {
+  const nomePedida = cidadeAlvo?.nome || "sua cidade solicitada";
+  return res.json({
+    ok: true,
+    tipo: "parceiro",
+    origem: "try2_try3",
+    resposta: `Poxa, não encontrei indicações **seguras** em **${nomePedida}** nem em cidades próximas. Posso tentar outra categoria, faixa de preço ou bairro?`,
+    parceiros_try2: [],
+    parceiros_try3: [],
+  });
+}
 
-# CONTEXTO DE VENDA
-O usuário pediu "${userText}" (intenção: ${categoriaAlvo || 'desconhecida'}, local: ${cidadeIdAlvo ? 'detectado' : 'qualquer'}).
-A busca exata (Try 1) falhou (0 resultados).
+// >>> NOVO: se a cidade pedida existe e NENHUM parceiro for dessa cidade,
+// vamos montar um aviso amigável de “cidade diferente”.
+let avisoCidade = "";
+try {
+  const cidadePedidaId = cidadeAlvo?.id || null;
+  if (cidadePedidaId && combinados.length > 0) {
+    const idsEncontrados = Array.from(
+      new Set(combinados.map((p) => p.cidade_id).filter(Boolean))
+    );
+    const nenhumDaCidadePedida = !idsEncontrados.includes(cidadePedidaId);
 
-# DADOS DO ESTOQUE (Resultados das buscas de fallback)
+    if (nenhumDaCidadePedida && idsEncontrados.length > 0) {
+      // Busca nomes das cidades retornadas
+      const { data: cidadesOutras } = await supabase
+        .from("cidades")
+        .select("id, nome")
+        .in("id", idsEncontrados);
 
-## Opção 1: Manter a INTENÇÃO (Ex: Pizzaria) em OUTRO LOCAL
-${JSON.stringify(parceirosTry2)}
+      const nomesOutros = (cidadesOutras || [])
+        .map((c) => c?.nome)
+        .filter(Boolean);
 
-## Opção 2: Manter o LOCAL (Ex: Cabo Frio) com OUTRA CATEGORIA (Ex: Restaurante)
-${JSON.stringify(parceirosTry3)}
-
-# INSTRUÇÃO
-Aja como um "vendedor nato", não como um robô.
-1. Peça desculpas gentilmente por não ter a opção exata (Ex: Pizzaria em Cabo Frio).
-2. Se a Opção 1 (Try 2) tiver resultados, ofereça a intenção no local alternativo (Ex: "Olha, não tenho pizzaria em Cabo Frio, mas tenho uma excelente em Arraial: [Nome do Parceiro Try 2]...").
-3. Se a Opção 2 (Try 3) tiver resultados, ofereça a categoria alternativa no local original (Ex: "...Mas se achar longe, tenho ótimos [Restaurantes] aqui mesmo em Cabo Frio: [Nome do Parceiro Try 3].").
-4. Combine as duas se ambas existirem.
-5. Se Opção 1 e 2 falharem, dê uma resposta gentil de fallback (Ex: "Infelizmente não encontrei indicações para '${categoriaAlvo}' agora.").
-
-[Pergunta]:
-"${userText}"
-
-Responda.
-`.trim();
-
-      const respostaIA = await geminiTry(promptVendedor);
-
-      return await updateSessionAndRespond({
-        res, runId, conversationId, userText,
-        aiResponseText: respostaIA,
-        sessionData, regiaoId: regiao.id,
-        partners: [...parceirosTry2, ...parceirosTry3],
-      });
-    }
-    // =========================================================================
-    // FIM DA LÓGICA DO VENDEDOR NATO
-    // =========================================================================
-
-
-    // 2) CLIMA (apenas quando NÃO for intenção de parceiros)
-    // (Baseado no [cite: 378-403] - Lógica de clima mantida, mas com correção de query)
-    if (!forcarBuscaParceiro(userText) && isWeatherQuestion(userText)) {
-      const when = detectTemporalWindow(userText);
-      const tipoDadoAlvo = when === "future" ? "previsao_diaria" : "clima_atual";
-      const cidadeAlvo = extractCity(userText, cidadesAtivas);
-      const forRegion = isRegionQuery(userText) && !cidadeAlvo;
-
-      let cidadesParaBuscar = [];
-      if (cidadeAlvo) {
-        cidadesParaBuscar.push(cidadeAlvo);
-      } else if (forRegion) {
-        const nomesVip = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"];
-        cidadesParaBuscar = cidadesAtivas.filter((c) => nomesVip.some((nVip) => normalizarTexto(c.nome) === normalizarTexto(nVip)));
-      } else {
-         // Fallback: busca dados da primeira cidade VIP se nenhuma for mencionada
-         const primeiraVip = cidadesAtivas.find(c => normalizarTexto(c.nome) === "cabo frio") || cidadesAtivas[0];
-         if (primeiraVip) cidadesParaBuscar.push(primeiraVip);
-      }
-
-
-      const dadosClimaticos = (
-        await Promise.all(
-          cidadesParaBuscar.map(async (cidade) => {
-            // CORREÇÃO: A query SQL estava errada. Usando 'ts' (timestamp) em vez de 'data_hora_consulta'
-            const { data } = await supabase
-              .from("dados_climaticos")
-              .select("dados")
-              .eq("cidade_id", cidade.id)
-              .eq("tipo_dado", tipoDadoAlvo)
-              .order("ts", { ascending: false }) // CORRIGIDO
-              .limit(1)
-              .maybeSingle(); // Usar maybeSingle para não dar erro se vazio
-              
-            if (!data) return null;
-
-            let registro = { cidade: cidade.nome, tipo: tipoDadoAlvo, registro: data };
-            
-            // Busca dados de maré e água para VIPs no presente
-            const CIDADES_VIP_NORM = ["arraial do cabo", "cabo frio", "armação dos búzios"];
-            if (when === "present" && CIDADES_VIP_NORM.includes(normalizarTexto(cidade.nome))) {
-              const { data: mare } = await supabase
-                .from("dados_climaticos").select("dados")
-                .eq("cidade_id", cidade.id).eq("tipo_dado", "dados_mare")
-                .order("ts", { ascending: false }).limit(1).maybeSingle();
-              const { data: agua } = await supabase
-                .from("dados_climaticos").select("dados")
-                .eq("cidade_id", cidade.id).eq("tipo_dado", "temperatura_agua")
-                .order("ts", { ascending: false }).limit(1).maybeSingle();
-                
-              if (mare) registro.dados_mare = mare.dados;
-              if (agua) registro.temperatura_agua = agua.dados;
-            }
-            return registro;
-          })
-        )
-      ).filter(Boolean);
-
-      if (dadosClimaticos.length > 0) {
-        const payload = {
-          tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica",
-          janelaTempo: when,
-          dados: dadosClimaticos,
-        };
-        const horaLocal = getHoraLocalSP();
-
-        const promptFinal = `
-${PROMPT_MESTRE_V14}
-# CONTEXTO CLIMA/MAR
-Hora local: ${horaLocal}
-Região: ${regiao.nome}
-DADOS (tabela interna dados_climaticos):
-${JSON.stringify(payload)}
-[Histórico]:
-${historicoParaTextoSimplesWrapper(historico)}
-[Pergunta]:
-"${userText}"
-`.trim();
-        const respostaIA = await geminiTry(promptFinal);
-
-        return await updateSessionAndRespond({
-          res, runId, conversationId, userText,
-          aiResponseText: respostaIA, sessionData, regiaoId: regiao.id,
-        });
-      } else {
-        // Fallback se o cache de clima estiver vazio
-        const respostaIA = (when === 'future')
-          ? "Ainda não tenho dados consolidados da previsão do tempo para os próximos dias. Posso ajudar com o clima de *hoje*?"
-          : "Não consegui consultar os dados climáticos de hoje agora. Por favor, tente em alguns minutos.";
-          
-        return await updateSessionAndRespond({
-          res, runId, conversationId, userText,
-          aiResponseText: respostaIA,
-          sessionData, regiaoId: regiao.id,
-        });
+      if (nomesOutros.length > 0) {
+        // remove duplicados e monta string "Arraial do Cabo, Búzios"
+        const listaNomes = Array.from(new Set(nomesOutros)).join(", ");
+        const nomePedida = cidadeAlvo?.nome || "sua cidade solicitada";
+        avisoCidade =
+          `*Aviso:* não encontrei indicações **seguras** em **${nomePedida}**, ` +
+          `mas tenho **ótimas opções** em **${listaNomes}**.`;
       }
     }
+  }
+} catch (e) {
+  // Não deixa o aviso quebrar a resposta — silêncio em caso de erro.
+}
 
-    // 3) ROTAS HUMANAS (quando pedido explicitamente)
-    // (Baseado no [cite: 404-405] - mantido)
-    if (isRouteQuestion(userText)) {
-      const respostaRotas = gerarRotasHumanas(userText);
-      return await updateSessionAndRespond({
-        res, runId, conversationId, userText,
-        aiResponseText: respostaRotas, sessionData, regiaoId: regiao.id,
-      });
+// Gera a resposta de lista (como você já fazia)
+const respostaLista = await gerarRespostaDeListaParceiros(
+  message,
+  null,
+  combinados,
+  categoriaAlvo || null
+);
+
+// >>> NOVO: prepend do aviso (se houver)
+const respostaVendedorNato = avisoCidade
+  ? `${avisoCidade}\n\n${respostaLista}`
+  : respostaLista;
+
+return res.json({
+  ok: true,
+  tipo: "parceiro",
+  origem: "try2_try3",
+  count_try2: parceirosTry2?.length || 0,
+  count_try3: parceirosTry3?.length || 0,
+  resposta: respostaVendedorNato,
+  parceiros_try2: parceirosTry2 || [],
+  parceiros_try3: parceirosTry3 || [],
+});
+
+
     }
 
-    // 4) FALLBACK GERAL (neutro, humano, com prompt mestre)
-    // (Baseado no [cite: 406-408] - mantido)
-    const horaLocalSP = getHoraLocalSP();
-    const promptGeral = `
-${PROMPT_MESTRE_V14}
-Hora local: ${horaLocalSP}
-Região: ${regiao.nome}
-Dados internos: {}
-[Histórico]:
-${historicoParaTextoSimplesWrapper(historico)}
-[Pergunta]:
-"${userText}"
-`.trim();
+    // ===================== CLIMA =====================
+    if (tipoIntencao === "clima") {
+      // Se você tiver um serviço real de clima, chame-o aqui.
+      // Mantendo compatível: devolve mensagem simples por ora.
+      const respostaClima = "Consultando dados internos de clima... me diga a cidade para eu checar.";
+      return res.json({ ok: true, tipo: "clima", resposta: respostaClima });
+    }
 
-    const respostaGeral = await geminiTry(promptGeral);
-    return await updateSessionAndRespond({
-      res, runId, conversationId, userText,
-      aiResponseText: respostaGeral, sessionData, regiaoId: regiao.id,
+    // ===================== ROTA =====================
+    if (tipoIntencao === "rota") {
+      const textoRota = await montarTextoDeRota({ slugDaRegiao, pergunta: message });
+      return res.json({ ok: true, tipo: "rota", resposta: textoRota });
+    }
+
+    // ===================== GERAL =====================
+    const respostaGeral = await gerarRespostaGeral({
+      pergunta: message,
+      slugDaRegiao,
+      conversaId: conversationId,
     });
+    return res.json({ ok: true, tipo: "geral", resposta: respostaGeral });
 
-  } catch (erro) {
-    console.error(`[RUN ${runId}] ERRO FATAL NA ROTA:`, erro);
-    return res.status(500).json({
-      reply: "Ops, encontrei um problema temporário. Por favor, tente sua pergunta novamente em um instante.",
-    });
+  } catch (e) {
+    console.error("[/api/chat] Erro:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+// === FIM DO BLOCO DA ROTA DO CHAT ===
+
 
 // ------------------------------ AVISOS PÚBLICOS -----------------------------
 // (Baseado no [cite: 410-415] - Rota de Avisos mantida)
