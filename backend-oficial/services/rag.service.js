@@ -255,59 +255,61 @@ export async function hybridSearch({ q, cidade_id, categoria, limit = 10, debug 
   // TENTATIVA RADICAL: Desativar COMPLETAMENTE o table_fallback
   // O bloco 'if' inteiro abaixo está comentado.
   // ==========================================================
-  /* <-- COMENTÁRIO COMEÇA AQUI (ANTES DO IF)
 
   if ((!textRows || textRows.length === 0) && q) {
-    // Bloco table_fallback (v2.7.2) está agora COMENTADO
-    try {
-      console.log("[RAG v2.7.2] EXECUTANDO TABLE_FALLBACK REVISADO! (COMENTADO)");
-      meta.steps.table_fallback.tried = true;
+  // TABLE_FALLBACK ATIVADO (v2.8.1) — bloco único try/catch
+  try {
+    console.log("[RAG v2.7.2] EXECUTANDO TABLE_FALLBACK REVISADO!");
+    meta.steps.table_fallback.tried = true;
 
-      let query = supabase
-        .from("parceiros")
-        .select("id, nome, descricao, cidade_id, categoria");
+    // Normaliza e escapa o termo para uso seguro no or()
+    const qNorm = String(q || "").trim();
+    const like = qNorm
+      ? `%${qNorm.replace(/[%_,]/g, (s) => (s === "_" ? "\\_" : s === "%" ? "\\%" : "\\,"))}%`
+      : null;
 
-      // === NOVA LÓGICA DE FILTRO ===
-      const filters = [];
-      if (q) {
-         filters.push(`or(nome.ilike.%${q}%,descricao.ilike.%${q}%)`);
-      }
-      if (filtroCategoria) {
-         filters.push(`categoria.eq.${filtroCategoria}`);
-      }
-      if (filtroCidade) {
-         filters.push(`cidade_id.eq.${filtroCidade}`);
-      }
+    // Seleção mínima necessária
+    let query = supabase
+      .from("parceiros")
+      .select("id, nome, descricao, cidade_id, categoria");
 
-      if (filters.length > 0) {
-          query = query.and(filters.join(','));
-          console.log(`[RAG v2.7.2] Fallback Filters Applied: ${filters.join(',')}`);
-      }
-      // === FIM DA NOVA LÓGICA ===
+    // === APLICAÇÃO DE FILTROS RÍGIDOS (AND) ===
+    if (filtroCategoria) query = query.eq("categoria", filtroCategoria);
+    if (filtroCidade)    query = query.eq("cidade_id", filtroCidade);
 
-      const { data: rowsTbl, error: errTbl } = await query.limit(safeLimit * 3);
-
-      if (errTbl) {
-        console.error(`[RAG v2.7.2] Erro na query do table_fallback: ${errTbl.message}`);
-        throw errTbl;
-      }
-
-      const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
-      if (asArray.length === 0) {
-          console.log(`[RAG v2.7.2] Table fallback NÃO encontrou resultados com os filtros.`);
-      }
-
-      textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
-      meta.steps.table_fallback.count = textRows.length;
-
-    } catch (e) {
-      meta.steps.table_fallback.error = String(e?.message || e);
-      console.error(`[RAG v2.7.2] Erro GERAL no table_fallback: ${e?.message || e}`);
+    // === BUSCA TEXTUAL (OR) RESTRITA PELO AND ACIMA ===
+    if (like) {
+      query = query.or(`nome.ilike.${like},descricao.ilike.${like}`);
     }
-    // Fim do Bloco table_fallback REVISADO
+
+    console.log(
+      `[RAG v2.7.2] Fallback Filters Applied => categoria=${filtroCategoria || "ANY"} | cidade=${filtroCidade || "ANY"} | q=${qNorm || "∅"}`
+    );
+
+    const { data: rowsTbl, error: errTbl } = await query.limit(safeLimit * 3);
+    if (errTbl) {
+      console.error(`[RAG v2.7.2] Erro na query do table_fallback: ${errTbl.message}`);
+      throw errTbl;
+    }
+
+    const asArray = Array.isArray(rowsTbl) ? rowsTbl : [];
+    if (asArray.length === 0) {
+      console.log("[RAG v2.7.2] Table fallback NÃO encontrou resultados com os filtros.");
+    }
+
+    // Marca como resultados textuais com score baixo (serão re-rankeados depois)
+    textRows = asArray.map((r) => ({ ...r, text_score: 0.4 }));
+    meta.steps.table_fallback.count = textRows.length;
+  } catch (e) {
+    meta.steps.table_fallback.error = String(e?.message || e);
+    console.error(`[RAG v2.7.2] Erro GERAL no table_fallback: ${e?.message || e}`);
   }
 
-  */ // <-- COMENTÁRIO TERMINA AQUI (DEPOIS DO '}')
+
+    // Fim do Bloco table_fallback REVISADO
+}
+
+  // <-- COMENTÁRIO TERMINA AQUI (DEPOIS DO '}')
   // ==========================================================
   // FIM DA TENTATIVA RADICAL
   // ==========================================================
