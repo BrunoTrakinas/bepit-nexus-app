@@ -741,12 +741,33 @@ Aja como um "vendedor nato", não como um robô.
 Responda combinando as instruções acima. Use a lista de parceiros fornecida.
 `.trim();
       const respostaIA = await geminiTry(promptVendedor);
-      // Pega refinamento final (usa categoria original)
+
+// Pega refinamento final (usa categoria original)
       const refinamentoFinal = await gerarRespostaDeListaParceiros(userText, null, combinados, categoriaAlvo);
       const textoRefinamento = refinamentoFinal.split('\n').pop() || "";
-      // Responde
-      return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: avisoCidade + respostaIA + "\n\n" + textoRefinamento, sessionData, regiaoId: regiao.id, partners: combinados });
+
+// --- MONTAGEM SEGURA DA RESPOSTA (evita "undefined") ---
+      const safeAviso = String(avisoCidade || "").trim();
+      const safeIA    = String(respostaIA  || "").trim();
+      const safeRef   = String(textoRefinamento || "").trim();
+
+// Junta apenas pedaços não vazios, com quebras limpas
+      const parts = [safeAviso, safeIA, safeRef].filter(s => s && s.length > 0);
+      const aiResponseText = parts.join("\n\n");
+
+// Responde
+     return await updateSessionAndRespond({
+     res,
+     runId,
+     conversationId,
+     userText,
+     aiResponseText,
+     sessionData,
+     regiaoId: regiao.id,
+     partners: combinados
+});
     }
+
 
     // ===================== CLIMA =====================
     if (tipoIntencao === "clima") {
