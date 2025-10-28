@@ -23,6 +23,15 @@ import { hybridSearch } from "../services/rag.service.js";
 import climaRoutes from "./routes/clima.routes.js";
 import marRoutes from "./routes/mar.routes.js";
 
+// --- Utils locais ---
+const normalize = (s) =>
+  String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+
+
 // ---- Fetch Polyfill ----
 if (typeof fetch !== "function") {
   globalThis.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
