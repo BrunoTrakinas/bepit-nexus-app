@@ -581,7 +581,7 @@ async function gerarRespostaGeral({ pergunta, slugDaRegiao, conversaId }) {
 }
 
 // ============================================================================
-// >>> ROTA DO CHAT - ORQUESTRADOR v6.3.6 (CÉREBRO VENDEDOR NATO) <<<<<
+// >>> ROTA DO CHAT - ORQUESTRADOR v6.3.7 (CÉREBRO VENDEDOR NATO) <<<<<
 // ============================================================================
 app.post("/api/chat/:slugDaRegiao", async (req, res) => {
   const runId = randomUUID();
@@ -591,221 +591,332 @@ app.post("/api/chat/:slugDaRegiao", async (req, res) => {
     const { slugDaRegiao } = req.params;
     const userText = (req.body?.message || "").trim();
 
-    if (userText.length < 1) { return res.status(400).json({ reply: "Por favor, digite uma mensagem.", conversationId: req.body?.conversationId }); }
+    if (userText.length < 1) {
+      return res.status(400).json({
+        reply: "Por favor, digite uma mensagem.",
+        conversationId: req.body?.conversationId,
+      });
+    }
 
     // Carrega Região e Cidades Ativas UMA VEZ
-    const { data: regiao, error: errRegiao } = await supabase.from("regioes").select("id, nome").eq("slug", slugDaRegiao).single();
-    if (errRegiao || !regiao) { console.error(`[RUN ${runId}] Região não encontrada: ${slugDaRegiao}`); return res.status(404).json({ error: "Região não encontrada." }); }
-    req.ctx = { regiao }; // Adiciona ao contexto para ensureConversation
-    const { data: cidades, error: errCidades } = await supabase.from("cidades").select("id, nome, slug").eq("regiao_id", regiao.id).eq("ativo", true);
-    if (errCidades) { console.error(`[RUN ${runId}] Erro ao buscar cidades:`, errCidades); }
+    const { data: regiao, error: errRegiao } = await supabase
+      .from("regioes")
+      .select("id, nome")
+      .eq("slug", slugDaRegiao)
+      .single();
+    if (errRegiao || !regiao) {
+      console.error(`[RUN ${runId}] Região não encontrada: ${slugDaRegiao}`);
+      return res.status(404).json({ error: "Região não encontrada." });
+    }
+    req.ctx = { regiao }; // para ensureConversation
+
+    const { data: cidades, error: errCidades } = await supabase
+      .from("cidades")
+      .select("id, nome, slug")
+      .eq("regiao_id", regiao.id)
+      .eq("ativo", true);
+    if (errCidades) console.error(`[RUN ${runId}] Erro ao buscar cidades:`, errCidades);
     const cidadesAtivas = cidades || [];
 
-    // Garante Conversa e obtém dados da sessão
+    // Garante Conversa e sessão
     const { conversationId, isFirstTurn } = await ensureConversation(req);
     let sessionData = { history: [], entities: {} };
-    function setLastCityInSession(session, cidade_id) { try { if (!session || typeof session !== "object") return; if (!session.entities) session.entities = {}; session.entities.lastCity = cidade_id || null; } catch {} }
-    function getLastCityFromSession(session) { try { return session?.entities?.lastCity || null; } catch { return null; } }
-    try { if (hasUpstash() && !isFirstTurn) { const cached = await upstash.get(conversationId, { timeoutMs: 400 }); if (cached) { try { sessionData = JSON.parse(cached); } catch { console.warn(`[RUN ${runId}] Falha ao parsear sessão do cache.`); sessionData = { history: [], entities: {} }; } } } }
-    catch (e) { console.error(`[RUN ${runId}] [CACHE] Falha ao LER sessão:`, e?.message || e); sessionData = { history: [], entities: {} }; }
+    const setLastCityInSession = (session, cidade_id) => {
+      try {
+        if (!session || typeof session !== "object") return;
+        if (!session.entities) session.entities = {};
+        session.entities.lastCity = cidade_id || null;
+      } catch {}
+    };
+    const getLastCityFromSession = (session) => {
+      try { return session?.entities?.lastCity || null; } catch { return null; }
+    };
+
+    try {
+      if (hasUpstash() && !isFirstTurn) {
+        const cached = await upstash.get(conversationId, { timeoutMs: 400 });
+        if (cached) {
+          try { sessionData = JSON.parse(cached); }
+          catch { console.warn(`[RUN ${runId}] Falha ao parsear sessão do cache.`); }
+        }
+      }
+    } catch (e) {
+      console.error(`[RUN ${runId}] [CACHE] Falha ao LER sessão:`, e?.message || e);
+    }
     const historico = sessionData.history || [];
 
     // Saudações
     if (isSaudacao(userText)) {
-        const resposta = isFirstTurn
-            ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Como posso te ajudar a ter uma experiência incrível hoje?`
-            : "Claro, como posso te ajudar agora?";
-        return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: resposta, sessionData, regiaoId: regiao.id });
+      const resposta = isFirstTurn
+        ? `Olá! Seja bem-vindo(a) à ${regiao.nome}! Eu sou o BEPIT, seu concierge de confiança. Como posso te ajudar a ter uma experiência incrível hoje?`
+        : "Claro, como posso te ajudar agora?";
+      return await updateSessionAndRespond({
+        res, runId, conversationId, userText,
+        aiResponseText: resposta, sessionData, regiaoId: regiao.id
+      });
     }
 
-    // Detecta intenção usando a função restaurada
-    const { tipoIntencao, categoriaAlvo, cidadeAlvo, limiteSugestoes } = await detectarIntencaoLocal(userText, { slugDaRegiao }); // Passa cidadesAtivas aqui? Não precisa, ela busca no DB.
-    console.log(`[RUN ${runId}] [DET INTENCAO] Tipo: ${tipoIntencao}, Categoria: ${categoriaAlvo}, Cidade: ${cidadeAlvo?.nome || 'Nenhuma'}`);
+    // Intenção
+    const { tipoIntencao, categoriaAlvo, cidadeAlvo, limiteSugestoes } =
+      await detectarIntencaoLocal(userText, { slugDaRegiao });
+    console.log(
+      `[RUN ${runId}] [DET INTENCAO] Tipo: ${tipoIntencao}, Categoria: ${categoriaAlvo}, Cidade: ${cidadeAlvo?.nome || "Nenhuma"}`
+    );
 
-    // =========================================================================
-    // ETAPA 1: LÓGICA DO VENDEDOR NATO (PARCEIROS PRIMEIRO)
-    // =========================================================================
+    // ===================== PARCEIRO =====================
     if (tipoIntencao === "parceiro") {
-      console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada. Iniciando Lógica Vendedor Nato.`);
+      console.log(`[RUN ${runId}] [RAG] Intent parceiros detectada.`);
 
       let cidadeIdAlvo = cidadeAlvo?.id || null;
       let cidadeNomeAlvo = cidadeAlvo?.nome || null;
 
-      // Se não houver cidade detectada na INTENÇÃO, tenta herdar da sessão
+      // Herdar última cidade da sessão
       if (!cidadeIdAlvo) {
-         cidadeIdAlvo = getLastCityFromSession(sessionData);
-         if (cidadeIdAlvo) {
-             cidadeNomeAlvo = cidadesAtivas.find(c => c.id === cidadeIdAlvo)?.nome || null; // Busca nome na lista já carregada
-             console.log(`[RUN ${runId}] [RAG] Usando cidade herdada da sessão: ${cidadeNomeAlvo} (${cidadeIdAlvo})`);
-         } else {
-             console.log(`[RUN ${runId}] [RAG] Nenhuma cidade detectada ou herdada.`);
-         }
+        cidadeIdAlvo = getLastCityFromSession(sessionData);
+        if (cidadeIdAlvo) {
+          cidadeNomeAlvo = cidadesAtivas.find(c => c.id === cidadeIdAlvo)?.nome || null;
+          console.log(`[RUN ${runId}] [RAG] Usando cidade herdada: ${cidadeNomeAlvo} (${cidadeIdAlvo})`);
+        }
       }
 
-      // --- TRY 1: Busca Exata ---
-      console.log(`[RUN ${runId}] [RAG-Try 1] Buscando: ${categoriaAlvo || 'Sem Categoria'} EM ${cidadeNomeAlvo || 'Qualquer Cidade'} (ID: ${cidadeIdAlvo || 'Nenhum'})`);
-      const { parceiros: parceirosTry1_raw } = await searchPartnersRAG(userText, { // Chama a função que agora está ANTES
-          cidadesAtivas, // Passa a lista carregada
-          cidadeIdForcada: cidadeIdAlvo,
-          categoriaForcada: categoriaAlvo,
-          limit: Math.max(1, Math.min(limiteSugestoes || 5, 12)),
+      // TRY 1
+      console.log(`[RUN ${runId}] [RAG-Try 1] ${categoriaAlvo || "Sem Categoria"} @ ${cidadeNomeAlvo || "Qualquer"}`);
+      const { parceiros: parceirosTry1_raw } = await searchPartnersRAG(userText, {
+        cidadesAtivas,
+        cidadeIdForcada: cidadeIdAlvo,
+        categoriaForcada: categoriaAlvo,
+        limit: Math.max(1, Math.min(limiteSugestoes || 5, 12)),
       });
 
-      // --- GUARD-RAILS PÓS-BUSCA ---
       let parceirosTry1 = parceirosTry1_raw || [];
       const catAlvoNorm = normalize(categoriaAlvo);
       if (catAlvoNorm) {
-          parceirosTry1 = parceirosTry1.filter(p => normalize(p?.categoria) === catAlvoNorm);
-          console.log(`[RUN ${runId}] [GuardRail C] Após filtro de categoria '${catAlvoNorm}', restaram ${parceirosTry1.length} parceiros.`);
+        parceirosTry1 = parceirosTry1.filter(p => normalize(p?.categoria) === catAlvoNorm);
+        console.log(`[RUN ${runId}] [GuardRail C] Após filtro categoria '${catAlvoNorm}': ${parceirosTry1.length}`);
       }
       if (cidadeIdAlvo) {
-          parceirosTry1 = parceirosTry1.filter(p => p?.cidade_id === cidadeIdAlvo);
-          console.log(`[RUN ${runId}] [GuardRail D] Após filtro de cidade ID '${cidadeIdAlvo}', restaram ${parceirosTry1.length} parceiros.`);
+        parceirosTry1 = parceirosTry1.filter(p => p?.cidade_id === cidadeIdAlvo);
+        console.log(`[RUN ${runId}] [GuardRail D] Após filtro cidade '${cidadeIdAlvo}': ${parceirosTry1.length}`);
       }
 
-      // --- SUCESSO TRY 1 ---
       if (parceirosTry1.length > 0) {
-        console.log(`[RUN ${runId}] [RAG-Try 1] SUCESSO (Pós GuardRails). Encontrados ${parceirosTry1.length} parceiros.`);
         const categoriaRealEncontrada = parceirosTry1[0]?.categoria || categoriaAlvo;
-        const respostaModelo = await gerarRespostaDeListaParceiros(userText, historico, parceirosTry1, categoriaRealEncontrada);
-        const respostaFinal = finalizeAssistantResponse({ modelResponseText: respostaModelo, foundPartnersList: parceirosTry1, mode: "partners" });
-        if (cidadeIdAlvo) setLastCityInSession(sessionData, cidadeIdAlvo); // Salva cidade na sessão
-        return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: respostaFinal, sessionData, regiaoId: regiao.id, partners: parceirosTry1 });
+        const respostaModelo = await gerarRespostaDeListaParceiros(
+          userText, historico, parceirosTry1, categoriaRealEncontrada
+        );
+        const respostaFinal = finalizeAssistantResponse({
+          modelResponseText: respostaModelo, foundPartnersList: parceirosTry1, mode: "partners"
+        });
+        if (cidadeIdAlvo) setLastCityInSession(sessionData, cidadeIdAlvo);
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: respostaFinal, sessionData, regiaoId: regiao.id, partners: parceirosTry1
+        });
       }
 
-      // --- FALHA TRY 1 ---
-      console.log(`[RUN ${runId}] [RAG-Try 1] FALHA (Pós GuardRails). Ativando Cérebro Vendedor Nato...`);
-      // --- TRY 2: Relaxar Localização ---
-      console.log(`[RUN ${runId}] [RAG-Try 2] Relaxando localização. Buscando: ${categoriaAlvo || 'Sem Categoria'} EM (Todas as Cidades)`);
-      const { parceiros: parceirosTry2 } = await searchPartnersRAG(categoriaAlvo || userText, { cidadesAtivas, categoriaForcada: categoriaAlvo, limit: 2 });
-      // --- TRY 3: Relaxar Categoria ---
+      // TRY 2 (relaxa localização)
+      console.log(`[RUN ${runId}] [RAG-Try 2] Relaxando localização.`);
+      const { parceiros: parceirosTry2 } = await searchPartnersRAG(
+        categoriaAlvo || userText, { cidadesAtivas, categoriaForcada: categoriaAlvo, limit: 2 }
+      );
+
+      // TRY 3 (relaxa categoria)
       let categoriaIrma = null;
-      if (['pizzaria', 'hamburgueria', 'sushi', 'churrascaria'].includes(categoriaAlvo)) { categoriaIrma = 'restaurante'; }
-      else if (categoriaAlvo === 'comida' || categoriaAlvo === 'restaurante') { categoriaIrma = 'bar'; }
+      if (["pizzaria", "hamburgueria", "sushi", "churrascaria"].includes(categoriaAlvo)) categoriaIrma = "restaurante";
+      else if (categoriaAlvo === "comida" || categoriaAlvo === "restaurante") categoriaIrma = "bar";
+
       let parceirosTry3 = [];
-      if (categoriaIrma && cidadeIdAlvo) { // Só tenta se tinha cidade original
-          console.log(`[RUN ${runId}] [RAG-Try 3] Relaxando categoria. Buscando: ${categoriaIrma} EM ${cidadeNomeAlvo}`);
-          const { parceiros } = await searchPartnersRAG(categoriaIrma, { cidadesAtivas, cidadeIdForcada: cidadeIdAlvo, categoriaForcada: categoriaIrma, limit: 2 });
-          parceirosTry3 = parceiros;
+      if (categoriaIrma && cidadeIdAlvo) {
+        console.log(`[RUN ${runId}] [RAG-Try 3] Relaxando categoria -> ${categoriaIrma} @ ${cidadeNomeAlvo}`);
+        const { parceiros } = await searchPartnersRAG(categoriaIrma, {
+          cidadesAtivas, cidadeIdForcada: cidadeIdAlvo, categoriaForcada: categoriaIrma, limit: 2
+        });
+        parceirosTry3 = parceiros;
       }
-      // Combina resultados
+
       const combinados = [...(parceirosTry2 || []), ...(parceirosTry3 || [])]
-          // Remove duplicados pelo ID antes de cortar
-          .filter((p, index, self) => index === self.findIndex((t) => t.id === p.id))
-          .slice(0, Math.max(1, limiteSugestoes || 5, 12));
+        .filter((p, i, self) => i === self.findIndex(t => t.id === p.id))
+        .slice(0, Math.min(Math.max(1, (limiteSugestoes || 5)), 12));
 
-      // Early return se NADA for encontrado
       if (combinados.length === 0) {
-         const nomePedida = cidadeNomeAlvo || "sua cidade solicitada";
-         return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: `Poxa, não encontrei indicações para '${categoriaAlvo || 'o que pediu'}' em ${nomePedida} ou cidades próximas. Posso tentar outra categoria?`, sessionData, regiaoId: regiao.id, partners: [] });
+        const nomePedida = cidadeNomeAlvo || "sua cidade solicitada";
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: `Poxa, não encontrei indicações para '${categoriaAlvo || "o que pediu"}' em ${nomePedida} ou cidades próximas. Posso tentar outra categoria?`,
+          sessionData, regiaoId: regiao.id, partners: []
+        });
       }
-      // Monta aviso se resultados são de outra cidade (Guard-rail E)
-      let avisoCidade = "";
-      try {
-        const cidadePedidaId = cidadeIdAlvo || null;
-        if (cidadePedidaId && combinados.length > 0) {
-          const idsEncontrados = Array.from(new Set(combinados.map(p => p.cidade_id).filter(Boolean)));
-          const nenhumDaCidadePedida = !idsEncontrados.includes(cidadePedidaId);
-          if (nenhumDaCidadePedida && idsEncontrados.length > 0) {
-            // Busca nomes das cidades (poderia otimizar buscando só os IDs que não são a cidade pedida)
-            const { data: cidadesOutras } = await supabase.from("cidades").select("id, nome").in("id", idsEncontrados);
-            const nomesOutros = Array.from(new Set((cidadesOutras || []).map(c => c?.nome).filter(Boolean)));
-            if (nomesOutros.length > 0) {
-              const nomePedida = cidadeNomeAlvo || "sua cidade solicitada";
-              avisoCidade = `*Aviso:* não encontrei indicações em **${nomePedida}**, mas tenho opções em **${nomesOutros.join(", ")}**. `;
-            }
-          }
+
+      // ====== BLOCO DE RESPOSTA HUMANA (Casos 1–4 como if/else if/else if/else) ======
+      const getCidadeNome = (id) => {
+        if (!id) return "";
+        const c = (cidadesAtivas || []).find(x => x?.id === id);
+        return c?.nome || c?.name || "";
+      };
+
+      const catNorm = normalize(categoriaAlvo);
+      const nomeCidadeAlvo = cidadeNomeAlvo || getCidadeNome(cidadeIdAlvo);
+
+      const okCidadeCat = (combinados || []).filter(p =>
+        normalize(p?.categoria) === catNorm && p?.cidade_id === cidadeIdAlvo
+      );
+      const okOutraCidade = (combinados || []).filter(p =>
+        normalize(p?.categoria) === catNorm && p?.cidade_id !== cidadeIdAlvo
+      );
+      const outraCategoriaMesmaCidade = (combinados || []).filter(p =>
+        normalize(p?.categoria) !== catNorm && p?.cidade_id === cidadeIdAlvo
+      );
+
+      const renderLista = (lista) =>
+        (lista || []).map(p => {
+          const nome = p?.nome || "Indicação";
+          const desc = p?.descricao ? `\n${p.descricao}` : "";
+          return `• ${nome}${desc}`;
+        }).join("\n\n");
+
+      if (okCidadeCat.length > 0) {
+        const intro = nomeCidadeAlvo ? `Pizzarias em ${nomeCidadeAlvo}:` : `Pizzarias encontradas:`;
+        const corpo = renderLista(okCidadeCat.slice(0, Math.max(3, limiteSugestoes || 5)));
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: `${intro}\n\n${corpo}`,
+          sessionData, regiaoId: regiao.id, partners: okCidadeCat
+        });
+      } else if (okOutraCidade.length > 0) {
+        const cidadesSet = new Map();
+        for (const p of okOutraCidade) {
+          const nm = getCidadeNome(p?.cidade_id);
+          if (!cidadesSet.has(nm)) cidadesSet.set(nm, []);
+          cidadesSet.get(nm).push(p);
         }
-      } catch(e) { console.error(`[GuardRail E] Erro ao gerar aviso de cidade: ${e?.message || e}`); /* não quebra */ }
-      // Monta prompt para IA
-      const promptVendedor = `
-${PROMPT_MESTRE_V14}
-# CONTEXTO DE VENDA
-O usuário pediu "${userText}" (intenção: ${categoriaAlvo || 'desconhecida'}, local: ${cidadeNomeAlvo || 'qualquer'}).
-A busca exata (Try 1) falhou (0 resultados).
+        const nomesCidades = Array.from(cidadesSet.keys()).filter(Boolean);
+        const cidadesFrase = nomesCidades.length === 1
+          ? nomesCidades[0]
+          : nomesCidades.slice(0, -1).join(", ") + " e " + nomesCidades.slice(-1);
 
-# DADOS DO ESTOQUE (Resultados das buscas de fallback - PRIORIZE ESTES)
-## Opção 1: Manter a INTENÇÃO (${categoriaAlvo || 'original'}) em OUTRO LOCAL
-${JSON.stringify(parceirosTry2)}
-## Opção 2: Manter o LOCAL (${cidadeNomeAlvo || 'original'}) com OUTRA CATEGORIA (${categoriaIrma || 'alternativa'})
-${JSON.stringify(parceirosTry3)}
+        const intro = nomeCidadeAlvo
+          ? `Não encontrei pizzarias em ${nomeCidadeAlvo} agora.`
+          : `Não encontrei pizzarias na cidade solicitada no momento.`;
+        const ponte = `Mas, se deseja comer uma boa pizza, tenho ótimas indicações em ${cidadesFrase}.`;
 
-# INSTRUÇÃO
-Aja como um "vendedor nato", não como um robô.
-1. Se a Opção 1 tiver resultados, comece oferecendo a intenção no local alternativo (Ex: "Olha, não tenho ${categoriaAlvo || 'isso'} em ${cidadeNomeAlvo || 'sua cidade'}, mas tenho uma excelente opção em [Cidade do Parceiro Try 2]:"). Mencione o nome da cidade alternativa. Liste os parceiros da Opção 1 formatados ("• **Nome** · categoria · Descrição.").
-2. Se a Opção 2 tiver resultados, ofereça a categoria alternativa no local original (Ex: "Se preferir ficar em ${cidadeNomeAlvo || 'sua cidade'}, tenho ótimos [${categoriaIrma}] como:"). Liste os parceiros da Opção 2 formatados.
-3. Combine as frases se ambas existirem, sempre oferecendo a Opção 1 primeiro. Se só uma opção tiver resultados, use apenas a frase correspondente.
-4. NUNCA diga que a busca falhou ou que não achou resultados exatos. Apenas apresente as alternativas encontradas.
+        const primeiraCidade = nomesCidades[0];
+        const listaPrimeira = renderLista((cidadesSet.get(primeiraCidade) || []).slice(0, 3));
+        const call = `Interessa ver essas opções ou prefere outro tipo de prato em ${nomeCidadeAlvo || "sua cidade"}?`;
 
-[Pergunta]: "${userText}"
-Responda combinando as instruções acima. Use a lista de parceiros fornecida.
-`.trim();
-      const respostaIA = await geminiTry(promptVendedor);
+        const texto = [intro, ponte, "", `Exemplos em ${primeiraCidade}:`, listaPrimeira, "", call]
+          .filter(Boolean).join("\n");
 
-// Pega refinamento final (usa categoria original)
-      const refinamentoFinal = await gerarRespostaDeListaParceiros(userText, null, combinados, categoriaAlvo);
-      const textoRefinamento = refinamentoFinal.split('\n').pop() || "";
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: texto, sessionData, regiaoId: regiao.id, partners: okOutraCidade
+        });
+      } else if (outraCategoriaMesmaCidade.length > 0) {
+        const intro = nomeCidadeAlvo
+          ? `Hoje não tenho indicações de pizzaria em ${nomeCidadeAlvo}.`
+          : `Hoje não tenho indicações de pizzaria nessa cidade.`;
+        const ponte = nomeCidadeAlvo
+          ? `Mas, se quiser, posso indicar ótimas opções de outros pratos em ${nomeCidadeAlvo}.`
+          : `Mas posso indicar ótimas opções de outros pratos por aqui.`;
 
-// --- MONTAGEM SEGURA DA RESPOSTA (evita "undefined") ---
-      const safeAviso = String(avisoCidade || "").trim();
-      const safeIA    = String(respostaIA  || "").trim();
-      const safeRef   = String(textoRefinamento || "").trim();
+        const corpo = renderLista(outraCategoriaMesmaCidade.slice(0, Math.max(3, limiteSugestoes || 5)));
+        const call = `Prefere ver essas alternativas ou tentar outra cidade para pizzaria?`;
 
-// Junta apenas pedaços não vazios, com quebras limpas
-      const parts = [safeAviso, safeIA, safeRef].filter(s => s && s.length > 0);
-      const aiResponseText = parts.join("\n\n");
+        const texto = [intro, ponte, "", corpo, "", call].filter(Boolean).join("\n");
 
-// Responde
-     return await updateSessionAndRespond({
-     res,
-     runId,
-     conversationId,
-     userText,
-     aiResponseText,
-     sessionData,
-     regiaoId: regiao.id,
-     partners: combinados
-});
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: texto, sessionData, regiaoId: regiao.id, partners: outraCategoriaMesmaCidade
+        });
+      } else {
+        const intro = nomeCidadeAlvo
+          ? `Não encontrei pizzarias em ${nomeCidadeAlvo} agora.`
+          : `Não encontrei pizzarias por aqui no momento.`;
+        const call = nomeCidadeAlvo
+          ? `Posso procurar pizzaria em outra cidade próxima (ex.: Arraial, Búzios) ou sugerir outros pratos em ${nomeCidadeAlvo}. O que prefere?`
+          : `Posso procurar em outra cidade próxima ou sugerir outros tipos de prato. O que prefere?`;
+
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: `${intro}\n\n${call}`, sessionData, regiaoId: regiao.id, partners: []
+        });
+      }
     }
-
-
     // ===================== CLIMA =====================
-    if (tipoIntencao === "clima") {
+    else if (tipoIntencao === "clima") {
       const when = detectTemporalWindow(userText);
       const tipoDadoAlvo = when === "future" ? "previsao_diaria" : "clima_atual";
-      const cidadeAlvoObj = cidadeAlvo; // Renomeado
+      const cidadeAlvoObj = cidadeAlvo;
       const forRegion = isRegionQuery(userText) && !cidadeAlvoObj;
+
       let cidadesParaBuscar = [];
-      if (cidadeAlvoObj) { cidadesParaBuscar.push(cidadeAlvoObj); }
-      else if (forRegion) { const nomesVip = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"]; cidadesParaBuscar = cidadesAtivas.filter(c => nomesVip.some(nVip => normalizarTexto(c.nome) === normalizarTexto(nVip))); }
-      else { const primeiraVip = cidadesAtivas.find(c => normalizarTexto(c.nome) === "cabo frio") || cidadesAtivas[0]; if (primeiraVip) cidadesParaBuscar.push(primeiraVip); }
+      if (cidadeAlvoObj) cidadesParaBuscar.push(cidadeAlvoObj);
+      else if (forRegion) {
+        const nomesVip = ["Arraial do Cabo", "Cabo Frio", "Armação dos Búzios"];
+        cidadesParaBuscar = cidadesAtivas.filter(c =>
+          nomesVip.some(nVip => normalizarTexto(c.nome) === normalizarTexto(nVip))
+        );
+      } else {
+        const primeiraVip =
+          cidadesAtivas.find(c => normalizarTexto(c.nome) === "cabo frio") || cidadesAtivas[0];
+        if (primeiraVip) cidadesParaBuscar.push(primeiraVip);
+      }
 
-      console.log(`[RUN ${runId}] [CLIMA] Buscando dados para: ${cidadesParaBuscar.map(c=>c.nome).join(', ')} | Tipo: ${tipoDadoAlvo}`);
+      console.log(
+        `[RUN ${runId}] [CLIMA] ${cidadesParaBuscar.map(c => c.nome).join(", ")} | Tipo: ${tipoDadoAlvo}`
+      );
 
-      const dadosClimaticos = (await Promise.all(cidadesParaBuscar.map(async (cidade) => {
-        try {
-            const { data, error: errCli } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", cidade.id).eq("tipo_dado", tipoDadoAlvo).order("ts", { ascending: false }).limit(1).maybeSingle();
-            if (errCli) { console.error(`[CLIMA DB] Erro ao buscar ${tipoDadoAlvo} para ${cidade.nome}:`, errCli); return null; }
-            if (!data?.dados) { console.log(`[CLIMA DB] Nenhum dado recente de ${tipoDadoAlvo} para ${cidade.nome}.`); return null; }
+      const dadosClimaticos = (
+        await Promise.all(
+          cidadesParaBuscar.map(async (cidade) => {
+            try {
+              const { data, error: errCli } = await supabase
+                .from("dados_climaticos")
+                .select("dados")
+                .eq("cidade_id", cidade.id)
+                .eq("tipo_dado", tipoDadoAlvo)
+                .order("ts", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              if (errCli) {
+                console.error(`[CLIMA DB] Erro ${tipoDadoAlvo} @ ${cidade.nome}:`, errCli);
+                return null;
+              }
+              if (!data?.dados) {
+                console.log(`[CLIMA DB] Sem dado recente ${tipoDadoAlvo} @ ${cidade.nome}.`);
+                return null;
+              }
 
-            let registro = { cidade: cidade.nome, tipo: tipoDadoAlvo, registro: data.dados };
-            const CIDADES_VIP_NORM = ["arraial do cabo", "cabo frio", "armação dos búzios"];
-            if (when === "present" && CIDADES_VIP_NORM.includes(normalizarTexto(cidade.nome))) {
-                const { data: mare, error: errMare } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", cidade.id).eq("tipo_dado", "dados_mare").order("ts", { ascending: false }).limit(1).maybeSingle();
-                if (errMare) { console.error(`[CLIMA DB] Erro ao buscar maré para ${cidade.nome}:`, errMare); } else if (mare?.dados) { registro.dados_mare = mare.dados; }
+              let registro = { cidade: cidade.nome, tipo: tipoDadoAlvo, registro: data.dados };
 
-                const { data: agua, error: errAgua } = await supabase.from("dados_climaticos").select("dados").eq("cidade_id", cidade.id).eq("tipo_dado", "temperatura_agua").order("ts", { ascending: false }).limit(1).maybeSingle();
-                 if (errAgua) { console.error(`[CLIMA DB] Erro ao buscar temp. água para ${cidade.nome}:`, errAgua); } else if (agua?.dados) { registro.temperatura_agua = agua.dados; }
+              const CIDADES_VIP_NORM = ["arraial do cabo", "cabo frio", "armação dos búzios"];
+              if (when === "present" && CIDADES_VIP_NORM.includes(normalizarTexto(cidade.nome))) {
+                const { data: mare, error: errMare } = await supabase
+                  .from("dados_climaticos").select("dados")
+                  .eq("cidade_id", cidade.id).eq("tipo_dado", "dados_mare")
+                  .order("ts", { ascending: false }).limit(1).maybeSingle();
+                if (!errMare && mare?.dados) registro.dados_mare = mare.dados;
+
+                const { data: agua, error: errAgua } = await supabase
+                  .from("dados_climaticos").select("dados")
+                  .eq("cidade_id", cidade.id).eq("tipo_dado", "temperatura_agua")
+                  .order("ts", { ascending: false }).limit(1).maybeSingle();
+                if (!errAgua && agua?.dados) registro.temperatura_agua = agua.dados;
+              }
+              return registro;
+            } catch (e) {
+              console.error(`[CLIMA DB] Exceção @ ${cidade.nome}:`, e);
+              return null;
             }
-            return registro;
-        } catch (e) {
-             console.error(`[CLIMA DB] Exceção ao buscar dados para ${cidade.nome}:`, e);
-             return null;
-        }
-      }))).filter(Boolean);
+          })
+        )
+      ).filter(Boolean);
 
       if (dadosClimaticos.length > 0) {
-        const payload = { tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica", janelaTempo: when, dados: dadosClimaticos };
+        const payload = {
+          tipoConsulta: forRegion ? "resumo_regiao" : "cidade_especifica",
+          janelaTempo: when,
+          dados: dadosClimaticos,
+        };
         const horaLocal = getHoraLocalSP();
         const promptFinal = `
 ${PROMPT_MESTRE_V14}
@@ -814,27 +925,43 @@ Hora local: ${horaLocal} | Região: ${regiao.nome} | DADOS: ${JSON.stringify(pay
 [Histórico]: ${historicoParaTextoSimplesWrapper(historico)}
 [Pergunta]: "${userText}"
 Responda interpretando os DADOS para responder à Pergunta. Seja direto. Se pedir previsão e não houver ('previsao_diaria' vazia nos DADOS), diga que não há previsão consolidada. Se pedir clima atual e não houver ('clima_atual' vazio), peça para tentar mais tarde. Se houver dados de maré/água, inclua-os na resposta se relevante.`.trim();
+
         const respostaIA = await geminiTry(promptFinal);
-        return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: respostaIA, sessionData, regiaoId: regiao.id });
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: respostaIA, sessionData, regiaoId: regiao.id
+        });
       } else {
-        console.log(`[RUN ${runId}] [CLIMA] Nenhum dado encontrado no cache para a consulta.`);
-        const respostaIA = (when === 'future') ? "Ainda não tenho dados consolidados da previsão do tempo para os próximos dias. Posso ajudar com o clima de *hoje*?" : "Não consegui consultar os dados climáticos de hoje agora. Por favor, tente em alguns minutos.";
-        return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: respostaIA, sessionData, regiaoId: regiao.id });
+        console.log(`[RUN ${runId}] [CLIMA] Sem dados no cache.`);
+        const respostaIA =
+          when === "future"
+            ? "Ainda não tenho dados consolidados da previsão do tempo para os próximos dias. Posso ajudar com o clima de *hoje*?"
+            : "Não consegui consultar os dados climáticos de hoje agora. Por favor, tente em alguns minutos.";
+        return await updateSessionAndRespond({
+          res, runId, conversationId, userText,
+          aiResponseText: respostaIA, sessionData, regiaoId: regiao.id
+        });
       }
     }
-
     // ===================== ROTA =====================
-    if (tipoIntencao === "rota") {
+    else if (tipoIntencao === "rota") {
       const textoRota = await montarTextoDeRota({ slugDaRegiao, pergunta: userText });
-      return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: textoRota, sessionData, regiaoId: regiao.id });
+      return await updateSessionAndRespond({
+        res, runId, conversationId, userText,
+        aiResponseText: textoRota, sessionData, regiaoId: regiao.id
+      });
     }
-
     // ===================== GERAL =====================
-    console.log(`[RUN ${runId}] [GERAL] Intenção não reconhecida como parceiro/clima/rota. Usando fallback geral.`);
-    const respostaGeral = await gerarRespostaGeral({
-      pergunta: userText, slugDaRegiao, conversaId: conversationId,
-    });
-    return await updateSessionAndRespond({ res, runId, conversationId, userText, aiResponseText: respostaGeral, sessionData, regiaoId: regiao.id });
+    else {
+      console.log(`[RUN ${runId}] [GERAL] Fallback geral.`);
+      const respostaGeral = await gerarRespostaGeral({
+        pergunta: userText, slugDaRegiao, conversaId: conversationId,
+      });
+      return await updateSessionAndRespond({
+        res, runId, conversationId, userText,
+        aiResponseText: respostaGeral, sessionData, regiaoId: regiao.id
+      });
+    }
 
   } catch (erro) {
     console.error(`[RUN ${runId}] ERRO FATAL NA ROTA /api/chat/:slugDaRegiao:`, erro);
@@ -843,6 +970,7 @@ Responda interpretando os DADOS para responder à Pergunta. Seja direto. Se pedi
     });
   }
 });
+
 
 
 // ---- ROTA AVISOS PÚBLICOS ----
