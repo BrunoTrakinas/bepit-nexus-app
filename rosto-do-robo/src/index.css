@@ -1,0 +1,9 @@
+/* src/index.css — Tailwind v4 */
+@import "tailwindcss";
+
+/* MUITO IMPORTANTE no v4:
+   Diz ao Tailwind: “quando <html> tiver class='dark', ative as classes 'dark:' ” */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Seus estilos globais opcionais (pode deixar vazio se quiser) */
+/* body { } */
