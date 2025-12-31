@@ -91,172 +91,6 @@ function normalizarTexto(texto) {
     .trim();
 }
 
-async function obterClimaLatest({ cidadeId, tipoDado = null }) {
-  try {
-    let q = supabase
-      .from("vw_dados_climaticos_latest")
-      .select("cidade_id, cidade_nome, tipo_dado, ts, dados, fonte, tipo, payload, updated_at, created_at")
-      .eq("cidade_id", cidadeId)
-      .order("ts", { ascending: false })
-      .limit(20);
-
-    if (tipoDado) q = q.eq("tipo_dado", tipoDado);
-
-    const { data, error } = await q;
-    if (error) return null;
-
-    // Se veio lista, pegamos o primeiro (mais recente)
-    const row = Array.isArray(data) ? data[0] : data;
-    if (!row) return null;
-
-    // “dados” é o principal; “payload” pode existir também
-    const dados = row.dados || row.payload || {};
-    return {
-      cidade_id: row.cidade_id,
-      cidade_nome: row.cidade_nome,
-      tipo_dado: row.tipo_dado,
-      ts: row.ts || row.updated_at || row.created_at,
-      fonte: row.fonte || null,
-      dados
-    };
-  } catch {
-    return null;
-  }
-}
-
-// ============================ ZONAS / AUTORIDADE ============================
-
-// Serviços privados (monetizáveis) => BD obrigatório (não pode inventar)
-const CATEGORIAS_PRIVADAS = [
-  "restaurante", "pizzaria", "hamburguer", "hambúrguer", "churrasco", "picanha",
-  "bar", "barzinho", "pub", "cervejaria",
-  "show", "shows", "musica ao vivo", "música ao vivo", "balada", "boate",
-  "passeio", "passeios", "barco", "barco-táxi", "barco taxi", "escuna", "lancha", "mergulho", "trilha guiada",
-  "transfer", "táxi", "taxi", "uber", "aluguel", "buggy", "quadriciclo",
-  "hospedagem", "hotel", "pousada", "airbnb", "hostel",
-  "lavanderia"
-];
-
-// Tópicos públicos/factuais => IA pode responder, MAS sem inventar promo e sem “chutar números”
-const TOPICOS_PUBLICOS = [
-  "historia", "história", "curiosidade", "cultura",
-  "como chegar", "rota", "distancia", "distância", "mapa", "como ir",
-  "clima", "tempo", "chuva", "vento", "previsao", "previsão", "temperatura", "onda", "mar",
-  "emergencia", "emergência", "hospital", "upa", "pronto socorro", "delegacia",
-  "prefeitura", "rodoviaria", "rodoviária", "aeroporto", "shopping"
-];
-
-const KEYWORDS_PROMO = ["desconto", "cupom", "%", "grátis", "gratis", "brinde", "promo", "promoção", "promocao", "fale que foi indicado", "indicado pelo bepit"];
-
-function perguntaEhSobreClima(texto) {
-  const t = normalizarTexto(texto);
-  return ["clima","tempo","chuva","vento","temperatura","mar","onda","agua","água"].some(k => t.includes(k));
-}
-
-function textoTemAlgumTermo(textoNormalizado, lista) {
-  return lista.some((t) => textoNormalizado.includes(normalizarTexto(t)));
-}
-
-function isTopicoPublico(textoDoUsuario) {
-  const t = normalizarTexto(textoDoUsuario);
-  return textoTemAlgumTermo(t, TOPICOS_PUBLICOS);
-}
-
-function isServicoPrivado(textoDoUsuario, entidades) {
-  const t = normalizarTexto(textoDoUsuario);
-  const cat = normalizarTexto(entidades?.category || "");
-  if (cat && textoTemAlgumTermo(cat, CATEGORIAS_PRIVADAS)) return true;
-  return textoTemAlgumTermo(t, CATEGORIAS_PRIVADAS);
-}
-function limparNomesForaDoBD(texto, parceirosSugeridos) {
-  const nomesPermitidos = new Set(
-    (Array.isArray(parceirosSugeridos) ? parceirosSugeridos : [])
-      .map(p => normalizarTexto(p?.nome || ""))
-      .filter(Boolean)
-  );
-
-  // Se não tem parceiros, não pode citar estabelecimentos como “indicação”
-  if (nomesPermitidos.size === 0) return texto;
-
-  // Heurística simples: remove linhas que citem nomes muito específicos que não estejam na lista.
-  // (Não é perfeito, mas reduz MUITO risco.)
-  const linhas = String(texto || "").split("\n");
-  const filtradas = linhas.filter(l => {
-    const ln = normalizarTexto(l);
-    // se a linha menciona "restaurante|bar|pousada|hotel|café" e traz um nome, mas nenhum nome permitido aparece, remove.
-    const falaDeLugar = ["restaurante","bar","pousada","hotel","cafe","cafeteria","pizzaria"].some(k => ln.includes(k));
-    if (!falaDeLugar) return true;
-    const mencionaPermitido = Array.from(nomesPermitidos).some(n => n && ln.includes(n));
-    return mencionaPermitido;
-  });
-
-  const out = filtradas.join("\n").trim();
-  return out || "Eu só posso indicar parceiros cadastrados. Me diga a cidade e o tipo de lugar, que eu busco na lista oficial.";
-}
-
-// Resolve cidade por matching determinístico na lista de cidades da região
-function resolverCidadeMencionada(textoDoUsuario, entidades, cidadesAtivas) {
-  const cidadeTexto = (entidades?.city || "").trim();
-  const tentativa = cidadeTexto || textoDoUsuario;
-
-  const t = normalizarTexto(tentativa);
-  const achada = (cidadesAtivas || []).find(
-    (c) => t.includes(normalizarTexto(c.nome)) || t.includes(normalizarTexto(c.slug))
-  );
-  return achada || null;
-}
-
-function listarCidadesVizinhas(cidadeBase, cidadesAtivas, limite = 3) {
-  try {
-    if (!cidadeBase || typeof cidadeBase.lat !== "number" || typeof cidadeBase.lng !== "number") return [];
-    const base = { lat: Number(cidadeBase.lat), lng: Number(cidadeBase.lng) };
-
-    const outras = (cidadesAtivas || [])
-      .filter((c) => c.id !== cidadeBase.id && typeof c.lat === "number" && typeof c.lng === "number")
-      .map((c) => ({
-        ...c,
-        km: calcularDistanciaHaversineEmKm(base, { lat: Number(c.lat), lng: Number(c.lng) })
-      }))
-      .sort((a, b) => a.km - b.km);
-
-    return outras.slice(0, limite);
-  } catch {
-    return [];
-  }
-}
-
-// Anti-alucinação comercial
-function respostaTemPromocaoInventada(texto, promocoesFornecidas) {
-  const t = String(texto || "").toLowerCase();
-  const citaPromo = KEYWORDS_PROMO.some((k) => t.includes(k));
-  if (!citaPromo) return false;
-  return !(Array.isArray(promocoesFornecidas) && promocoesFornecidas.length > 0);
-}
-
-function removerTrechosDePromocao(texto) {
-  const linhas = String(texto || "").split("\n");
-  const filtradas = linhas.filter((l) => {
-    const t = l.toLowerCase();
-    return !KEYWORDS_PROMO.some((k) => t.includes(k));
-  });
-  return filtradas.join("\n").trim() || "Certo — me diga a cidade e o tipo de lugar/serviço que você quer.";
-}
-
-function respostaSemParceiro({ entidades, cidade, cidadesAtivas, regiaoNome }) {
-  const cat = entidades?.category ? String(entidades.category) : "esse tipo de serviço";
-  const nomeCidade = cidade?.nome || entidades?.city || "essa cidade";
-  const vizinhas = cidade ? listarCidadesVizinhas(cidade, cidadesAtivas, 3) : [];
-
-  const sugestaoVizinhas = vizinhas.length
-    ? `Se topar, posso procurar em cidades bem próximas: ${vizinhas.map((v) => v.nome).join(", ")}.`
-    : `Se você me disser a cidade exata, eu tento buscar em cidades próximas também.`;
-
-  return [
-    `No momento eu **não tenho parceiros cadastrados** para **${cat}** em **${nomeCidade}** (${regiaoNome || "sua região"}).`,
-    sugestaoVizinhas
-  ].join("\n");
-}
-
 function converterGrausParaRadianos(valorEmGraus) { return (valorEmGraus * Math.PI) / 180; }
 
 function calcularDistanciaHaversineEmKm(coordenadaA, coordenadaB) {
@@ -491,18 +325,10 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
   const historicoTexto = historicoParaTextoSimples(historicoContents);
   const contextoParceiros = JSON.stringify(parceiros ?? [], null, 2);
 
-  // (Compatível agora): promoções ainda não existem como tabela no teu schema atual.
-  // Se você já criar partner_promotions depois, a gente liga aqui.
-  const promocoes = []; // por enquanto vazio
-
   const prompt = [
     "Você é o BEPIT, um concierge especialista.",
-    "REGRAS CRÍTICAS (obrigatórias):",
-    "1) Você só pode indicar estabelecimentos/serviços que estão listados em [Contexto de Parceiros].",
-    "2) Você NUNCA pode inventar descontos, cupons, brindes, promoções ou benefícios.",
-    "   Nunca diga 'fale que foi indicado pelo BEPIT' ou qualquer porcentagem.",
-    "3) Se o pedido for ambíguo (cidade, tipo, horário, orçamento, crianças, romântico etc.), faça 1-2 perguntas curtas de esclarecimento.",
-    "4) Não misture cidades. Se sugerir outra cidade, deixe claro que é próxima e pergunte se o usuário topa.",
+    "Responda à pergunta do usuário de forma útil, baseando-se EXCLUSIVAMENTE nas informações dos parceiros fornecidas em [Contexto].",
+    "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
     `[Contexto de Parceiros]: ${contextoParceiros}`,
     `[Histórico da Conversa]:\n${historicoTexto}`,
@@ -512,30 +338,17 @@ async function gerarRespostaComParceiros(pergunta, historicoContents, parceiros,
 
   const modelo = await obterModeloGemini();
   const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-
-  let texto = (resp?.response?.text() || "").trim();
-
-  // filtro final anti-promo inventada
-  if (respostaTemPromocaoInventada(texto, promocoes)) {
-    texto = removerTrechosDePromocao(texto);
-  }
-
-  return texto;
+  return (resp?.response?.text() || "").trim();
 }
-
 
 async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
   const historicoTexto = historicoParaTextoSimples(historicoContents);
-  const nomeRegiao = regiao?.nome || "sua região";
+  const nomeRegiao = regiao?.nome || "Região dos Lagos";
 
   const prompt = [
     `Você é o BEPIT, um concierge amigável e conhecedor da região de ${nomeRegiao}.`,
-    "Você pode responder perguntas públicas e informativas (história, como chegar, orientações gerais, clima/vento) de forma útil.",
-    "REGRAS CRÍTICAS:",
-    "1) Você NÃO pode inventar descontos, cupons, promoções ou benefícios. Nunca cite porcentagens.",
-    "2) Você NÃO pode afirmar parceria com estabelecimentos que não foram fornecidos pelo sistema.",
-    "3) Se o usuário pedir indicação de serviços privados (restaurante/passeio/bar/transfer etc.) e estiver genérico, peça cidade e preferência.",
-    "4) Se não tiver dado objetivo (ex: praia cheia agora), não chute: explique a limitação e peça mais contexto.",
+    "Responda à pergunta do usuário de forma prestativa, usando seu conhecimento geral.",
+    "Se uma pergunta for ambígua ou completamente incompreensível, peça esclarecimentos de forma amigável antes de tentar adivinhar. Por exemplo: \"Não entendi muito bem o que você quis dizer com 'x', poderia me explicar de outra forma?\"",
     "",
     `[Histórico da Conversa]:\n${historicoTexto}`,
     `[Pergunta do Usuário]: "${pergunta}"`
@@ -543,16 +356,8 @@ async function gerarRespostaGeral(pergunta, historicoContents, regiao) {
 
   const modelo = await obterModeloGemini();
   const resp = await modelo.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-
-  let texto = (resp?.response?.text() || "").trim();
-
-  if (respostaTemPromocaoInventada(texto, [])) {
-    texto = removerTrechosDePromocao(texto);
-  }
-
-  return texto;
+  return (resp?.response?.text() || "").trim();
 }
-
 
 function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
   try {
@@ -598,86 +403,10 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
 async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa }) {
   const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
 
-  const topicoPublico = isTopicoPublico(textoDoUsuario);
-  const servicoPrivado = isServicoPrivado(textoDoUsuario, entidades);
-
-  // resolve cidade com base no texto + entidades + lista de cidades
-  const cidadeResolvida = resolverCidadeMencionada(textoDoUsuario, entidades, cidadesAtivas);
-  
-  // 🌦️ CLIMA: sempre por dado do Supabase (sem IA chutar)
-if (perguntaEhSobreClima(textoDoUsuario)) {
-  if (!cidadeResolvida) {
-    return {
-      respostaFinal: "Você quer saber o clima de qual cidade? (ex: Cabo Frio, Arraial, Búzios…) ",
-      parceirosSugeridos: []
-    };
-  }
-
-  // Você pode usar tipo_dado para separar: "AR", "AGUA", "VENTO", etc.
-  // Como seu schema usa tipo_dado text (e tem UNIQUE), aqui dá pra manter null e pegar o último geral.
-  const clima = await obterClimaLatest({ cidadeId: cidadeResolvida.id, tipoDado: null });
-
-  if (!clima) {
-    return {
-      respostaFinal: `Ainda não tenho um registro atualizado de clima para ${cidadeResolvida.nome} agora. Tenta de novo em alguns minutos ou me diz se quer AR, VENTO ou ÁGUA do mar.`,
-      parceirosSugeridos: []
-    };
-  }
-
-  // Segurança: nunca inventa campo. Só mostra o que existir no JSON.
-  const d = clima.dados || {};
-  const linhas = [];
-  linhas.push(`Clima (dados reais) — ${cidadeResolvida.nome}`);
-  if (clima.ts) linhas.push(`Atualizado: ${new Date(clima.ts).toLocaleString()}`);
-
-  // tenta mapear alguns campos comuns, mas SEM assumir
-  const pick = (obj, keys) => {
-    for (const k of keys) if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
-    return null;
-  };
-
-  const temp = pick(d, ["temp", "temperature", "temperatura", "air_temp", "temp_c"]);
-  const vento = pick(d, ["wind", "wind_speed", "vento", "vento_kmh", "wind_kmh"]);
-  const agua = pick(d, ["water_temp", "sea_temp", "temperatura_agua", "temp_agua"]);
-
-  if (temp !== null) linhas.push(`🌡️ Temperatura: ${temp}`);
-  if (vento !== null) linhas.push(`💨 Vento: ${vento}`);
-  if (agua !== null) linhas.push(`🌊 Água do mar: ${agua}`);
-
-  if (linhas.length <= 2) {
-    return {
-      respostaFinal: `Tenho um registro para ${cidadeResolvida.nome}, mas ele veio sem campos de temperatura/vento/água no JSON. Me diga se seu CRON salva como AR/VENTO/AGUA (tipo_dado), que eu ajusto o filtro.`,
-      parceirosSugeridos: []
-    };
-  }
-
-  // IA só “explica” o dado (sem inventar)
-  const respostaFinal = await gerarRespostaGeral(
-    `Explique de forma amigável e curta, sem inventar nada além do que está aqui:\n${linhas.join("\n")}`,
-    historicoGemini,
-    regiao
-  );
-
-  return { respostaFinal, parceirosSugeridos: [] };
-}
-
-
-  // Se for público e NÃO for privado, segue geral
-  if (topicoPublico && !servicoPrivado) {
-    const respostaFinal = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
-    return { respostaFinal, parceirosSugeridos: [] };
-  }
-
-  // força city para a resolvida (para não “buscar tudo” quando o Gemini erra cidade)
-  const entidadesParaBusca = {
-    ...entidades,
-    city: cidadeResolvida?.nome || entidades?.city || null
-  };
-
   const resultadoBusca = await ferramentaBuscarParceirosOuDicas({
     regiao,
     cidadesAtivas,
-    argumentosDaFerramenta: entidadesParaBusca
+    argumentosDaFerramenta: entidades
   });
 
   if (resultadoBusca?.ok && (resultadoBusca?.count || 0) > 0) {
@@ -692,24 +421,11 @@ if (perguntaEhSobreClima(textoDoUsuario)) {
     } catch { /* segue */ }
 
     return { respostaFinal, parceirosSugeridos };
-  }
-
-  // Se é serviço privado e NÃO achou parceiro: NÃO deixa a IA “inventar” em resposta geral
-  if (servicoPrivado) {
-    const respostaFinal = respostaSemParceiro({
-      entidades,
-      cidade: cidadeResolvida,
-      cidadesAtivas,
-      regiaoNome: regiao?.nome
-    });
+  } else {
+    const respostaFinal = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
     return { respostaFinal, parceirosSugeridos: [] };
   }
-
-  // Se não é claramente privado, pode responder geral
-  const respostaFinal = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
-  return { respostaFinal, parceirosSugeridos: [] };
 }
-
 
 // ============================================================================
 // ROTA DE CHAT (ORQUESTRADOR LÓGICO v3.2)
@@ -846,26 +562,62 @@ aplicacaoExpress.post("/api/chat/:slugDaRegiao", async (requisicao, resposta) =>
       });
     }
 
-    // ✅ À prova de erro: não depende do "intent" do Gemini.
-// A única exceção continua sendo: se o usuário escolher um parceiro da lista, tratamos acima (já existe no teu código).
+    const intent = await analisarIntencaoDoUsuario(textoDoUsuario);
+    let respostaFinal = "";
+    let parceirosSugeridos = [];
 
-let respostaFinal = "";
-let parceirosSugeridos = [];
+    switch (intent) {
+      case "busca_parceiro": {
+        const resultado = await lidarComNovaBusca({
+          textoDoUsuario,
+          historicoGemini,
+          regiao,
+          cidadesAtivas,
+          idDaConversa
+        });
+        respostaFinal = resultado.respostaFinal;
+        parceirosSugeridos = resultado.parceirosSugeridos;
+        break;
+      }
 
-const resultado = await lidarComNovaBusca({
-  textoDoUsuario,
-  historicoGemini,
-  regiao,
-  cidadesAtivas,
-  idDaConversa
-});
+      case "follow_up_parceiro": {
+        const parceiroEmFoco = conversaAtual?.parceiro_em_foco || null;
+        if (parceiroEmFoco) {
+          respostaFinal = await gerarRespostaComParceiros(textoDoUsuario, historicoGemini, [parceiroEmFoco], regiao?.nome);
+          parceirosSugeridos = [parceiroEmFoco];
+        } else {
+          const resultado = await lidarComNovaBusca({
+            textoDoUsuario,
+            historicoGemini,
+            regiao,
+            cidadesAtivas,
+            idDaConversa
+          });
+          respostaFinal = resultado.respostaFinal;
+          parceirosSugeridos = resultado.parceirosSugeridos;
+        }
+        break;
+      }
 
-respostaFinal = resultado.respostaFinal;
-parceirosSugeridos = resultado.parceirosSugeridos;
+      case "pergunta_geral":
+      case "mudanca_contexto": {
+        respostaFinal = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
+        try {
+          await supabase.from("conversas").update({ parceiro_em_foco: null }).eq("id", idDaConversa);
+        } catch { /* segue */ }
+        break;
+      }
 
-// Mantém um "intent" apenas informativo (não usado para decidir fluxo)
-const intent = "orquestrado";
+      case "small_talk": {
+        respostaFinal = "Olá! Sou o BEPIT, seu concierge na Região dos Lagos. O que você gostaria de fazer hoje?";
+        break;
+      }
 
+      default: {
+        respostaFinal = "Não entendi muito bem. Você poderia reformular sua pergunta?";
+        break;
+      }
+    }
 
     if (!respostaFinal) {
       respostaFinal = "Posso ajudar com roteiros, transporte, passeios, praias e onde comer. O que você gostaria de saber?";
