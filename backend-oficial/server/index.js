@@ -91,6 +91,19 @@ function normalizarTexto(texto) {
     .trim();
 }
 
+// ✅ DETECTOR DE TÓPICO CLIMÁTICO
+function ehTopicoClimatico(texto) {
+  const t = normalizarTexto(texto);
+  return [
+    "clima", "tempo", "previsao", "previsão",
+    "vento", "rajada",
+    "temperatura", "frio", "calor",
+    "agua", "água", "mar", "ondas",
+    "praia", "surf"
+  ].some(k => t.includes(normalizarTexto(k)));
+}
+
+
 async function obterClimaLatest({ cidadeId, tipoDado = null }) {
   try {
     let q = supabase
@@ -659,12 +672,15 @@ if (perguntaEhSobreClima(textoDoUsuario)) {
   // Como seu schema usa tipo_dado text (e tem UNIQUE), aqui dá pra manter null e pegar o último geral.
   const clima = await obterClimaLatest({ cidadeId: cidadeResolvida.id, tipoDado: null });
 
-  if (!clima) {
-    return {
-      respostaFinal: `Ainda não tenho um registro atualizado de clima para ${cidadeResolvida.nome} agora. Tenta de novo em alguns minutos ou me diz se quer AR, VENTO ou ÁGUA do mar.`,
-      parceirosSugeridos: []
-    };
-  }
+  const topicoClimatico = ehTopicoClimatico(textoDoUsuario);
+
+if (topicoClimatico && !clima) {
+  return {
+    respostaFinal: `Ainda não tenho um registro atualizado de clima para ${cidadeResolvida.nome} agora. Tenta de novo em alguns minutos ou me diz se quer AR, VENTO ou ÁGUA do mar.`,
+    parceirosSugeridos: []
+  };
+}
+
 
   // Segurança: nunca inventa campo. Só mostra o que existir no JSON.
   const d = clima.dados || {};
