@@ -367,7 +367,17 @@ async function ferramentaBuscarParceirosOuDicas({ regiao, cidadesAtivas, argumen
       const nomeNormalizado = normalizarTexto(parc.nome);
       const categoriaNormalizada = normalizarTexto(parc.categoria || "");
       const listaDeTags = Array.isArray(parc.tags) ? parc.tags.map((x) => normalizarTexto(String(x))) : [];
-      return termosNormalizados.some((termo) => nomeNormalizado.includes(termo) || categoriaNormalizada.includes(termo) || listaDeTags.includes(termo));
+      const descNormalizada = normalizarTexto(parc.descricao || "");
+      const beneficioNormalizado = normalizarTexto(parc.beneficio_bepit || "");
+
+return termosNormalizados.some((termo) =>
+  nomeNormalizado.includes(termo) ||
+  categoriaNormalizada.includes(termo) ||
+  descNormalizada.includes(termo) ||
+  beneficioNormalizado.includes(termo) ||
+  listaDeTags.includes(termo)
+);
+
     });
   }
 
@@ -594,9 +604,41 @@ function encontrarParceiroNaLista(textoDoUsuario, listaDeParceiros) {
     return null;
   }
 }
+function detectarConsultaDeCardapio(texto) {
+  const t = normalizarTexto(texto);
+  return ["cardapio","cardápio","prato","tem ","serve ","opcao","opção","no menu","menu"].some(k => t.includes(normalizarTexto(k)));
+}
+
+function normalizarEntidadesDeComida(entidades, textoDoUsuario) {
+  const t = normalizarTexto(textoDoUsuario);
+
+  // lista de pratos/itens que NÃO devem virar "category"
+  const itensDeCardapio = ["picanha", "hamburguer", "hambúrguer", "pizza", "sushi", "rodizio", "rodízio", "churrasco"];
+
+  const cat = normalizarTexto(entidades?.category || "");
+  const ehItem = itensDeCardapio.some(x => cat === normalizarTexto(x));
+
+  // Se o usuário falou de cardápio/prato e a "category" veio como item → converte
+  if (detectarConsultaDeCardapio(textoDoUsuario) || ehItem) {
+    const termos = Array.isArray(entidades?.terms) ? entidades.terms : [];
+    const novosTermos = [...termos];
+
+    // coloca a category original como termo (ex: picanha)
+    if (entidades?.category) novosTermos.push(entidades.category);
+
+    return {
+      ...entidades,
+      category: "restaurante",
+      terms: Array.from(new Set(novosTermos.map(s => String(s).trim()).filter(Boolean)))
+    };
+  }
+
+  return entidades;
+}
 
 async function lidarComNovaBusca({ textoDoUsuario, historicoGemini, regiao, cidadesAtivas, idDaConversa }) {
-  const entidades = await extrairEntidadesDaBusca(textoDoUsuario);
+  const entidadesBrutas = await extrairEntidadesDaBusca(textoDoUsuario);
+  const entidades = normalizarEntidadesDeComida(entidadesBrutas, textoDoUsuario);
 
   const topicoPublico = isTopicoPublico(textoDoUsuario);
   const servicoPrivado = isServicoPrivado(textoDoUsuario, entidades);
@@ -667,7 +709,13 @@ if (perguntaEhSobreClima(textoDoUsuario)) {
     const respostaFinal = await gerarRespostaGeral(textoDoUsuario, historicoGemini, regiao);
     return { respostaFinal, parceirosSugeridos: [] };
   }
-
+  // ✅ PATCH 2 — se for serviço privado e não tem cidade, pergunta antes de buscar
+if (servicoPrivado && !cidadeResolvida && !(entidades?.city || "").trim()) {
+  return {
+    respostaFinal: "Beleza — em qual cidade da Região dos Lagos você quer? (Cabo Frio, Arraial, Búzios, São Pedro…)",
+    parceirosSugeridos: []
+  };
+}
   // força city para a resolvida (para não “buscar tudo” quando o Gemini erra cidade)
   const entidadesParaBusca = {
     ...entidades,
